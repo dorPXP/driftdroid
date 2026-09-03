@@ -77,7 +77,11 @@ target_compile_definitions(mkw_runtime_common PRIVATE
 target_link_libraries(mkw_runtime_common PRIVATE
     aurora::gx aurora::pad aurora::si aurora::vi aurora::mtx)
 target_link_libraries(mkw_runtime_common PRIVATE mkw::pugixml mkw::toml11 mkw::cryptopp)
-target_link_libraries(mkw_runtime_common PRIVATE shell32 windowsapp)
+if(WIN32)
+    target_link_libraries(mkw_runtime_common PRIVATE shell32 windowsapp)
+else()
+    target_link_libraries(mkw_runtime_common PRIVATE mkw::libco)
+endif()
 if(MKW_CPPWINRT_INCLUDE_DIR)
     if(NOT EXISTS "${MKW_CPPWINRT_INCLUDE_DIR}/winrt/base.h")
         message(FATAL_ERROR
@@ -204,26 +208,50 @@ function(mkw_configure_product target)
             $<TARGET_FILE:sqlite3> $<TARGET_FILE_DIR:${target}>)
     endif()
 
-    target_link_libraries(${target} PRIVATE
-        dbghelp user32 winmm ws2_32 iphlpapi secur32 crypt32 windowsapp)
+    if(WIN32)
+        target_link_libraries(${target} PRIVATE
+            dbghelp user32 winmm ws2_32 iphlpapi secur32 crypt32 windowsapp)
 
-    set_target_properties(${target} PROPERTIES WIN32_EXECUTABLE TRUE)
-    foreach(runtime_dll libc++.dll libunwind.dll)
-        execute_process(
-            COMMAND "${CMAKE_CXX_COMPILER}" "--print-file-name=${runtime_dll}"
-            OUTPUT_VARIABLE runtime_dll_path
-            OUTPUT_STRIP_TRAILING_WHITESPACE)
-        if(NOT EXISTS "${runtime_dll_path}")
-            get_filename_component(mkw_compiler_bin "${CMAKE_CXX_COMPILER}" DIRECTORY)
-            set(runtime_dll_path "${mkw_compiler_bin}/${runtime_dll}")
-        endif()
-        if(NOT EXISTS "${runtime_dll_path}")
-            message(FATAL_ERROR "llvm-mingw runtime DLL not found: ${runtime_dll}")
-        endif()
-        add_custom_command(TARGET ${target} POST_BUILD
-            COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                "${runtime_dll_path}" $<TARGET_FILE_DIR:${target}>)
-    endforeach()
+        set_target_properties(${target} PROPERTIES WIN32_EXECUTABLE TRUE)
+    else()
+        # mkw_runtime_common is an OBJECT library: WiiCompiled/RetroRewind only pull in its .o
+        # files via $<TARGET_OBJECTS:>, which does not propagate mkw_runtime_common's own
+        # target_link_libraries (object libraries don't carry usage requirements to a consumer
+        # that isn't itself linked against as a target). fiber_manager.cpp's co_* calls live in
+        # those objects, so the actual executable link needs mkw::libco directly, same as it
+        # needs it independently of that first `if(WIN32)` branch above.
+        target_link_libraries(${target} PRIVATE mkw::libco)
+    endif()
+    if(MKW_TARGET_ANDROID)
+        # log: __android_log_* (runtime_log's Android sink - not yet wired, P3/P5 follow-up).
+        # android: NDK glue (ANativeWindow, asset manager, etc - aurora's SDL3/window path uses
+        # this transitively too, linking it directly here is cheap and avoids relying on a
+        # transitive dependency from a static lib always propagating it correctly).
+        # EGL/GLESv2: the OpenGL ES fallback path (DAWN_ENABLE_OPENGLES, set above in the parent
+        # CMakeLists.txt) needs these at link time even when Vulkan is the backend actually
+        # selected at runtime, since Dawn's OpenGL ES backend is compiled in either way.
+        # vulkan: the NDK's libvulkan.so loader stub - verified present for every API level this
+        # NDK ships (checked API 24 through 35 in the r27c sysroot).
+        target_link_libraries(${target} PRIVATE log android EGL GLESv2 vulkan)
+    endif()
+    if(WIN32)
+        foreach(runtime_dll libc++.dll libunwind.dll)
+            execute_process(
+                COMMAND "${CMAKE_CXX_COMPILER}" "--print-file-name=${runtime_dll}"
+                OUTPUT_VARIABLE runtime_dll_path
+                OUTPUT_STRIP_TRAILING_WHITESPACE)
+            if(NOT EXISTS "${runtime_dll_path}")
+                get_filename_component(mkw_compiler_bin "${CMAKE_CXX_COMPILER}" DIRECTORY)
+                set(runtime_dll_path "${mkw_compiler_bin}/${runtime_dll}")
+            endif()
+            if(NOT EXISTS "${runtime_dll_path}")
+                message(FATAL_ERROR "llvm-mingw runtime DLL not found: ${runtime_dll}")
+            endif()
+            add_custom_command(TARGET ${target} POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    "${runtime_dll_path}" $<TARGET_FILE_DIR:${target}>)
+        endforeach()
+    endif()
 
     set(MKW_WII_BOOTSTRAP_SOURCE_DIR "${MKW_RUNTIME_SOURCE_DIR}/assets/wii")
     if(NOT EXISTS "${MKW_WII_BOOTSTRAP_SOURCE_DIR}/shared2/wc24")
@@ -257,7 +285,21 @@ function(mkw_configure_product target)
         "$<TARGET_FILE_DIR:${target}>/initial_pipeline_cache.db")
 endfunction()
 
-add_executable(WiiCompiled "${MKW_BASE_PRODUCT_SOURCE}" ${MKW_BASE_REGISTRATION_SOURCES})
+# On every desktop platform each product is a standalone executable. On Android there is no
+# process to exec - the product becomes a SHARED library (libwii.so / libretro_rewind.so) loaded
+# into the host Kotlin app's process via JNI, with RuntimeMain (runtime/src/main.cpp) as the
+# entry point the JNI bridge calls instead of a real argv-driven main(). Not yet wired up: the
+# actual JNI bridge that calls RuntimeMain is P5 work (android/app/src/main/cpp/jni/bridge.cpp,
+# not written yet) - this only makes the library itself buildable as a .so.
+function(mkw_add_product_target target)
+    if(MKW_TARGET_ANDROID)
+        add_library(${target} SHARED ${ARGN})
+    else()
+        add_executable(${target} ${ARGN})
+    endif()
+endfunction()
+
+mkw_add_product_target(WiiCompiled "${MKW_BASE_PRODUCT_SOURCE}" ${MKW_BASE_REGISTRATION_SOURCES})
 mkw_configure_product(WiiCompiled)
 target_precompile_headers(WiiCompiled PRIVATE
     "${MKW_RUNTIME_SOURCE_DIR}/include/mkw_pch.h")
@@ -266,7 +308,7 @@ if(TARGET mkw_base_sensitive)
 endif()
 
 if(MKW_HAVE_RETRO_REWIND)
-    add_executable(RetroRewind "${MKW_RETRO_REWIND_PRODUCT_SOURCE}" ${MKW_RETRO_REGISTRATION_SOURCES})
+    mkw_add_product_target(RetroRewind "${MKW_RETRO_REWIND_PRODUCT_SOURCE}" ${MKW_RETRO_REGISTRATION_SOURCES})
     mkw_configure_product(RetroRewind)
     target_precompile_headers(RetroRewind REUSE_FROM WiiCompiled)
     if(TARGET mkw_retro_sensitive)
@@ -287,6 +329,14 @@ set(MKW_ALL_BUILD_TARGETS
     mkw_retro_rewind_functions WiiCompiled RetroRewind)
 foreach(target IN LISTS MKW_ALL_BUILD_TARGETS)
     if(TARGET ${target})
-        target_compile_options(${target} PRIVATE -march=x86-64-v3)
+        if(NOT MKW_TARGET_ANDROID)
+            # x86-64-v3 (Haswell-class: AVX2/FMA/BMI2/...) is this project's fixed baseline on
+            # Windows/Linux - see host_cpu_baseline.cpp, which turns a machine below that line
+            # into a readable error instead of an illegal-instruction crash. There is no arm64
+            # equivalent question to ask: NEON/Advanced SIMD is mandatory on every ARMv8-A chip,
+            # so Android gets no -march flag at all (the NDK's own per-ABI defaults already target
+            # a reasonable arm64-v8a baseline).
+            target_compile_options(${target} PRIVATE -march=x86-64-v3)
+        endif()
     endif()
 endforeach()
