@@ -23,6 +23,9 @@
 #endif
 #include <windows.h>
 #include <shlobj.h>
+#else
+#include <cstdlib>
+#include <unistd.h>
 #endif
 
 struct RuntimeUserConfig {
@@ -66,6 +69,28 @@ namespace RuntimeConfigFile {
 
 inline constexpr const char* kConfigFileName = "Config.toml";
 inline constexpr const char* kApplicationDirectoryName = "WiiCompiled";
+
+#if defined(__ANDROID__)
+// Android apps have no writable HOME/XDG-style environment variables and no meaningful
+// "next to the executable" directory (the runtime is a .so loaded into a Java process, not a
+// standalone executable) - the only per-app writable location the OS hands out is
+// Context.getFilesDir(), which the Kotlin side must push down through JNI before any of the
+// path functions below are called. See android/app/src/main/cpp/jni/paths.cpp (P5).
+namespace AndroidPaths {
+inline std::string& FilesDirStorage() {
+    static std::string dir;
+    return dir;
+}
+}  // namespace AndroidPaths
+
+inline void SetAndroidFilesDir(std::string path) {
+    AndroidPaths::FilesDirStorage() = std::move(path);
+}
+
+inline const std::string& AndroidFilesDir() {
+    return AndroidPaths::FilesDirStorage();
+}
+#endif
 
 // Portable layout. A directory holding kPortableMarkerFileName is a portable root; every piece of
 // runtime user state (Config.toml, NAND, Cache, Logs) lives in <root>/UserData instead of
@@ -152,8 +177,30 @@ inline std::optional<std::filesystem::path> ExecutableDirectory() {
         }
         buffer.resize(buffer.size() * 2);
     }
-#else
+#elif defined(__ANDROID__)
+    // No meaningful "next to the executable" concept for a .so loaded into a Java process, and
+    // the portable-install marker-file search below doesn't apply to Android's sandboxed
+    // per-app storage model - always nullopt (this also makes PortableRootDirectory() below
+    // short-circuit to nullopt on Android, which is the intended behavior: "portable installs"
+    // are a desktop-only concept).
     return std::nullopt;
+#else
+    // /proc/self/exe is a Linux-specific magic symlink to the running executable; readlink()
+    // does not NUL-terminate and silently truncates if the buffer is too small, so this grows
+    // the buffer until the result no longer fills it completely, the same doubling strategy as
+    // the Windows branch above uses for GetModuleFileNameW.
+    std::string buffer(256, '\0');
+    for (;;) {
+        const ssize_t length = readlink("/proc/self/exe", buffer.data(), buffer.size());
+        if (length < 0) {
+            return std::nullopt;
+        }
+        if (static_cast<size_t>(length) < buffer.size()) {
+            buffer.resize(static_cast<size_t>(length));
+            return std::filesystem::path(buffer).parent_path();
+        }
+        buffer.resize(buffer.size() * 2);
+    }
 #endif
 }
 
@@ -193,6 +240,24 @@ inline std::filesystem::path ApplicationDataDirectory() {
         const std::filesystem::path directory = std::filesystem::path(rawPath) / kApplicationDirectoryName;
         CoTaskMemFree(rawPath);
         return directory;
+    }
+#elif defined(__ANDROID__)
+    // Set once from JNI at startup via SetAndroidFilesDir() (Context.getFilesDir()). Falling
+    // through to std::filesystem::current_path() below if it was never set would silently write
+    // into whatever directory the process happened to start in (an app has no useful "current
+    // directory" to fall back to) - not fatal, but callers should ensure SetAndroidFilesDir() ran
+    // during startup before relying on this path being correct.
+    if (const std::string& filesDir = AndroidFilesDir(); !filesDir.empty()) {
+        return std::filesystem::path(filesDir) / kApplicationDirectoryName;
+    }
+#else
+    // XDG Base Directory spec equivalent of FOLDERID_LocalAppData: $XDG_DATA_HOME if set and
+    // non-empty, otherwise its default of $HOME/.local/share.
+    if (const char* xdgDataHome = std::getenv("XDG_DATA_HOME"); xdgDataHome && *xdgDataHome) {
+        return std::filesystem::path(xdgDataHome) / kApplicationDirectoryName;
+    }
+    if (const char* home = std::getenv("HOME"); home && *home) {
+        return std::filesystem::path(home) / ".local" / "share" / kApplicationDirectoryName;
     }
 #endif
     return std::filesystem::current_path() / kApplicationDirectoryName;
