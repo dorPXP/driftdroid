@@ -9,10 +9,12 @@
 #include <string>
 #include <vector>
 
+#if defined(_WIN32)
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
 #include <windows.h>
+#endif
 
 
 #include "abi_bridge.h"
@@ -25,7 +27,7 @@
 
 // Global flag to suppress SEH reporting during static constructor execution
 bool g_suppressSehReporting = false;
-thread_local jmp_buf* g_sehJumpTarget = nullptr;
+thread_local MkwJmpBuf* g_sehJumpTarget = nullptr;
 thread_local uint32_t g_sehLastExceptionCode = 0;
 thread_local uintptr_t g_sehLastExceptionAddress = 0;
 thread_local uintptr_t g_sehLastAccessedAddress = 0;
@@ -346,9 +348,9 @@ void SystemBridge::Initialize() {
         if (funcAddr == 0 || funcAddr == 0xFFFFFFFF) continue;
 
         if (TranslatedFunctionRegistry::FindByAddressPtr(funcAddr)) {
-            jmp_buf jumpBuf;
+            MkwJmpBuf jumpBuf;
             g_sehJumpTarget = &jumpBuf;
-            if (setjmp(jumpBuf) == 0) {
+            if (MKW_SETJMP(jumpBuf) == 0) {
                 cpu.gpr[1] = 0x81700000u;
                 InvokeIndirectCpu(funcAddr, &cpu);
                 dolCount++;
@@ -386,9 +388,9 @@ void SystemBridge::Initialize() {
         if (funcAddr == 0 || funcAddr == 0xFFFFFFFF) continue;
 
         if (TranslatedFunctionRegistry::FindByAddressPtr(funcAddr)) {
-            jmp_buf jumpBuf;
+            MkwJmpBuf jumpBuf;
             g_sehJumpTarget = &jumpBuf;
-            if (setjmp(jumpBuf) == 0) {
+            if (MKW_SETJMP(jumpBuf) == 0) {
                 cpu.gpr[1] = 0x81700000u;
                 InvokeIndirectCpu(funcAddr, &cpu);
                 count++;
