@@ -1,19 +1,33 @@
-// Host ISA guard. Every other product target builds with -march=x86-64-v3, so a pre-Haswell
-// Intel or pre-Excavator AMD machine would otherwise die on an illegal-instruction fault with no
-// explanation. This TU alone skips that flag (own CMake object library, excluded from unity
-// build/PCH) and runs from a priority-101 C initializer, ahead of every C++ dynamic initializer
-// and thus the first AVX2 code that could execute. Keep it free of anything that could pull in
-// vectorized code: no iostreams, no std::string, no runtime-wide headers.
+// Host ISA guard. Every other x86-64 product target builds with -march=x86-64-v3, so a
+// pre-Haswell Intel or pre-Excavator AMD machine would otherwise die on an illegal-instruction
+// fault with no explanation. This TU alone skips that flag (own CMake object library, excluded
+// from unity build/PCH) and runs from a priority-101 C initializer, ahead of every C++ dynamic
+// initializer and thus the first AVX2 code that could execute. Keep it free of anything that
+// could pull in vectorized code: no iostreams, no std::string, no runtime-wide headers.
+//
+// On arm64 there is no equivalent baseline question: NEON/Advanced SIMD is mandatory in every
+// ARMv8-A implementation (unlike AVX2, which real x86-64 chips can lack), so the whole x86 CPUID
+// feature-detection block below is skipped entirely - see MkwHostCpuBaselineInit's #else branch.
 
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 
-#include <cpuid.h>
+#if defined(_WIN32)
 #include <windows.h>
+#include <cpuid.h>
+#else
+// unistd.h (for ::write in WriteStdErrEarly) is needed on every non-Windows target, arm64
+// included; cpuid.h is x86-only - see the file comment above for why arm64 skips it.
+#include <unistd.h>
+#if !defined(__aarch64__)
+#include <cpuid.h>
+#endif
+#endif
 
 namespace {
 
+#if !defined(__aarch64__)
 void HostCpuId(unsigned leaf, unsigned subleaf, unsigned regs[4]) {
     unsigned eax = 0, ebx = 0, ecx = 0, edx = 0;
     __cpuid_count(leaf, subleaf, eax, ebx, ecx, edx);
@@ -68,6 +82,7 @@ constexpr CpuFeature kRequiredFeatures[] = {
     {"LAHF-SAHF", 0x80000001u, 0, 2, 0, false},
     {"LZCNT", 0x80000001u, 0, 2, 5, false},
 };
+#endif  // !__aarch64__
 
 // Fixed-capacity text accumulation: no allocation, no exceptions, nothing that
 // could route through code this file is trying to stay ahead of.
@@ -86,6 +101,7 @@ struct TextBuffer {
     }
 };
 
+#if !defined(__aarch64__)
 // True when the host can run this build. Otherwise `missing` holds the absent
 // feature names, comma separated.
 bool CollectMissingBaselineFeatures(TextBuffer& missing) {
@@ -132,12 +148,19 @@ bool CollectMissingBaselineFeatures(TextBuffer& missing) {
 
     return ok;
 }
+#endif  // !__aarch64__
 
 // stdio is NOT usable from a .CRT$XIC initializer - the UCRT has not stood it
 // up yet, and fprintf(stderr, ...) faults there. Verified on this toolchain:
 // WriteFile on the raw standard-error handle and MessageBoxA both work, printf
 // does not. Anything added to this reporting path has to respect that.
+//
+// The POSIX path (Linux and Android alike) runs from an __attribute__((constructor)) instead,
+// ahead of libc's own startup guarantees; ::write() on the raw fd is the same kind of
+// allocation-free, libc-init-independent primitive as WriteFile is on Windows, so the same
+// restriction is honored here.
 void WriteStdErrEarly(const char* text) {
+#if defined(_WIN32)
     const HANDLE handle = ::GetStdHandle(STD_ERROR_HANDLE);
     if (handle == nullptr || handle == INVALID_HANDLE_VALUE) {
         return;
@@ -148,8 +171,16 @@ void WriteStdErrEarly(const char* text) {
     }
     DWORD written = 0;
     ::WriteFile(handle, text, static_cast<DWORD>(length), &written, nullptr);
+#else
+    size_t length = 0;
+    while (text[length] != '\0') {
+        ++length;
+    }
+    (void)::write(STDERR_FILENO, text, length);
+#endif
 }
 
+#if !defined(__aarch64__)
 [[noreturn]] void ReportUnsupportedCpu(const char* missing) {
     TextBuffer message;
     message.Append(
@@ -168,22 +199,37 @@ void WriteStdErrEarly(const char* text) {
     WriteStdErrEarly(message.data);
     WriteStdErrEarly("\n");
 
+#if defined(_WIN32)
     ::MessageBoxA(nullptr, message.data, "WiiCompiled - Unsupported Processor",
                   MB_OK | MB_ICONERROR | MB_SETFOREGROUND | MB_TASKMODAL);
     // Leave through the OS rather than exit(): the C++ dynamic initializers
     // have not run yet, so there is no constructed program state to unwind and
     // the teardown path itself lives in AVX2 translation units.
     ::ExitProcess(1u);
+#else
+    // Same reasoning as the Windows path above: no C++ dynamic initializer has run yet, so
+    // _exit() (skips atexit/global destructors, unlike exit()) is the correct way out.
+    ::_exit(1);
+#endif
 }
+#endif  // !__aarch64__
 
 }  // namespace
 
 extern "C" int MkwHostCpuBaselineInit() {
+#if defined(__aarch64__)
+    // NEON/Advanced SIMD is mandatory on every ARMv8-A implementation - there is no "does this
+    // arm64 chip support the baseline" question the way there is on x86-64-v3, so this is a
+    // trivial pass. Logged (not silent) so the log always shows which baseline check ran.
+    WriteStdErrEarly("[runtime] arm64 baseline OK (NEON is mandatory on ARMv8-A)\n");
+    return 0;
+#else
     TextBuffer missing;
     if (!CollectMissingBaselineFeatures(missing)) {
         ReportUnsupportedCpu(missing.data);
     }
     return 0;
+#endif
 }
 
 // Priorities 0-100 are reserved for the implementation; 101 is the earliest a
