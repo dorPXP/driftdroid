@@ -73,8 +73,12 @@ FaultCounters Counters();
 void LogFaultSummary() noexcept;
 
 // Returns true when the access violation was a guest-space fault this module
-// resolved; the caller must then resume execution. `exceptionPointers` is a
-// Windows EXCEPTION_POINTERS*.
-bool HandleAccessViolation(void* exceptionPointers) noexcept;
+// resolved; the caller must then resume execution. `faultAddress` is the raw
+// host pointer the access violation trapped on (Windows: ExceptionInformation[1];
+// POSIX: siginfo_t::si_addr) and `isWrite` is whether it was a write access
+// (Windows: ExceptionInformation[0] != 0; POSIX: derived from the ucontext).
+// The platform-specific handler that calls this is expected to have already
+// done that extraction - this function only ever works with the parsed pair.
+bool HandleAccessViolation(void* faultAddress, bool isWrite) noexcept;
 
 } // namespace GuestFlat

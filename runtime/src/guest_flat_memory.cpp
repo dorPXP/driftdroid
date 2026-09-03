@@ -19,6 +19,7 @@
 #include "runtime_log.h"
 #include "system_bridge.h"
 
+#if defined(_WIN32)
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
@@ -26,28 +27,67 @@
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
+#else
+#include <cerrno>
+#include <cstring>
+#include <fcntl.h>
+#include <sys/mman.h>
+#include <unistd.h>
+#if defined(__ANDROID__)
+// Bionic's memfd_create() libc wrapper is gated __INTRODUCED_IN(30) (Android 11), but the
+// memfd_create kernel syscall itself has existed since kernel 3.17 (2014) - long before any
+// kernel version an API-28+ device could ship - so this project's minSdk 28 target reaches the
+// syscall directly instead of raising minSdk just for a libc wrapper around it. MFD_CLOEXEC
+// (a plain numeric flag, not gated by API level) comes from linux/memfd.h; SYS_memfd_create
+// comes from sys/syscall.h's per-architecture unistd.h.
+#include <linux/memfd.h>
+#include <sys/syscall.h>
+#endif
+#endif
 
 namespace GuestFlat {
 namespace {
 
+#if defined(_WIN32)
 // Placeholder / view constants. Declared here so the build does not depend on
 // the exact Windows SDK version that first shipped them.
 constexpr DWORD kMemReplacePlaceholder = 0x00004000;
 constexpr DWORD kMemReservePlaceholder = 0x00040000;
 constexpr DWORD kMemPreservePlaceholder = 0x00000002;
+#endif
 constexpr size_t kAllocationGranularity = 0x10000;  // 64 KiB
 constexpr size_t kHostPageSize = 0x1000;
 
+// Named, platform-neutral protection modes so every fault-interception call site below (the
+// MMIO window, the executable-write guard, deferred-EFB-read protection, the on-demand
+// unmapped-block commit) can stay identical text on both platforms; only ProtectRange() and
+// CommitPlaceholder() below branch on VirtualProtect vs. mprotect.
+#if defined(_WIN32)
+using ProtectionFlags = DWORD;
+constexpr ProtectionFlags kProtNone = PAGE_NOACCESS;
+constexpr ProtectionFlags kProtRead = PAGE_READONLY;
+constexpr ProtectionFlags kProtReadWrite = PAGE_READWRITE;
+#else
+using ProtectionFlags = int;
+constexpr ProtectionFlags kProtNone = PROT_NONE;
+constexpr ProtectionFlags kProtRead = PROT_READ;
+constexpr ProtectionFlags kProtReadWrite = PROT_READ | PROT_WRITE;
+#endif
+
+#if defined(_WIN32)
 using VirtualAlloc2Fn = PVOID(WINAPI*)(HANDLE, PVOID, SIZE_T, ULONG, ULONG, void*, ULONG);
 using MapViewOfFile3Fn = PVOID(WINAPI*)(HANDLE, HANDLE, PVOID, ULONG64, SIZE_T, ULONG, ULONG, void*, ULONG);
 
 VirtualAlloc2Fn g_virtualAlloc2 = nullptr;
 MapViewOfFile3Fn g_mapViewOfFile3 = nullptr;
+#endif
 
 uint8_t* g_base = nullptr;
 bool g_initialized = false;
 std::vector<RegionRequest> g_activeRegions;
+#if defined(_WIN32)
 PVOID g_vectoredHandle = nullptr;
+#endif
 
 std::mutex& StateMutex() {
     static std::mutex mutex;
@@ -70,7 +110,11 @@ struct SectionKeyHash {
 };
 
 struct Section {
+#if defined(_WIN32)
     HANDLE handle = nullptr;
+#else
+    int fd = -1;
+#endif
     uint64_t size = 0;
     uint8_t* hostView = nullptr;
 };
@@ -114,6 +158,18 @@ std::vector<GuardedRange>& DeferredRanges() {
     return ranges;
 }
 
+#if !defined(_WIN32)
+// Windows disambiguates a racing "unmapped touch" fault via VirtualQuery (did some other thread
+// already commit this 64 KiB block, and is it actually accessible enough to satisfy this access).
+// mprotect has no query counterpart, so this tracks the same fact ourselves: one bit per 64 KiB
+// block, set the first time this module ever commits it, checked-and-set under StateMutex() so
+// two threads racing on the same never-yet-committed block still report/commit exactly once.
+std::vector<uint8_t>& UnmappedCommittedBlocks() {
+    static std::vector<uint8_t> blocks(1u << 16, 0);  // 2^32 / 64 KiB
+    return blocks;
+}
+#endif
+
 std::atomic<uint32_t> g_countMmio{0};
 std::atomic<uint32_t> g_countEfb{0};
 std::atomic<uint32_t> g_countXGuard{0};
@@ -133,10 +189,38 @@ uint64_t RoundUp(uint64_t value, uint64_t alignment) {
 
 std::string LastErrorText(const char* what) {
     std::ostringstream oss;
+#if defined(_WIN32)
     oss << what << " failed (GetLastError=" << GetLastError() << ")";
+#else
+    oss << what << " failed (" << std::strerror(errno) << ")";
+#endif
     return oss.str();
 }
 
+// Protects [address, address+size) with `protection`, bridging VirtualProtect (Windows) and
+// mprotect (POSIX) so every fault-interception call site below can stay platform-neutral.
+bool ProtectRange(uint8_t* address, uint64_t size, ProtectionFlags protection) {
+#if defined(_WIN32)
+    DWORD previous = 0;
+    return VirtualProtect(address, static_cast<SIZE_T>(size), protection, &previous) != FALSE;
+#else
+    return mprotect(address, static_cast<size_t>(size), protection) == 0;
+#endif
+}
+
+#if defined(__ANDROID__)
+// See the file-level comment by the linux/memfd.h include above: this project's minSdk (28)
+// predates Bionic's memfd_create() libc wrapper (30), so this goes straight to the syscall.
+int MkwMemfdCreate(const char* name, unsigned flags) {
+    return static_cast<int>(::syscall(SYS_memfd_create, name, flags));
+}
+#elif !defined(_WIN32)
+inline int MkwMemfdCreate(const char* name, unsigned flags) {
+    return memfd_create(name, flags);
+}
+#endif
+
+#if defined(_WIN32)
 void ResolvePlacementApi() {
     if (g_virtualAlloc2 != nullptr && g_mapViewOfFile3 != nullptr) return;
     HMODULE kernelBase = GetModuleHandleW(L"kernelbase.dll");
@@ -153,9 +237,11 @@ void ResolvePlacementApi() {
             "are unavailable on this system).");
     }
 }
+#endif
 
 void EnsureReservation() {
     if (g_base != nullptr) return;
+#if defined(_WIN32)
     ResolvePlacementApi();
 
     void* requested = reinterpret_cast<void*>(kFixedFlatGuestBase);
@@ -178,25 +264,59 @@ void EnsureReservation() {
                "usual cause.";
         throw std::runtime_error(oss.str());
     }
-
     if (reserved != requested) {
         throw std::runtime_error(
             "The flat guest reservation did not land on the fixed base the translated code was "
             "compiled against.");
     }
+#else
+    void* requested = reinterpret_cast<void*>(kFixedFlatGuestBase);
+
+    // No MAP_FIXED here (and deliberately no MAP_FIXED_NOREPLACE, which needs Linux 4.17+ -
+    // this must work on kernels as old as 4.9): `requested` is only a hint. The kernel's
+    // get_unmapped_area honors a page-aligned hint when the whole range is free, so this lands
+    // on the fixed base in the normal case; if anything already occupies part of the range, the
+    // kernel silently picks a different address instead of clobbering it, which the check below
+    // catches - same "something got there first" contract as the Windows path, without needing
+    // a specific kernel version.
+    void* reserved = mmap(requested, kGuestSpaceSize + kAllocationGranularity, kProtNone,
+                          MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+    if (reserved == MAP_FAILED) {
+        std::ostringstream oss;
+        oss << "Unable to reserve the 4 GiB flat guest address space at 0x" << std::hex
+            << reinterpret_cast<uintptr_t>(requested) << std::dec
+            << " (" << std::strerror(errno)
+            << "). The translated code addresses guest memory through this fixed base, so it "
+               "cannot fall back to another one.";
+        throw std::runtime_error(oss.str());
+    }
+    if (reserved != requested) {
+        munmap(reserved, kGuestSpaceSize + kAllocationGranularity);
+        std::ostringstream oss;
+        oss << "Unable to reserve the 4 GiB flat guest address space at 0x" << std::hex
+            << reinterpret_cast<uintptr_t>(requested) << std::dec
+            << ". Something else in this process already occupies part of the 16 TiB region - "
+               "an injected library, an overlay or a debugging tool is the usual cause.";
+        throw std::runtime_error(oss.str());
+    }
+#endif
+
     g_base = static_cast<uint8_t*>(reserved);
 }
 
+#if defined(_WIN32)
 // Carves `size` bytes out of the enclosing placeholder so a view or a private
 // commit can replace it. Splitting an exact-size placeholder is a no-op that
 // reports ERROR_INVALID_PARAMETER; the caller validates the replacement.
 void SplitPlaceholder(uint8_t* address, uint64_t size) {
     VirtualFree(address, static_cast<SIZE_T>(size), MEM_RELEASE | kMemPreservePlaceholder);
 }
+#endif
 
 void MapGuestView(const Section& section, uint64_t sectionOffset, uint32_t guestBase,
                   uint64_t mappedSize) {
     uint8_t* target = g_base + guestBase;
+#if defined(_WIN32)
     SplitPlaceholder(target, mappedSize);
     void* view = g_mapViewOfFile3(section.handle, GetCurrentProcess(), target, sectionOffset,
                                   static_cast<SIZE_T>(mappedSize), kMemReplacePlaceholder,
@@ -208,16 +328,37 @@ void MapGuestView(const Section& section, uint64_t sectionOffset, uint32_t guest
             << ")";
         throw std::runtime_error(oss.str());
     }
+#else
+    // MAP_FIXED is safe (and needs no particular kernel version) here specifically because we're
+    // deliberately overwriting a sub-range of the PROT_NONE reservation this module already owns
+    // exclusively (see EnsureReservation) - unlike the initial reservation itself, there's no
+    // "something else might already be there" concern to guard against.
+    void* view = mmap(target, static_cast<size_t>(mappedSize), kProtReadWrite,
+                      MAP_SHARED | MAP_FIXED, section.fd, static_cast<off_t>(sectionOffset));
+    if (view == MAP_FAILED) {
+        std::ostringstream oss;
+        oss << "Unable to map guest region 0x" << std::hex << guestBase << " (+0x" << mappedSize
+            << ") into the flat reservation" << std::dec << " (" << std::strerror(errno) << ")";
+        throw std::runtime_error(oss.str());
+    }
+#endif
 }
 
 // Replaces a placeholder with private committed memory. Used for the MMIO
 // window (read-only zeros) and for on-demand commits of stray guest pages.
-bool CommitPlaceholder(uint8_t* address, uint64_t size, DWORD protection) {
+bool CommitPlaceholder(uint8_t* address, uint64_t size, ProtectionFlags protection) {
+#if defined(_WIN32)
     SplitPlaceholder(address, size);
     void* result = g_virtualAlloc2(GetCurrentProcess(), address, static_cast<SIZE_T>(size),
                                    MEM_RESERVE | MEM_COMMIT | kMemReplacePlaceholder, protection,
                                    nullptr, 0);
     return result != nullptr;
+#else
+    // No separate reserve-vs-commit step is needed: the anonymous PROT_NONE reservation this
+    // range came from is already demand-zero backed, so mprotect() alone both "commits" and
+    // protects it.
+    return ProtectRange(address, size, protection);
+#endif
 }
 
 // One definition of the two windows lives in memory_access.h; these are the
@@ -237,8 +378,7 @@ void ApplyExecutableProtectionLocked() {
         for (uint64_t page = first; page < last; page += kHostPageSize) {
             const uint32_t pageIndex = static_cast<uint32_t>(page >> 12);
             if (protectedPages[pageIndex] != 0) continue;
-            DWORD previous = 0;
-            if (VirtualProtect(g_base + page, kHostPageSize, PAGE_READONLY, &previous) != FALSE) {
+            if (ProtectRange(g_base + page, kHostPageSize, kProtRead)) {
                 protectedPages[pageIndex] = 1;
             }
         }
@@ -284,8 +424,16 @@ void ZeroMappedStorage() {
     }
 }
 
+#if defined(_WIN32)
 LONG CALLBACK FlatGuestVectoredHandler(EXCEPTION_POINTERS* info) {
-    if (HandleAccessViolation(info)) {
+    const auto* record = info->ExceptionRecord;
+    if (record == nullptr || record->ExceptionCode != EXCEPTION_ACCESS_VIOLATION ||
+        record->NumberParameters < 2) {
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
+    void* faultAddress = reinterpret_cast<void*>(record->ExceptionInformation[1]);
+    const bool isWrite = record->ExceptionInformation[0] != 0;
+    if (HandleAccessViolation(faultAddress, isWrite)) {
         return EXCEPTION_CONTINUE_EXECUTION;
     }
     return EXCEPTION_CONTINUE_SEARCH;
@@ -298,6 +446,7 @@ void InstallVectoredHandler() {
         throw std::runtime_error(LastErrorText("AddVectoredExceptionHandler"));
     }
 }
+#endif
 
 void ReportFatalGuestFault(const char* category, uint32_t guestAddress, bool isWrite,
                            const char* detail) {
@@ -377,9 +526,7 @@ void Initialize(const std::vector<RegionRequest>& regions) {
         for (const auto& range : DeferredRanges()) {
             const uint64_t first = static_cast<uint64_t>(range.start) & ~(kHostPageSize - 1u);
             const uint64_t last = RoundUp(range.end, kHostPageSize);
-            DWORD previous = 0;
-            VirtualProtect(g_base + first, static_cast<SIZE_T>(last - first), PAGE_READWRITE,
-                           &previous);
+            ProtectRange(g_base + first, last - first, kProtReadWrite);
         }
         DeferredRanges().clear();
         ZeroMappedStorage();
@@ -408,6 +555,7 @@ void Initialize(const std::vector<RegionRequest>& regions) {
         const uint64_t rounded = RoundUp(size, kAllocationGranularity);
         Section section;
         section.size = rounded;
+#if defined(_WIN32)
         section.handle = CreateFileMappingW(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE,
                                             static_cast<DWORD>(rounded >> 32),
                                             static_cast<DWORD>(rounded & 0xFFFFFFFFu), nullptr);
@@ -419,6 +567,25 @@ void Initialize(const std::vector<RegionRequest>& regions) {
         if (section.hostView == nullptr) {
             throw std::runtime_error(LastErrorText("MapViewOfFile for the host guest-RAM alias"));
         }
+#else
+        // The section is an anonymous shared-memory object: the SAME physical pages get mapped
+        // twice below (once here as the always-accessible host view, once per-region as the
+        // guest view whose protection the fault handler controls), the same "one backing store,
+        // two VA aliases" trick CreateFileMapping/MapViewOfFile(3) gives Windows.
+        section.fd = MkwMemfdCreate("wiicompiled-guest-ram", MFD_CLOEXEC);
+        if (section.fd < 0) {
+            throw std::runtime_error(LastErrorText("memfd_create for guest RAM"));
+        }
+        if (ftruncate(section.fd, static_cast<off_t>(rounded)) != 0) {
+            throw std::runtime_error(LastErrorText("ftruncate for guest RAM"));
+        }
+        section.hostView = static_cast<uint8_t*>(
+            mmap(nullptr, static_cast<size_t>(rounded), kProtReadWrite, MAP_SHARED, section.fd, 0));
+        if (section.hostView == MAP_FAILED) {
+            section.hostView = nullptr;
+            throw std::runtime_error(LastErrorText("mmap for the host guest-RAM alias"));
+        }
+#endif
         Sections()[key] = section;
     }
 
@@ -435,12 +602,14 @@ void Initialize(const std::vector<RegionRequest>& regions) {
 
     // MMIO stays inaccessible in both directions so the vectored handler can report missing HLE; the old
     // PAGE_READONLY read window that returned zero turned missing devices into silent hangs instead.
-    if (!CommitPlaceholder(g_base + 0xCC000000u, 0x02000000u, PAGE_NOACCESS)) {
+    if (!CommitPlaceholder(g_base + 0xCC000000u, 0x02000000u, kProtNone)) {
         throw std::runtime_error(LastErrorText("committing the no-access MMIO window"));
     }
 
     ApplyExecutableProtectionLocked();
+#if defined(_WIN32)
     InstallVectoredHandler();
+#endif
 
     // Freshly created section objects are demand-zero, so no explicit clear is
     // needed on the first mapping (that would fault in all 152 MiB at startup).
@@ -470,9 +639,7 @@ void ProtectDeferredRange(uint32_t address, size_t length) {
     std::lock_guard<std::mutex> lock(StateMutex());
     const uint64_t first = static_cast<uint64_t>(address) & ~(kHostPageSize - 1u);
     const uint64_t last = RoundUp(end, kHostPageSize);
-    DWORD previous = 0;
-    if (VirtualProtect(g_base + first, static_cast<SIZE_T>(last - first), PAGE_NOACCESS,
-                       &previous) == FALSE) {
+    if (!ProtectRange(g_base + first, last - first, kProtNone)) {
         // An unmapped destination cannot be trapped; the checked path still
         // clears the readable bias, so nothing silently reads stale bytes.
         return;
@@ -492,8 +659,7 @@ void UnprotectDeferredRange(uint32_t address, size_t length) {
     ranges.erase(it);
     const uint64_t first = static_cast<uint64_t>(address) & ~(kHostPageSize - 1u);
     const uint64_t last = RoundUp(end, kHostPageSize);
-    DWORD previous = 0;
-    VirtualProtect(g_base + first, static_cast<SIZE_T>(last - first), PAGE_READWRITE, &previous);
+    ProtectRange(g_base + first, last - first, kProtReadWrite);
 }
 
 void RegisterExecutableRange(uint32_t start, uint32_t end) {
@@ -541,21 +707,14 @@ void LogFaultSummary() noexcept {
     std::cerr.flush();
 }
 
-bool HandleAccessViolation(void* exceptionPointers) noexcept {
-    if (!g_initialized || exceptionPointers == nullptr) return false;
-    auto* info = static_cast<EXCEPTION_POINTERS*>(exceptionPointers);
-    const auto* record = info->ExceptionRecord;
-    if (record == nullptr || record->ExceptionCode != EXCEPTION_ACCESS_VIOLATION ||
-        record->NumberParameters < 2) {
-        return false;
-    }
+bool HandleAccessViolation(void* faultAddress, bool isWrite) noexcept {
+    if (!g_initialized || faultAddress == nullptr) return false;
 
-    const uintptr_t fault = static_cast<uintptr_t>(record->ExceptionInformation[1]);
+    const uintptr_t fault = reinterpret_cast<uintptr_t>(faultAddress);
     const uintptr_t base = reinterpret_cast<uintptr_t>(g_base);
     if (fault < base || fault - base >= kGuestSpaceSize) return false;
 
     const uint32_t guestAddress = static_cast<uint32_t>(fault - base);
-    const bool isWrite = record->ExceptionInformation[0] != 0;
 
     // 1) Deferred (EFB) read: materialize the pending copy and drop the trap for the whole 4 KiB page span,
     //    not just the registered range, since protection is page-granular. Leaving a range registered but
@@ -581,9 +740,7 @@ bool HandleAccessViolation(void* exceptionPointers) noexcept {
                 ranges.erase(it);
                 spanFirst = static_cast<uint64_t>(rangeStart) & ~(kHostPageSize - 1u);
                 spanLast = RoundUp(rangeEnd, kHostPageSize);
-                DWORD previous = 0;
-                VirtualProtect(g_base + spanFirst, static_cast<SIZE_T>(spanLast - spanFirst),
-                               PAGE_READWRITE, &previous);
+                ProtectRange(g_base + spanFirst, spanLast - spanFirst, kProtReadWrite);
             }
         }
         if (covered) {
@@ -618,9 +775,8 @@ bool HandleAccessViolation(void* exceptionPointers) noexcept {
                 // Those arrive in bulk, so the page is opened permanently
                 // rather than trapping every relocation.
                 std::lock_guard<std::mutex> lock(StateMutex());
-                DWORD previous = 0;
-                if (VirtualProtect(g_base + (static_cast<uint64_t>(pageIndex) << 12), kHostPageSize,
-                                   PAGE_READWRITE, &previous) != FALSE) {
+                if (ProtectRange(g_base + (static_cast<uint64_t>(pageIndex) << 12), kHostPageSize,
+                                 kProtReadWrite)) {
                     ExecutableProtectedPages()[pageIndex] = 0;
                 }
             }
@@ -665,6 +821,7 @@ bool HandleAccessViolation(void* exceptionPointers) noexcept {
     bool committed = false;
     {
         std::lock_guard<std::mutex> lock(StateMutex());
+#if defined(_WIN32)
         MEMORY_BASIC_INFORMATION mbi{};
         if (VirtualQuery(g_base + blockBase, &mbi, sizeof(mbi)) == 0) return false;
         if (mbi.State == MEM_COMMIT) {
@@ -678,9 +835,24 @@ bool HandleAccessViolation(void* exceptionPointers) noexcept {
                                                               PAGE_EXECUTE)) != 0;
             return isWrite ? writable : readable;
         }
-        if (!CommitPlaceholder(g_base + blockBase, kAllocationGranularity, PAGE_READWRITE)) {
+#else
+        // mprotect has no VirtualQuery counterpart to ask "is this block already committed and
+        // how", so this module tracks the same fact itself (UnmappedCommittedBlocks, checked and
+        // set under this same lock): once a block has been committed READ|WRITE by an earlier
+        // call here (this thread's or a racing one's), every subsequent fault on it is a no-op
+        // resume - there is no POSIX equivalent of "committed but insufficiently permissioned"
+        // for a block only this function ever touches.
+        const uint32_t blockIndex = static_cast<uint32_t>(blockBase / kAllocationGranularity);
+        if (UnmappedCommittedBlocks()[blockIndex] != 0) {
+            return true;
+        }
+#endif
+        if (!CommitPlaceholder(g_base + blockBase, kAllocationGranularity, kProtReadWrite)) {
             return false;
         }
+#if !defined(_WIN32)
+        UnmappedCommittedBlocks()[blockIndex] = 1;
+#endif
         committed = true;
     }
     if (committed) {
