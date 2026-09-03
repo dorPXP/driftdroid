@@ -4,6 +4,19 @@ project(mkw_recompiled)
 set(MKW_TARGET_ANDROID FALSE)
 if(CMAKE_SYSTEM_NAME STREQUAL "Android" AND CMAKE_ANDROID_ARCH_ABI STREQUAL "arm64-v8a")
     set(MKW_TARGET_ANDROID TRUE)
+
+    # The NDK's toolchain file (android-legacy.toolchain.cmake) defaults
+    # CMAKE_FIND_ROOT_PATH_MODE_PACKAGE to ONLY, so any find_package(... PATHS <dir>) whose <dir>
+    # sits outside CMAKE_FIND_ROOT_PATH (== the NDK sysroot) is silently ignored - find_package
+    # reports "considered the following locations: [empty]" and fails, even though the requested
+    # path plainly contains a valid Config.cmake (verified directly - see
+    # hermes/08-CMAKE-CONFIGURE-RESULT.md). This is a standard, well-documented Android
+    # cross-compilation gotcha, unrelated to Dawn or anything in this project; every
+    # find_package(...) call this build tree makes (Dawn, and later nod/SDL3's own package
+    # providers) fetches prebuilt packages that live outside the sysroot, so BOTH (search both the
+    # root path and normal system locations) is the correct project-wide setting here, not a
+    # narrowly-scoped NO_CMAKE_FIND_ROOT_PATH on one call site.
+    set(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE BOTH)
 endif()
 
 if((NOT (WIN32 AND MINGW)) AND (NOT CMAKE_SYSTEM_NAME STREQUAL "Linux") AND (NOT MKW_TARGET_ANDROID))
@@ -111,6 +124,53 @@ if(NOT MKW_NATIVE_PREBUILT_DIR)
     target_compile_definitions(mkw_cryptopp PUBLIC ${MKW_CRYPTOPP_INTERFACE_DEFINITIONS})
     target_compile_options(mkw_cryptopp PRIVATE -w)
     set_target_properties(mkw_cryptopp PROPERTIES UNITY_BUILD OFF)
+    if(MKW_TARGET_ANDROID)
+        # cpu.cpp unconditionally does `#if defined(__ANDROID__) # include "cpu-features.h"
+        # #endif` and calls android_getCpuFamily()/android_getCpuFeatures() to gate hardware-
+        # accelerated (NEON/crypto-extension) code paths. That header+source pair used to ship in
+        # every NDK at $ANDROID_NDK_ROOT/sources/android/cpufeatures, but modern NDKs (confirmed:
+        # r27c, the one this project uses) dropped it - android_getCpuFeatures() was deprecated in
+        # favor of getauxval(AT_HWCAP). This project already disables Crypto++'s ASM/SIMD code
+        # entirely via CRYPTOPP_DISABLE_ASM (see the comment above this block - "portable and
+        # independent of the runtime's x86-64-v3 policy"), so the feature-detection RESULT these
+        # calls return is unused either way; only the declarations need to exist for cpu.cpp to
+        # compile. Same stub-header trick this file already uses for DXProgrammableCapture.h on
+        # Windows (see MKW_DX_STUB_DIR below) - "no accelerated features" (0) is both the simplest
+        # and the semantically correct answer given ASM is off project-wide.
+        set(MKW_ANDROID_CPU_FEATURES_STUB_DIR "${CMAKE_BINARY_DIR}/android_cpu_features_stub")
+        if(NOT EXISTS "${MKW_ANDROID_CPU_FEATURES_STUB_DIR}/cpu-features.h")
+            file(MAKE_DIRECTORY "${MKW_ANDROID_CPU_FEATURES_STUB_DIR}")
+            file(WRITE "${MKW_ANDROID_CPU_FEATURES_STUB_DIR}/cpu-features.h"
+"#pragma once
+// Stub for the NDK cpu-features.h this project's vendored Crypto++ still references (removed
+// from modern NDKs). CRYPTOPP_DISABLE_ASM means the returned bits are never acted on - see
+// runtime/CMakeLists.txt for the full explanation.
+#include <stdint.h>
+typedef enum { ANDROID_CPU_FAMILY_UNKNOWN = 0, ANDROID_CPU_FAMILY_ARM = 1, ANDROID_CPU_FAMILY_ARM64 = 2 } AndroidCpuFamily;
+enum {
+    ANDROID_CPU_ARM_FEATURE_ARMv7 = 0, ANDROID_CPU_ARM_FEATURE_NEON = 0,
+    ANDROID_CPU_ARM_FEATURE_CRC32 = 0, ANDROID_CPU_ARM_FEATURE_PMULL = 0,
+    ANDROID_CPU_ARM_FEATURE_AES = 0, ANDROID_CPU_ARM_FEATURE_SHA1 = 0,
+    ANDROID_CPU_ARM_FEATURE_SHA2 = 0, ANDROID_CPU_ARM_FEATURE_SHA3 = 0,
+    ANDROID_CPU_ARM_FEATURE_SHA512 = 0, ANDROID_CPU_ARM_FEATURE_SM3 = 0, ANDROID_CPU_ARM_FEATURE_SM4 = 0,
+    ANDROID_CPU_ARM64_FEATURE_ASIMD = 0, ANDROID_CPU_ARM64_FEATURE_CRC32 = 0,
+    ANDROID_CPU_ARM64_FEATURE_PMULL = 0, ANDROID_CPU_ARM64_FEATURE_AES = 0,
+    ANDROID_CPU_ARM64_FEATURE_SHA1 = 0, ANDROID_CPU_ARM64_FEATURE_SHA2 = 0,
+    ANDROID_CPU_ARM64_FEATURE_SHA3 = 0, ANDROID_CPU_ARM64_FEATURE_SHA512 = 0,
+    ANDROID_CPU_ARM64_FEATURE_SM3 = 0, ANDROID_CPU_ARM64_FEATURE_SM4 = 0
+};
+#ifdef __cplusplus
+extern \"C\" {
+#endif
+inline AndroidCpuFamily android_getCpuFamily(void) { return ANDROID_CPU_FAMILY_ARM64; }
+inline uint64_t android_getCpuFeatures(void) { return 0; }
+#ifdef __cplusplus
+}
+#endif
+")
+        endif()
+        target_include_directories(mkw_cryptopp PRIVATE "${MKW_ANDROID_CPU_FEATURES_STUB_DIR}")
+    endif()
 endif()
 
 set(MKW_TRANSLATED_COMPILE_JOBS 0 CACHE STRING
@@ -166,6 +226,74 @@ else()
         # (it falls into the generic "else" branch there), so it must be forced ON here the same
         # way the other DAWN_ENABLE_* flags already are.
         set(DAWN_ENABLE_OPENGLES ON CACHE BOOL "" FORCE)
+
+        # AuroraDawnProvider.cmake's "auto" resolution only recognizes prebuilt Dawn PACKAGES for
+        # windows/linux-x86_64/linux-aarch64/macos - not Android - so it falls through to "vendor"
+        # (build Dawn from source via FetchContent), whose pinned URL
+        # (github.com/google/dawn/archive/refs/tags/${AURORA_DAWN_VERSION}.tar.gz) 404s: that git
+        # tag has been pruned from the real google/dawn repo (confirmed directly - see
+        # hermes/08-CMAKE-CONFIGURE-RESULT.md). The dawn-build release at the SAME
+        # AURORA_DAWN_VERSION this project already pins everywhere else DOES publish
+        # dawn-android-aarch64.tar.gz (confirmed via the GitHub releases API) - forcing "package"
+        # here uses that prebuilt directly and skips the broken vendor path entirely. KartPad (a
+        # sibling static-recompilation port of this project for Apple platforms) does the exact
+        # same thing for its own targets: AURORA_DAWN_PROVIDER=package at this same pinned
+        # version, never vendor.
+        set(AURORA_DAWN_PROVIDER "package" CACHE STRING "" FORCE)
+
+        # The dawn-android-aarch64 release asset's exported lib/cmake/Dawn/DawnTargets.cmake bakes
+        # an ABSOLUTE, non-relocatable path to liblog.so from the machine that built the package
+        # (something like /usr/local/lib/android/sdk/ndk/<their-ndk-version>/.../liblog.so) into
+        # INTERFACE_LINK_LIBRARIES, instead of a portable "log"/"-llog" reference - a packaging bug
+        # in that specific release (verified directly: the path doesn't exist on this machine and
+        # points at a different NDK version than the one actually configured here - see
+        # hermes/08-CMAKE-CONFIGURE-RESULT.md), not anything under this project's control to fix at
+        # the source. Pre-fetch the SAME package AuroraDawnProvider.cmake's "package" branch will
+        # ask for below (identical FetchContent NAME/URL, so its own later
+        # FetchContent_Declare/MakeAvailable calls become a documented no-op reuse of what's
+        # already populated here) and rewrite the one bad path to point at THIS machine's real NDK
+        # liblog.so instead, derived from CMAKE_TOOLCHAIN_FILE rather than assumed.
+        # AURORA_DAWN_VERSION itself isn't defined yet in this scope - it's only set once
+        # aurora-main's own CMakeLists.txt runs, which is the add_subdirectory() call below this
+        # whole block. Read the same pin directly out of that file instead of duplicating the
+        # literal version string here (which would silently drift out of sync if aurora-main's own
+        # pin is ever bumped).
+        file(STRINGS "${MKW_AURORA_DIR}/CMakeLists.txt" MKW_AURORA_DAWN_VERSION_LINE
+            REGEX "set\\(AURORA_DAWN_VERSION ")
+        string(REGEX MATCH "\"([^\"]+)\"" MKW_AURORA_DAWN_VERSION_MATCH "${MKW_AURORA_DAWN_VERSION_LINE}")
+        if(NOT CMAKE_MATCH_1)
+            message(FATAL_ERROR "Could not read AURORA_DAWN_VERSION from ${MKW_AURORA_DIR}/CMakeLists.txt")
+        endif()
+        set(AURORA_DAWN_VERSION "${CMAKE_MATCH_1}")
+
+        get_filename_component(MKW_ANDROID_NDK_ROOT "${CMAKE_TOOLCHAIN_FILE}" DIRECTORY)
+        get_filename_component(MKW_ANDROID_NDK_ROOT "${MKW_ANDROID_NDK_ROOT}" DIRECTORY)
+        get_filename_component(MKW_ANDROID_NDK_ROOT "${MKW_ANDROID_NDK_ROOT}" DIRECTORY)
+        set(MKW_ANDROID_LOG_LIB
+            "${MKW_ANDROID_NDK_ROOT}/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/aarch64-linux-android/28/liblog.so")
+        if(NOT EXISTS "${MKW_ANDROID_LOG_LIB}")
+            message(FATAL_ERROR "Could not derive this machine's liblog.so from CMAKE_TOOLCHAIN_FILE "
+                "(looked for ${MKW_ANDROID_LOG_LIB}) - the Dawn Android package patch below needs it.")
+        endif()
+
+        include(FetchContent)
+        FetchContent_Declare(dawn_prebuilt
+            URL "https://github.com/encounter/dawn-build/releases/download/${AURORA_DAWN_VERSION}/dawn-android-aarch64.tar.gz"
+            DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+        )
+        FetchContent_MakeAvailable(dawn_prebuilt)
+        set(MKW_DAWN_TARGETS_FILE "${dawn_prebuilt_SOURCE_DIR}/lib/cmake/Dawn/DawnTargets.cmake")
+        if(EXISTS "${MKW_DAWN_TARGETS_FILE}")
+            file(READ "${MKW_DAWN_TARGETS_FILE}" MKW_DAWN_TARGETS_CONTENT)
+            string(REGEX REPLACE
+                "/[^;\"]*/ndk/[^;\"]*/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/aarch64-linux-android/28/liblog\\.so"
+                "${MKW_ANDROID_LOG_LIB}"
+                MKW_DAWN_TARGETS_CONTENT_PATCHED "${MKW_DAWN_TARGETS_CONTENT}")
+            if(NOT MKW_DAWN_TARGETS_CONTENT_PATCHED STREQUAL MKW_DAWN_TARGETS_CONTENT)
+                file(WRITE "${MKW_DAWN_TARGETS_FILE}" "${MKW_DAWN_TARGETS_CONTENT_PATCHED}")
+                message(STATUS "Patched Dawn's Android package: replaced its non-portable liblog.so path with this machine's real one")
+            endif()
+        endif()
     else()
         set(DAWN_ENABLE_OPENGLES OFF CACHE BOOL "" FORCE)
     endif()
