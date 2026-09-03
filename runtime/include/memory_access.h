@@ -18,8 +18,15 @@ extern "C" {
 }
 
 namespace MemoryInline {
+#if defined(_WIN32)
 #define MKW_MEMORY_FORCE_INLINE __forceinline
 #define MKW_MEMORY_NO_INLINE __declspec(noinline)
+#else
+// See runtime/include/isa/ppc_isa_config.h for why non-Windows Clang needs the GNU-attribute
+// spellings instead of the MS-extension keywords.
+#define MKW_MEMORY_FORCE_INLINE __attribute__((always_inline)) inline
+#define MKW_MEMORY_NO_INLINE __attribute__((noinline))
+#endif
 #define MKW_MEMORY_COLD __attribute__((cold))
 inline constexpr uint32_t kPageShift = 20;
 inline constexpr uint32_t kPageSize = 1u << kPageShift;
