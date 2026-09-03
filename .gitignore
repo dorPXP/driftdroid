@@ -82,3 +82,8 @@ android/*/.cxx/
 android/captures/
 android/.externalNativeBuild/
 
+# Prebuilt native libraries dropped in manually for on-device testing (libWiiCompiled.so etc.)
+# contain the user's own compiled/translated game code - same "never commit game-derived output"
+# rule as /generated/, /build/, /Assets/ above. Never committed, never distributed via the repo.
+android/*/src/main/jniLibs/
+
