@@ -10,10 +10,23 @@
 
 #include "memory.h"
 
+// Windows' SehLogger longjmps out of a vectored exception handler, where plain setjmp/longjmp is
+// the norm. A POSIX signal handler jumping back to here must use the sig-prefixed pair instead:
+// only sigsetjmp/siglongjmp save and restore the process signal mask, which is what keeps SIGSEGV
+// from staying blocked (and a second fault during the same ctor loop from escalating instead of
+// trapping) after the first recovered fault.
+#if defined(_WIN32)
+using MkwJmpBuf = jmp_buf;
+#define MKW_SETJMP(buf) setjmp(buf)
+#else
+using MkwJmpBuf = sigjmp_buf;
+#define MKW_SETJMP(buf) sigsetjmp(buf, 1)
+#endif
+
 // Global flag to suppress SEH reporting (caught by system_bridge)
 extern bool g_suppressSehReporting;
 // Jump buffer for SEH recovery
-extern thread_local jmp_buf* g_sehJumpTarget;
+extern thread_local MkwJmpBuf* g_sehJumpTarget;
 // SEH details for the most recent trapped exception (used during ctor execution).
 extern thread_local uint32_t g_sehLastExceptionCode;
 extern thread_local uintptr_t g_sehLastExceptionAddress;
