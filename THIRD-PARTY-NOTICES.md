@@ -98,6 +98,17 @@ vendored in `runtime/third_party/toml11`.
 Source: <https://github.com/ToruNiina/toml11/tree/v4.4.0>. Full license text:
 `runtime/third_party/toml11/LICENSE`.
 
+### sse2neon - MIT
+
+Copyright (c) 2015-2026 SSE2NEON Contributors.
+The arm64/Android ISA layer (`runtime/include/isa/ppc_isa_config.h`) uses the single-header
+SSE-to-NEON translation layer to implement the SSE/SSE2/SSE4.2 intrinsic surface that
+`ppc_isa_float.h` and `ppc_isa_quantized.h` are written against, so those files need no
+architecture-specific changes. Vendored in `runtime/third_party/sse2neon` from commit
+`13a42df35dc7fcc94f987568e7274a998bb6cc86`.
+Source: <https://github.com/DLTcollab/sse2neon>. Full license text:
+`runtime/third_party/sse2neon/LICENSE`.
+
 ### YamlDotNet - MIT
 
 Copyright (c) Antoine Aubry and contributors.
