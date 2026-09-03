@@ -20,11 +20,13 @@
 #include <sstream>
 #include <unordered_map>
 
+#if defined(_WIN32)
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
 #include <windows.h>
 #include <dbghelp.h>
+#endif
 
 MemoryInline::PageEntry MemoryInline::g_pageTable[MemoryInline::kPageCount]{};
 uintptr_t MemoryInline::g_fullPageBias[MemoryInline::kPageCount]{};
