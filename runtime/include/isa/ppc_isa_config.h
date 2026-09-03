@@ -6,7 +6,28 @@
 #define MKW_RESTRICT __restrict
 
 #if defined(__aarch64__)
-#include <arm_neon.h>
+// The ISA headers (ppc_isa_float.h, ppc_isa_quantized.h) are written against the SSE/SSE2
+// intrinsic surface directly - sse2neon.h supplies that same __m128/__m128i/__m128d API backed
+// by NEON, so those files need NO changes at all on arm64 (verified compiling both unchanged
+// through this header for arm64-v8a). Vendored at runtime/third_party/sse2neon (MIT, upstream
+// github.com/DLTcollab/sse2neon) rather than hand-porting every intrinsic call site individually
+// - a sibling ARM64 static-recompilation port of this same upstream project (for Apple platforms)
+// took the identical approach for the identical reason.
+#include "../../third_party/sse2neon/sse2neon.h"
+
+// sse2neon deliberately stops at SSE4.2 (see its own header comment); the translated PPC helpers
+// use these two FMA3 intrinsics (introduced with AVX2/FMA, i.e. after SSE4.2) to get a single
+// rounding step for paired-single arithmetic. Both map to one NEON fused multiply-add/subtract
+// instruction, so they're exact per-lane single roundings, matching what the x86 FMA3 path does.
+inline __m128 _mm_fmadd_ps(__m128 a, __m128 b, __m128 c)
+{
+    return vfmaq_f32(c, a, b);
+}
+
+inline __m128 _mm_fmsub_ps(__m128 a, __m128 b, __m128 c)
+{
+    return vfmaq_f32(vnegq_f32(c), a, b);
+}
 #else
 #include <immintrin.h>
 #endif
