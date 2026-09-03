@@ -114,6 +114,15 @@ Source: <https://github.com/DLTcollab/sse2neon>. Full license text:
 Copyright (c) Antoine Aubry and contributors.
 Referenced by `translator/src/Translator.Core`. Source: <https://github.com/aaubry/YamlDotNet>
 
+### SDL Android Java bindings - zlib
+
+Copyright the SDL contributors. The Android app vendors SDL's own Android Activity/JNI glue
+classes (`SDLActivity`, `SDLAudioManager`, `SDLControllerManager`, `HIDDeviceManager`, etc.),
+required for `libWiiCompiled.so`'s SDL3-based `JNI_OnLoad` to resolve its Java-side classes at
+load time, at `android/app/src/main/java/org/libsdl/app/`. Taken unmodified from the same SDL
+source tree pinned below (`android-project/app/src/main/java/org/libsdl/app/`).
+Source: <https://github.com/libsdl-org/SDL>.
+
 ---
 
 ## Fetched at build time and redistributed in release builds

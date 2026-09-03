@@ -14,18 +14,27 @@ class MainActivity : AppCompatActivity() {
     companion object {
         init {
             System.loadLibrary("wii")
+            System.loadLibrary("png16")
+            System.loadLibrary("WiiCompiled")
         }
     }
 
     private external fun nativeToolchainCheck(): String
     private external fun nativeArm64FaultCheck(): String
+    private external fun nativeRealRuntimeCheck(filesDir: String): String
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
         val textView = TextView(this)
-        textView.text = nativeToolchainCheck() + "\n\n" + nativeArm64FaultCheck()
-        textView.textSize = 16f
+        val realRuntimeResult = try {
+            nativeRealRuntimeCheck(filesDir.absolutePath)
+        } catch (e: UnsatisfiedLinkError) {
+            "Real runtime check FAILED to load: ${e.message}"
+        }
+        textView.text = nativeToolchainCheck() + "\n\n" + nativeArm64FaultCheck() +
+            "\n\n" + realRuntimeResult
+        textView.textSize = 14f
         textView.setPadding(48, 96, 48, 48)
         setContentView(textView)
     }
