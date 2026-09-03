@@ -69,3 +69,6 @@ project.lock.json
 *.log
 output.txt
 
+
+# Hermes continuity folder (private handoff notes - never commit)
+hermes/
