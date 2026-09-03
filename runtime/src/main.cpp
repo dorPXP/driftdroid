@@ -37,6 +37,8 @@
 #include <mmsystem.h>
 #include <dbghelp.h>
 #else
+#include <signal.h>
+#include <ucontext.h>
 #include <unistd.h>
 #endif
 
@@ -969,7 +971,10 @@ LONG CALLBACK SehLogger(EXCEPTION_POINTERS* info) {
     // flat module registers its own handler first, but registration order is
     // not guaranteed once another VEH is installed later, so consult it here
     // too - resolving a fault twice is a no-op.
-    if (GuestFlat::HandleAccessViolation(info)) {
+    if (info->ExceptionRecord != nullptr && info->ExceptionRecord->NumberParameters >= 2 &&
+        GuestFlat::HandleAccessViolation(
+            reinterpret_cast<void*>(info->ExceptionRecord->ExceptionInformation[1]),
+            info->ExceptionRecord->ExceptionInformation[0] != 0)) {
         return EXCEPTION_CONTINUE_EXECUTION;
     }
     if (g_suppressSehReporting && g_sehJumpTarget) {
@@ -1039,6 +1044,158 @@ void InstallSehLogger() {
     if (!g_vectoredSehHandle) {
         g_vectoredSehHandle = AddVectoredExceptionHandler(1, SehLogger);
     }
+}
+#else
+// POSIX counterpart to SehLogger above. Unlike Windows' AddVectoredExceptionHandler, which lets
+// GuestFlat and this module each install their own handler and defensively re-check each other,
+// sigaction only allows one handler per signal - the second registration replaces the first
+// instead of chaining. So this is the single SIGSEGV/SIGBUS handler for the whole process, and it
+// owns checking GuestFlat's fault-interception logic first, exactly mirroring the order SehLogger
+// already uses on Windows.
+void ReportUnhandledSignalFault(int sig, void* faultAddress) {
+    RT_LOG(RT_TAG_RUNTIME) << "Signal " << sig << " (fault address 0x" << std::hex
+              << reinterpret_cast<uintptr_t>(faultAddress) << std::dec << ")";
+    if (!g_lastEntryLabel.empty()) {
+        std::cerr << " while executing " << g_lastEntryLabel;
+    }
+    std::cerr << std::endl;
+    if (const CpuContext* cpu = TryGetCpuContext()) {
+        RT_LOG(RT_TAG_RUNTIME) << "===== DUMPING CPU STATE =====" << std::endl;
+        SystemBridge::DumpCpuState(cpu);
+    }
+    std::cerr.flush();
+}
+
+#if defined(__aarch64__)
+// arm64's uc_mcontext (struct sigcontext) has no direct ESR field the way x86's gregs[REG_ERR]
+// does - the ESR value lives in a variable-length list of tagged extension records packed into
+// sigcontext::__reserved (fpsimd_context always first, then optionally esr_context, sve_context,
+// etc., terminated by a zero-magic/zero-size record). Every arm64 crash handler that wants ESR
+// (breakpad, Dolphin's own arm64 fastmem handler, the kernel's own sample code) walks this same
+// list; there is no shortcut. Returns false (esr left 0, meaning "read") if the running kernel
+// didn't attach an esr_context record - the WnR bit is best-effort diagnostic info, not required
+// for GuestFlat::HandleAccessViolation's own resolution (which does not depend on isWrite for
+// most fault kinds - see guest_flat_memory.cpp).
+//
+// VERIFICATION STATUS (Session 2, 2026-09-03): this struct layout was checked against the real
+// NDK r27c Bionic headers (asm/sigcontext.h - matches the upstream Linux kernel arm64 signal ABI
+// exactly: sigcontext::__reserved holds fpsimd_context first, then optional tagged records ending
+// in a zero terminator) and the isolated walking logic compiles clean via the real NDK clang.
+// It could NOT be exercised end-to-end here: qemu-aarch64-static's user-mode SIGSEGV emulation
+// does not populate the esr_context record at all (confirmed by triggering a real null-pointer
+// write AND read fault under qemu and observing ExtractEsr() return false both times - a known
+// QEMU linux-user limitation, not a bug in this code) - qemu-user synthesizes the signal from the
+// host's own fault rather than delivering a real arm64 hardware Data Abort. This path needs a
+// real device (or a full-system arm64 emulator with a real kernel) to confirm isWrite comes back
+// correct in practice.
+bool ExtractEsr(const mcontext_t& mc, uint64_t& esrOut) {
+    const uint8_t* ptr = mc.__reserved;
+    const uint8_t* end = mc.__reserved + sizeof(mc.__reserved);
+    while (ptr + sizeof(_aarch64_ctx) <= end) {
+        const auto* head = reinterpret_cast<const _aarch64_ctx*>(ptr);
+        if (head->magic == 0 && head->size == 0) {
+            break;  // terminator record
+        }
+        if (head->magic == ESR_MAGIC) {
+            esrOut = reinterpret_cast<const esr_context*>(ptr)->esr;
+            return true;
+        }
+        if (head->size == 0) {
+            break;  // malformed - avoid an infinite loop
+        }
+        ptr += head->size;
+    }
+    return false;
+}
+#endif
+
+void PosixMemoryFaultHandler(int sig, siginfo_t* info, void* ucontextVoid) {
+    void* faultAddress = info != nullptr ? info->si_addr : nullptr;
+    bool isWrite = false;
+#if defined(__x86_64__)
+    // Standard glibc technique for a POSIX fastmem-style handler: bit 1 (0x2) of the hardware
+    // error code x86 pushes on a page fault records whether it was a write.
+    if (ucontextVoid != nullptr) {
+        auto* uc = static_cast<ucontext_t*>(ucontextVoid);
+        isWrite = (uc->uc_mcontext.gregs[REG_ERR] & 0x2) != 0;
+    }
+#elif defined(__aarch64__)
+    // sigcontext::fault_address duplicates info->si_addr on arm64 (kept as the primary source
+    // above for parity with the x86 branch and because it's populated even when info is null).
+    // ESR_ELx.ISS bit 6 (WnR - "Write not Read") is the arm64 equivalent of x86's REG_ERR bit 1:
+    // 1 = the aborting access was a write, 0 = a read. Only meaningful for a Data Abort, which is
+    // the only kind of fault that reaches SIGSEGV/SIGBUS here.
+    if (ucontextVoid != nullptr) {
+        auto* uc = static_cast<ucontext_t*>(ucontextVoid);
+        uint64_t esr = 0;
+        if (ExtractEsr(uc->uc_mcontext, esr)) {
+            isWrite = ((esr >> 6) & 1u) != 0;
+        }
+    }
+#endif
+
+    // Guest-space faults are the flat memory interception mechanism (MMIO, deferred EFB reads,
+    // the executable-write guard, unmapped pages). Resolving one here means resuming the
+    // faulting instruction, which just returning from the handler does.
+    if (faultAddress != nullptr && GuestFlat::HandleAccessViolation(faultAddress, isWrite)) {
+        return;
+    }
+
+    if (g_suppressSehReporting && g_sehJumpTarget) {
+        g_sehLastExceptionCode = static_cast<uint32_t>(sig);
+        g_sehLastExceptionAddress = reinterpret_cast<uintptr_t>(faultAddress);
+        g_sehLastAccessType = isWrite ? 1u : 0u;
+        g_sehLastAccessedAddress = reinterpret_cast<uintptr_t>(faultAddress);
+        siglongjmp(*g_sehJumpTarget, 1);
+    }
+    if (g_suppressSehReporting) {
+        // Reporting suppressed but nobody armed a recovery jump: restore the default disposition
+        // and re-raise so the process still terminates, instead of returning into the same fault.
+        signal(sig, SIG_DFL);
+        raise(sig);
+        return;
+    }
+
+    // Guard against re-entrancy: if we crash while reporting, don't recurse.
+    static std::atomic_flag s_inCrashHandler = ATOMIC_FLAG_INIT;
+    if (s_inCrashHandler.test_and_set()) {
+        std::_Exit(EXIT_FAILURE);
+    }
+
+    ReportUnhandledSignalFault(sig, faultAddress);
+    std::ostringstream popupDetails;
+    popupDetails << "A native signal (" << sig << ") occurred";
+    if (!g_lastEntryLabel.empty()) {
+        popupDetails << " while executing " << g_lastEntryLabel;
+    }
+    if (faultAddress != nullptr) {
+        popupDetails << ".\n\nThe game attempted a " << (isWrite ? "write" : "read")
+                     << " at host address 0x" << std::hex
+                     << reinterpret_cast<uintptr_t>(faultAddress) << std::dec;
+    }
+    popupDetails << ".\n\nThe process transcript and crash log contain the full CPU and stack "
+                    "diagnostics.";
+    ShowRuntimeFatalPopup("a native crash occurred", popupDetails.str());
+    DumpHostStackTrace();
+    WriteFatalLogImpl(sig == SIGBUS ? "sigbus" : "sigsegv");
+
+    std::cerr.flush();
+    std::cout.flush();
+    std::fflush(stdout);
+    std::fflush(stderr);
+    std::_Exit(EXIT_FAILURE);
+}
+
+void InstallPosixMemoryFaultHandler() {
+    struct sigaction action {};
+    action.sa_sigaction = PosixMemoryFaultHandler;
+    action.sa_flags = SA_SIGINFO;
+    sigemptyset(&action.sa_mask);
+    sigaction(SIGSEGV, &action, nullptr);
+    // A touch beyond a memfd-backed mapping's ftruncate()'d size raises SIGBUS rather than
+    // SIGSEGV on Linux; region sizing should make this unreachable, but routing it to the same
+    // handler costs nothing and avoids a silent gap if it ever isn't.
+    sigaction(SIGBUS, &action, nullptr);
 }
 #endif
 
@@ -1155,6 +1312,8 @@ int RuntimeMain(int argc, char** argv) {
     ConfigureWindowsFatalDialogBehavior();
     InstallSehLogger();
     WindowsTimerResolutionGuard timerResolutionGuard;
+#else
+    InstallPosixMemoryFaultHandler();
 #endif
     InitializeProcessTranscript(argc, argv);
     std::signal(SIGABRT, AbortSignalHandler);
