@@ -637,7 +637,8 @@ static void BuildAndPublishRuntimeFst() {
     for (const DVDFileEntry& entry : g_fileEntries) {
         if (entry.discOffsetWords != 0) {
             nextFreeBytes = std::max(
-                nextFreeBytes, static_cast<uint64_t>(entry.discOffsetWords) * 4ull + entry.size);
+                nextFreeBytes, static_cast<uint64_t>(entry.discOffsetWords) * UINT64_C(4) +
+                                   static_cast<uint64_t>(entry.size));
         }
     }
     for (DVDFileEntry& entry : g_fileEntries) {
