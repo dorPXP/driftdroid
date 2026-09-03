@@ -72,3 +72,13 @@ output.txt
 
 # Hermes continuity folder (private handoff notes - never commit)
 hermes/
+
+# Android / Gradle
+android/local.properties
+android/.gradle/
+android/.idea/
+android/*/build/
+android/*/.cxx/
+android/captures/
+android/.externalNativeBuild/
+
