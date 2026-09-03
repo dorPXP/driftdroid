@@ -1080,14 +1080,16 @@ void ReportUnhandledSignalFault(int sig, void* faultAddress) {
 // VERIFICATION STATUS (Session 2, 2026-09-03): this struct layout was checked against the real
 // NDK r27c Bionic headers (asm/sigcontext.h - matches the upstream Linux kernel arm64 signal ABI
 // exactly: sigcontext::__reserved holds fpsimd_context first, then optional tagged records ending
-// in a zero terminator) and the isolated walking logic compiles clean via the real NDK clang.
-// It could NOT be exercised end-to-end here: qemu-aarch64-static's user-mode SIGSEGV emulation
-// does not populate the esr_context record at all (confirmed by triggering a real null-pointer
-// write AND read fault under qemu and observing ExtractEsr() return false both times - a known
-// QEMU linux-user limitation, not a bug in this code) - qemu-user synthesizes the signal from the
-// host's own fault rather than delivering a real arm64 hardware Data Abort. This path needs a
-// real device (or a full-system arm64 emulator with a real kernel) to confirm isWrite comes back
-// correct in practice.
+// in a zero terminator). qemu-aarch64-static's user-mode SIGSEGV emulation could NOT exercise
+// this (it never populates the esr_context record - confirmed separately, a known QEMU
+// linux-user limitation, not a bug here). **CONFIRMED WORKING ON REAL HARDWARE** instead: this
+// exact algorithm (duplicated standalone to avoid pulling in main.cpp's full SDL3/aurora
+// dependency chain) was built into a throwaway JNI test
+// (android/app/src/main/cpp/hello.cpp:nativeArm64FaultCheck, since removed/replaced once P5's
+// real app exists) and run on the user's Huawei nova 9 (Kirin 985): a deliberate write to a
+// PROT_NONE page produced ESR 0x92000047 (WnR bit set, correctly classified as a write), and a
+// deliberate read produced ESR 0x92000007 (WnR bit clear, correctly classified as a read). Both
+// cases passed. This is now proven, not just structurally plausible.
 bool ExtractEsr(const mcontext_t& mc, uint64_t& esrOut) {
     const uint8_t* ptr = mc.__reserved;
     const uint8_t* end = mc.__reserved + sizeof(mc.__reserved);

@@ -18,13 +18,14 @@ class MainActivity : AppCompatActivity() {
     }
 
     private external fun nativeToolchainCheck(): String
+    private external fun nativeArm64FaultCheck(): String
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
         val textView = TextView(this)
-        textView.text = nativeToolchainCheck()
-        textView.textSize = 18f
+        textView.text = nativeToolchainCheck() + "\n\n" + nativeArm64FaultCheck()
+        textView.textSize = 16f
         textView.setPadding(48, 96, 48, 48)
         setContentView(textView)
     }
