@@ -509,7 +509,11 @@ int64_t ConsumeAudioPollDeltaMicros()
     // kMaxBlocksPerTick per pass. Never return early on a zero delta: two scheduler passes
     // can land in the same microsecond and the backlog still needs servicing.
     constexpr int64_t kMaxPollDeltaMicros = 100'000;
-    return std::min(elapsed, kMaxPollDeltaMicros);
+    // std::chrono::microseconds::rep is a distinct type from int64_t on some platforms (e.g.
+    // NDK libc++: `long long` vs int64_t's `long`) even though both are 64-bit - std::min<T>
+    // requires an exact type match between its two arguments, not just equal width, so this
+    // needs an explicit cast rather than relying on implicit conversion.
+    return std::min(static_cast<int64_t>(elapsed), kMaxPollDeltaMicros);
 }
 
 } // namespace
