@@ -102,12 +102,24 @@ private:
     static void CALLBACK FiberProc(void* param);
 #else
     static void FiberProc(void* param);
+    // libco's co_create() entry points take no argument (unlike CreateFiber's FiberProc(void*)),
+    // so this trampoline reads the guest thread address staged by CreateGuestFiber() and forwards
+    // into the (platform-neutral-bodied) FiberProc above. See fiber_manager.cpp.
+    static void FiberProcTrampoline();
 #endif
-    
+    // Switch from whichever fiber is currently active straight to the scheduler fiber, without
+    // the SwitchToThread bookkeeping (CPU context save/restore, s_currentGuestThread). Used for
+    // in-fiber yields that aren't a real guest thread switch: waiting out the EGG::Thread::start
+    // deferral loop, and returning control on natural thread exit.
+    static void SwitchToScheduler();
+
     // Internal state
     static std::mutex s_mutex;
     static std::unordered_map<uint32_t, GuestFiber> s_fibers;
     static std::vector<void*> s_fibersPendingDelete;
+    // The scheduler's own "fiber": a Windows HFIBER, or (non-Windows) libco's cothread_t for
+    // whichever native call stack first called GuestFiberManager::Initialize() - both are
+    // plain void* handles, so one field serves both platforms.
     static void* s_schedulerFiber;
     static uint32_t s_currentGuestThread;
     static bool s_initialized;

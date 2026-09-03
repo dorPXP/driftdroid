@@ -13,7 +13,23 @@
 #include <iomanip>
 #include <sstream>
 
+#if !defined(_WIN32)
+#include "libco.h"
+#endif
+
 namespace Fiber {
+
+#if !defined(_WIN32)
+namespace {
+// libco's co_create() entry points take no argument, unlike CreateFiber(size, FiberProc, param).
+// CreateGuestFiber() stages the guest thread address here immediately before the first co_switch
+// into a freshly created cothread; FiberProcTrampoline reads it exactly once, at the top of the
+// fiber's very first activation. Safe because guest fibers are strictly cooperative on a single
+// OS thread: nothing else can run (and so nothing else can overwrite this) between the staging
+// write and the trampoline's read of it.
+thread_local uint32_t s_pendingFiberArg = 0;
+} // namespace
+#endif
 
 std::mutex GuestFiberManager::s_mutex;
 std::unordered_map<uint32_t, GuestFiber> GuestFiberManager::s_fibers;
@@ -24,16 +40,23 @@ bool GuestFiberManager::s_initialized = false;
 thread_local CpuContext* GuestFiberManager::s_cpuContext = nullptr;
 
 void GuestFiberManager::PurgePendingFibers() {
-#if defined(_WIN32)
     std::vector<void*> toDelete;
     {
         std::lock_guard<std::mutex> lock(s_mutex);
         toDelete.swap(s_fibersPendingDelete);
     }
+#if defined(_WIN32)
     const void* current = GetCurrentFiber();
     for (void* f : toDelete) {
         if (f && f != current) {
             DeleteFiber(f);
+        }
+    }
+#else
+    const void* current = co_active();
+    for (void* f : toDelete) {
+        if (f && f != current) {
+            co_delete(static_cast<cothread_t>(f));
         }
     }
 #endif
@@ -204,10 +227,12 @@ void GuestFiberManager::Initialize() {
     }
     
 #else
-    RT_LOG(RT_TAG_OS) << "WARNING: Fiber support not available on this platform!" << std::endl;
-    s_schedulerFiber = nullptr;
+    // co_active() returns a handle for whichever native stack is currently running, creating one
+    // on first call if needed - the libco analogue of ConvertThreadToFiber(nullptr): it converts
+    // this call's own stack into a switchable target without altering control flow.
+    s_schedulerFiber = co_active();
 #endif
-    
+
     s_currentGuestThread = 0;
     s_initialized = true;
 }
@@ -223,14 +248,25 @@ void GuestFiberManager::Shutdown() {
         }
     }
     s_fibers.clear();
-    
+
     // Convert scheduler fiber back to thread
     if (s_schedulerFiber) {
         ConvertFiberToThread();
         s_schedulerFiber = nullptr;
     }
+#else
+    for (auto& [addr, fiber] : s_fibers) {
+        if (fiber.fiber && !fiber.isSchedulerFiber) {
+            co_delete(static_cast<cothread_t>(fiber.fiber));
+            fiber.fiber = nullptr;
+        }
+    }
+    s_fibers.clear();
+    // Unlike ConvertFiberToThread, libco has no "undo" for co_active(): the scheduler's own
+    // stack was never separately allocated, so there is nothing to release here.
+    s_schedulerFiber = nullptr;
 #endif
-    
+
     s_initialized = false;
 }
 
@@ -250,12 +286,14 @@ bool GuestFiberManager::CreateGuestFiber(uint32_t guestThreadAddr, uint32_t entr
     // Check if fiber already exists for this thread - if so, reset it
     auto existingIt = s_fibers.find(guestThreadAddr);
     if (existingIt != s_fibers.end()) {
-#if defined(_WIN32)
         // Delete the old fiber if it exists and is not the scheduler fiber
         if (existingIt->second.fiber && !existingIt->second.isSchedulerFiber) {
+#if defined(_WIN32)
             DeleteFiber(existingIt->second.fiber);
-        }
+#else
+            co_delete(static_cast<cothread_t>(existingIt->second.fiber));
 #endif
+        }
         s_fibers.erase(existingIt);
     }
     
@@ -288,9 +326,18 @@ bool GuestFiberManager::CreateGuestFiber(uint32_t guestThreadAddr, uint32_t entr
         return false;
     }
 #else
-    gf.fiber = nullptr;
+    // libco's co_create() entry point takes no argument; SwitchToThread() stages guestThreadAddr
+    // into s_pendingFiberArg immediately before the co_switch that first activates this handle.
+    constexpr unsigned int kHostStackSize = 64 * 1024;
+    gf.fiber = co_create(kHostStackSize, &FiberProcTrampoline);
+
+    if (!gf.fiber) {
+        RT_LOG(RT_TAG_OS) << "co_create failed for thread 0x"
+                  << std::hex << guestThreadAddr << std::dec << std::endl;
+        return false;
+    }
 #endif
-    
+
     s_fibers[guestThreadAddr] = gf;
     
     
@@ -342,17 +389,27 @@ void GuestFiberManager::ExitGuestThread(uint32_t guestThreadAddr, ThreadState fi
         s_currentGuestThread = 0;
     }
     
-#if defined(_WIN32)
     if (it->second.fiber && !it->second.isSchedulerFiber) {
+#if defined(_WIN32)
         const void* current = GetCurrentFiber();
         if (it->second.fiber == current) {
             s_fibersPendingDelete.push_back(it->second.fiber);
         } else {
             DeleteFiber(it->second.fiber);
         }
+#else
+        const void* current = co_active();
+        if (it->second.fiber == current) {
+            // Deleting the coroutine we're currently executing on would free the very stack
+            // this call is running on; defer it (PurgePendingFibers) until some other fiber is
+            // active, exactly like the Windows branch above.
+            s_fibersPendingDelete.push_back(it->second.fiber);
+        } else {
+            co_delete(static_cast<cothread_t>(it->second.fiber));
+        }
+#endif
         it->second.fiber = nullptr;
     }
-#endif
 }
 
 void GuestFiberManager::SwitchToThread(uint32_t guestThreadAddr, CpuContext* cpu) {
@@ -415,10 +472,13 @@ void GuestFiberManager::SwitchToThread(uint32_t guestThreadAddr, CpuContext* cpu
     // Store CPU context pointer for the target fiber to use
     s_cpuContext = cpu;
     
-#if defined(_WIN32)
     // Check if we're already on the target fiber (e.g., switching to main thread
     // when we're already on the scheduler fiber)
+#if defined(_WIN32)
     void* currentFiber = GetCurrentFiber();
+#else
+    void* currentFiber = co_active();
+#endif
     if (currentFiber == fiberHandle) {
         // Already executing on the target host fiber. This is common for the
         // default guest thread, which also owns the scheduler fiber. Keep the
@@ -426,7 +486,7 @@ void GuestFiberManager::SwitchToThread(uint32_t guestThreadAddr, CpuContext* cpu
         // from before the guest thread slept.
         return;
     }
-    
+
     if (cpu && haveTargetContext) {
         *cpu = targetContext;
         // FPSCR travels with the guest-thread context, and its NI bit is
@@ -436,8 +496,16 @@ void GuestFiberManager::SwitchToThread(uint32_t guestThreadAddr, CpuContext* cpu
     }
 
     // Switch to the target fiber (the target fiber will load its own context)
+#if defined(_WIN32)
     SwitchToFiber(fiberHandle);
-    
+#else
+    // Staged for FiberProcTrampoline's first (and only) read; a no-op for a fiber that has
+    // already started, since resuming it re-enters mid-function rather than through the
+    // trampoline's entry point.
+    s_pendingFiberArg = guestThreadAddr;
+    co_switch(static_cast<cothread_t>(fiberHandle));
+#endif
+
     // When we return here, the fiber that issued SwitchToThread has resumed.
     // That does not automatically mean the previous guest thread became runnable
     // again; a different thread may simply have yielded back to the scheduler.
@@ -476,7 +544,6 @@ void GuestFiberManager::SwitchToThread(uint32_t guestThreadAddr, CpuContext* cpu
             s_currentGuestThread = 0;
         }
     }
-#endif
 }
 
 uint32_t GuestFiberManager::GetCurrentGuestThread() {
@@ -551,6 +618,14 @@ void GuestFiberManager::ProcessTimerEvents(CpuContext* cpu) {
     }
 }
 
+void GuestFiberManager::SwitchToScheduler() {
+#if defined(_WIN32)
+    SwitchToFiber(s_schedulerFiber);
+#else
+    co_switch(static_cast<cothread_t>(s_schedulerFiber));
+#endif
+}
+
 #if defined(_WIN32)
 void CALLBACK GuestFiberManager::FiberProc(void* param)
 #else
@@ -558,9 +633,7 @@ void GuestFiberManager::FiberProc(void* param)
 #endif
 {
     uint32_t guestThreadAddr = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(param));
-    
-    
-#if defined(_WIN32)
+
     // Get our fiber info
     GuestFiber* fiber = nullptr;
     uint32_t entryPoint = 0;
@@ -571,7 +644,7 @@ void GuestFiberManager::FiberProc(void* param)
         auto it = s_fibers.find(guestThreadAddr);
         if (it == s_fibers.end()) {
             RT_LOG(RT_TAG_OS) << "FiberProc: fiber not found!" << std::endl;
-            SwitchToFiber(s_schedulerFiber);
+            SwitchToScheduler();
             return;
         }
         fiber = &it->second;
@@ -634,7 +707,7 @@ void GuestFiberManager::FiberProc(void* param)
                       << ", fn=0x" << startFn << ") after retries; continuing anyway." << std::dec << std::endl;
             break;
         }
-        SwitchToFiber(s_schedulerFiber);
+        SwitchToScheduler();
     }
 
     // The deferral loop above yields to the scheduler and therefore can resume
@@ -691,11 +764,18 @@ void GuestFiberManager::FiberProc(void* param)
     }
     
     // Return to scheduler
-    SwitchToFiber(s_schedulerFiber);
-#else
-    (void)guestThreadAddr;
-    RT_LOG(RT_TAG_OS) << "Fibers not supported on this platform!" << std::endl;
-#endif
+    SwitchToScheduler();
 }
+
+#if !defined(_WIN32)
+void GuestFiberManager::FiberProcTrampoline() {
+    const uint32_t guestThreadAddr = s_pendingFiberArg;
+    FiberProc(reinterpret_cast<void*>(static_cast<uintptr_t>(guestThreadAddr)));
+    // FiberProc always calls SwitchToScheduler() on every exit path and never falls off its own
+    // end; this is only a safety net in case that ever changes; falling off co_create's entry
+    // function is otherwise undefined behavior (libco's own crash() fallback aborts instead).
+    SwitchToScheduler();
+}
+#endif
 
 } // namespace Fiber
