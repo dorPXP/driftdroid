@@ -62,7 +62,7 @@ public:
     {
         g_currentCpuContext = ctx;
 
-        savedMxcsr_ = _mm_getcsr();
+        savedMxcsr_ = MkwReadHostFpControl();
         if (ctx != nullptr)
             MkwApplyHostNiMode(ctx->fpscr);
     }
