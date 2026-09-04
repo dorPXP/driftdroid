@@ -27,6 +27,7 @@ Code.pul
 /build/
 /build-*/
 /android-native-build/
+/linux-native-build/
 /dist/
 /out/
 [Bb]in/
