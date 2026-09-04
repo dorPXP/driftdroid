@@ -12,10 +12,59 @@
 #include <string>
 #include <unistd.h>
 
+#include <SDL3/SDL_system.h>
+
+#include "android_touch_overlay_bridge.h"
 #include "hle/storage/wii_disc_extractor.h"
 #include "runtime_config.h"
 #include "runtime_product.h"
 #include "settings_overlay.h"
+
+bool g_androidTouchControlsVisibleCache = true;
+
+namespace {
+
+// Shared by both native->Java callbacks below - SDL's own helpers hand back an env already
+// attached to whatever thread calls this (the SDL_main thread for the gamepad-connect hook, the
+// ImGui/render thread for the settings checkbox), so no manual AttachCurrentThread bookkeeping is
+// needed here.
+void CallVoidMethodOnActivity(const char* methodName, bool value) {
+    JNIEnv* env = static_cast<JNIEnv*>(SDL_GetAndroidJNIEnv());
+    jobject activity = static_cast<jobject>(SDL_GetAndroidActivity());
+    if (env == nullptr || activity == nullptr) {
+        return;
+    }
+    jclass activityClass = env->GetObjectClass(activity);
+    jmethodID method = env->GetMethodID(activityClass, methodName, "(Z)V");
+    if (method != nullptr) {
+        env->CallVoidMethod(activity, method, value ? JNI_TRUE : JNI_FALSE);
+    }
+    env->DeleteLocalRef(activityClass);
+}
+
+}  // namespace
+
+// Called from aurora-main/lib/window.cpp's SDL_EVENT_GAMEPAD_ADDED/REMOVED handling - the touch
+// overlay auto-hides while a real controller is connected (TouchControlsOverlay.kt combines this
+// with the user's own manual on/off preference).
+extern "C" void AndroidNotifyGamepadConnectionChanged(bool connected) {
+    CallVoidMethodOnActivity("onNativeGamepadConnectionChanged", connected);
+}
+
+// Called from the ImGui "Touch controls" settings checkbox (settings_overlay.cpp).
+extern "C" void AndroidSetTouchOverlayVisible(bool visible) {
+    g_androidTouchControlsVisibleCache = visible;
+    CallVoidMethodOnActivity("onNativeSetTouchOverlayVisible", visible);
+}
+
+// Called once from MainActivity.showGameUi() right after creating the touch overlay, so the
+// settings checkbox above starts in sync with whatever the user last chose (persisted Kotlin-side
+// - see TouchControlsOverlay.kt) instead of defaulting to "on" every launch.
+extern "C" JNIEXPORT void JNICALL
+Java_com_wiicompiled_android_MainActivity_nativeSetTouchControlsVisibleCache(JNIEnv*, jobject /* this */,
+                                                                                jboolean visible) {
+    g_androidTouchControlsVisibleCache = (visible == JNI_TRUE);
+}
 
 extern "C" int MkwHostCpuBaselineInit();
 int RuntimeMain(int argc, char** argv);  // NOT extern "C" - matches its real declaration in main.cpp
@@ -64,7 +113,19 @@ Java_com_wiicompiled_android_MainActivity_nativeRealRuntimeCheck(JNIEnv* env, jo
 // UI thread, read exactly once from the SDLMain thread that starts strictly after.
 namespace {
 std::string g_androidDvdRoot;
+std::string g_androidRetroRewindRoot;
 }  // namespace
+
+// Separate setter (rather than a 3rd nativeSetInstallPaths parameter) so the base-product build
+// path never needs to pass anything for it. Same ordering rule as nativeSetInstallPaths: must be
+// called before super.onCreate() lets SDLMain's thread start.
+extern "C" JNIEXPORT void JNICALL
+Java_com_wiicompiled_android_MainActivity_nativeSetRetroRewindRoot(JNIEnv* env, jobject /* this */,
+                                                                     jstring retroRewindRoot) {
+    const char* chars = env->GetStringUTFChars(retroRewindRoot, nullptr);
+    g_androidRetroRewindRoot = chars;
+    env->ReleaseStringUTFChars(retroRewindRoot, chars);
+}
 
 extern "C" JNIEXPORT void JNICALL
 Java_com_wiicompiled_android_MainActivity_nativeSetInstallPaths(JNIEnv* env, jobject /* this */,
@@ -124,6 +185,9 @@ extern "C" int SDL_main(int argc, char** argv) {
                   "graphics_api = \"auto\"\n\n"
                   "[paths]\n"
                   "dvd_root = \"" << g_androidDvdRoot << "\"\n";
+        if (!g_androidRetroRewindRoot.empty()) {
+            config << "retro_rewind_root = \"" << g_androidRetroRewindRoot << "\"\n";
+        }
     }
 
     // RuntimeConfigFile::Get() memoizes into a function-local static on its first call, and

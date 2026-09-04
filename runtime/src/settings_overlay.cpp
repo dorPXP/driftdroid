@@ -1,4 +1,7 @@
 #include "settings_overlay.h"
+#if defined(__ANDROID__)
+#include "android_touch_overlay_bridge.h"
+#endif
 #include "audio_backend.h"
 #include "controller_mapping_wizard.h"
 #include "game_graphics_options.h"
@@ -16,6 +19,7 @@
 #include <array>
 #include <algorithm>
 #include <atomic>
+#include <bitset>
 #include <cctype>
 #include <chrono>
 #include <cmath>
@@ -313,6 +317,20 @@ void ApplyConfiguredMappings() {
 }
 
 void DrawControllerSettings() {
+#if defined(__ANDROID__)
+    // Lives here (not under Graphics, where it was originally placed) since it's an input
+    // setting, not a display one - confirmed directly that it wasn't found under Graphics. The
+    // actual show/hide + persistence lives Kotlin-side (TouchControlsOverlay.kt) as a per-device
+    // UI preference, same as its drag/resize/hide-per-button state - this checkbox is just the
+    // settings-menu entry point into that, plus a live mirror so it displays the right state
+    // (seeded via nativeSetTouchControlsVisibleCache, updated on every toggle here). Most useful
+    // right after a real controller auto-connects and hides the touch overlay
+    // (TouchControlsOverlay.setControllerConnected) but the player wants it back anyway.
+    if (ImGui::Checkbox("Touch controls", &g_androidTouchControlsVisibleCache)) {
+        AndroidSetTouchOverlayVisible(g_androidTouchControlsVisibleCache);
+    }
+    ImGui::Separator();
+#endif
     for (int port = 0; port < PAD_MAX_CONTROLLERS; ++port) {
         const std::string label = "Port " + std::to_string(port + 1);
         ImGui::RadioButton(label.c_str(), &g_controllerPort, port);
@@ -742,55 +760,62 @@ void DrawStartupScreen() {
 }
 
 #if defined(__ANDROID__)
-// The touch controls (runtime/src/android_touch_controls.cpp) present themselves as a brand-new
-// SDL gamepad named exactly this - never seen before, so it has no saved mapping and would
-// otherwise land on whatever raw/default bindings SDL happens to pick (confirmed on-device: B
-// triggered drift, L and R did nothing useful). Auto-apply the same "GameCube" preset the button
-// above writes, the instant this device shows up, so touch controls work correctly with zero
-// setup. Once per process: a player who deliberately re-customizes the touch mapping should not
-// have it silently reset every time the app backgrounds/foregrounds and the virtual device gets
-// re-enumerated.
-bool g_touchControllerAutoConfigured = false;
+// Any controller landing on Android - the touch overlay's own virtual gamepad
+// (runtime/src/android_touch_controls.cpp) or a real Bluetooth pad - presents itself as a
+// brand-new SDL gamepad with no saved mapping, and would otherwise land on whatever raw/default
+// bindings SDL happens to pick (confirmed on-device: B triggered drift, L and R did nothing
+// useful for the touch device; a real Switch Pro Controller needed a manual visit to the settings
+// menu's "Classic Controller Pro" button before it worked at all - confirmed directly: "if you
+// have a controller right now you have to manually go to the settings menu"). Auto-apply the
+// preset to EVERY newly-seen controller index, not just the touch device by name, the instant it
+// shows up, so nothing on Android ever needs manual setup.
+//
+// Tracked once per controller INDEX (not a single global bool) so this can fire independently for
+// the touch device and any number of real controllers connecting over a session, without
+// repeatedly re-stomping a controller the player has since deliberately customized differently.
+// Indices are small and session-scoped in practice (SDL assigns them in connection order), so a
+// bitset sized generously above PAD_MAX_CONTROLLERS is a safe, simple tracking scheme - the same
+// per-process "configure once" tradeoff the single-bool version already accepted for the touch
+// device specifically.
+std::bitset<64> g_androidControllersAutoConfigured{};
 
-void AutoConfigureTouchControllerIfPresent() {
-    if (g_touchControllerAutoConfigured) {
-        return;
-    }
+void AutoConfigureNewAndroidControllersIfPresent() {
     const uint32_t controllerCount = PADCount();
-    RT_LOG(RT_TAG_CONFIG) << "AutoConfigureTouchControllerIfPresent: scanning " << controllerCount
+    RT_LOG(RT_TAG_CONFIG) << "AutoConfigureNewAndroidControllersIfPresent: scanning " << controllerCount
                            << " controller(s)";
     for (uint32_t index = 0; index < controllerCount; ++index) {
-        const char* name = PADGetNameForControllerIndex(index);
-        RT_LOG(RT_TAG_CONFIG) << "  [" << index << "] " << (name != nullptr ? name : "(null)");
-        if (name == nullptr || std::string_view(name) != "WiiCompiled Touch Controls") {
+        if (index < g_androidControllersAutoConfigured.size() && g_androidControllersAutoConfigured[index]) {
             continue;
         }
+        const char* name = PADGetNameForControllerIndex(index);
+        RT_LOG(RT_TAG_CONFIG) << "  [" << index << "] " << (name != nullptr ? name : "(null)");
 
-        // First port that is not already a *different*, real controller - confirmed on-device
-        // this matters: hard-coding port 0 silently evicted an already-connected, already
-        // correctly-mapped Nintendo Switch Pro Controller the instant the touch overlay was
-        // touched for the first time. An empty port, or a port already holding this exact touch
-        // device (e.g. a re-run of this function after g_touchControllerAutoConfigured was somehow
-        // reset), are both fair game; anything else is a real pad and must be left alone.
+        // First port that is not already a *different* real controller - confirmed on-device this
+        // matters: hard-coding port 0 silently evicted an already-connected, already
+        // correctly-mapped controller the instant a second device showed up. An empty port, or a
+        // port already holding this exact device (e.g. a re-run after some prior state reset), are
+        // both fair game; anything else is a different pad and must be left alone.
         uint32_t targetPort = 0;
         bool foundPort = false;
         for (uint32_t port = 0; port < PAD_MAX_CONTROLLERS; ++port) {
             const char* portName = PADGetName(port);
-            if (portName == nullptr || std::string_view(portName) == "WiiCompiled Touch Controls") {
+            if (portName == nullptr || (name != nullptr && std::string_view(portName) == name)) {
                 targetPort = port;
                 foundPort = true;
                 break;
             }
         }
         if (!foundPort) {
-            RT_LOG(RT_TAG_CONFIG) << "AutoConfigureTouchControllerIfPresent: all ports already "
-                                      "hold a different controller, leaving touch controls unbound";
-            return;
+            RT_LOG(RT_TAG_CONFIG) << "AutoConfigureNewAndroidControllersIfPresent: all ports already "
+                                      "hold a different controller, leaving index "
+                                   << index << " unbound";
+            continue;
         }
         PADSetPortForIndex(index, targetPort);
         // Classic Controller Pro, not GameCube: matches TouchControlsOverlay's L/R buttons,
         // which send SDL_GAMEPAD_BUTTON_LEFT/RIGHT_SHOULDER (this preset's "left_shoulder"/
-        // "right_shoulder"), not an analog trigger axis.
+        // "right_shoulder"), not an analog trigger axis - and matches a real Switch Pro
+        // Controller's physical wiring, so the same preset is correct for both.
         for (size_t i = 0; i < kControllerButtons.size(); ++i) {
             if (const NativeButtonItem* native = FindNativeButton(kClassicProPreset[i])) {
                 PADSetButtonMapping(targetPort,
@@ -801,10 +826,11 @@ void AutoConfigureTouchControllerIfPresent() {
             }
         }
         PADSerializeMappings();
-        g_touchControllerAutoConfigured = true;
-        RT_LOG(RT_TAG_CONFIG) << "AutoConfigureTouchControllerIfPresent: configured index " << index
+        if (index < g_androidControllersAutoConfigured.size()) {
+            g_androidControllersAutoConfigured.set(index);
+        }
+        RT_LOG(RT_TAG_CONFIG) << "AutoConfigureNewAndroidControllersIfPresent: configured index " << index
                                << " on port " << targetPort;
-        return;
     }
 }
 #endif  // __ANDROID__
@@ -975,7 +1001,7 @@ void HandleEvents(const AuroraEvent* events) noexcept {
             g_configuredControllerIndices.fill(std::numeric_limits<int32_t>::min());
 #if defined(__ANDROID__)
             if (ev->type == AURORA_CONTROLLER_ADDED) {
-                AutoConfigureTouchControllerIfPresent();
+                AutoConfigureNewAndroidControllersIfPresent();
             }
 #endif
         }

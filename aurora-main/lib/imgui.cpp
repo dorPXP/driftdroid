@@ -59,8 +59,10 @@ void create_context() noexcept {
   // on-device: at the desktop default scale, both the top bar's text and the FPS counter are
   // hard to read, and the panels' checkboxes/sliders are hard to hit with a finger. Scaling both
   // font and layout geometry together keeps hit targets and text proportional to each other.
-  io.FontGlobalScale = 1.8f;
-  ImGui::GetStyle().ScaleAllSizes(1.8f);
+  // 1.8x was still reported too small on-device for real fingers (2026-09-05 feedback) - bumped
+  // to 2.4x.
+  io.FontGlobalScale = 2.4f;
+  ImGui::GetStyle().ScaleAllSizes(2.4f);
 #endif
 }
 

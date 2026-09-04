@@ -21,7 +21,13 @@ import kotlin.math.sin
  */
 class TouchJoystickView(context: Context) : View(context) {
 
+    // See TouchButtonView's identical setter for why this must repaint immediately rather than
+    // waiting for the next unrelated redraw.
     var editMode: Boolean = false
+        set(value) {
+            field = value
+            invalidate()
+        }
     var onEditEnd: ((moved: Boolean) -> Unit)? = null
 
     private var active = false

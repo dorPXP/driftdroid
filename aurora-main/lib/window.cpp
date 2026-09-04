@@ -53,6 +53,16 @@ AuroraWindowSize g_windowSize;
 std::vector<AuroraEvent> g_events;
 std::atomic_bool g_backgrounded = false;
 std::atomic_bool g_nativeResizePending = false;
+#if defined(__ANDROID__)
+int g_androidRealGamepadCount = 0;
+#endif
+}  // namespace
+
+#if defined(__ANDROID__)
+extern "C" void AndroidNotifyGamepadConnectionChanged(bool connected);
+#endif
+
+namespace {
 std::atomic<AuroraDisplayMode> g_displayMode{AURORA_DISPLAY_MODE_WINDOWED};
 #if defined(SDL_PLATFORM_ANDROID)
 std::atomic_bool g_surfaceReady = false;
@@ -288,6 +298,18 @@ void process_event(SDL_Event& event) {
   }
   case SDL_EVENT_GAMEPAD_ADDED: {
     auto instance = input::add_controller(event.gdevice.which);
+#if defined(__ANDROID__)
+    // SDL_IsJoystickVirtual excludes the touch overlay's own SDL_AttachVirtualJoystick-backed
+    // gamepad (android_touch_controls.cpp) - without this check, the touch overlay would report
+    // itself as "a controller connected" the instant it's created and immediately hide itself.
+    // Counted rather than a plain bool so a second real controller disconnecting doesn't
+    // incorrectly re-show the overlay while the first one is still connected.
+    if (!SDL_IsJoystickVirtual(event.gdevice.which)) {
+      if (++g_androidRealGamepadCount == 1) {
+        AndroidNotifyGamepadConnectionChanged(true);
+      }
+    }
+#endif
     g_events.push_back(AuroraEvent{
         .type = AURORA_CONTROLLER_ADDED,
         .controller = instance,
@@ -304,6 +326,13 @@ void process_event(SDL_Event& event) {
     break;
   }
   case SDL_EVENT_GAMEPAD_REMOVED: {
+#if defined(__ANDROID__)
+    if (!SDL_IsJoystickVirtual(event.gdevice.which) && g_androidRealGamepadCount > 0) {
+      if (--g_androidRealGamepadCount == 0) {
+        AndroidNotifyGamepadConnectionChanged(false);
+      }
+    }
+#endif
     input::remove_controller(event.gdevice.which);
     g_events.push_back(AuroraEvent{
         .type = AURORA_CONTROLLER_REMOVED,

@@ -117,11 +117,23 @@ automatically apply there, and vice versa.
 
 ## Retro Rewind
 
-The underlying runtime already carries real, working support for
-[Retro Rewind](https://wiki.tockdom.com/wiki/Retro_Rewind) - a Riivolution-style file-overlay
-system and a network stack built specifically to talk to the community Retro-WFC service - since
-this fork shares that runtime with upstream WiiCompiled. None of that is wired up to an Android
-import flow yet; it's a natural next step once basic disc import is finished.
+[Retro Rewind](https://wiki.tockdom.com/wiki/Retro_Rewind) is a separate, optional community mod -
+this app doesn't include, bundle, or download it, the same way it doesn't include the base game.
+The app's first screen lets you choose Original Mario Kart Wii or Retro Rewind; picking Retro
+Rewind before it's installed walks you through getting it set up:
+
+1. Get your own copy of Retro Rewind first (search "Retro Rewind Mario Kart Wii", or use the
+   separate Wheel Wizard tool most PC players already use for this).
+2. Come back to the app and tap "Install Retro Rewind...", then either:
+   - **Select the `.zip` file** exactly as you downloaded it - the app extracts it for you, no
+     separate unzip step needed, or
+   - **Select a folder**, if you've already extracted it yourself.
+3. The app copies the pack into place (~2GB, so this takes a minute) and you're done - no manual
+   file management, no computer required.
+
+Both the Riivolution-style file-overlay system this depends on, and a network stack built
+specifically to talk to the community Retro-WFC service, are shared with upstream WiiCompiled's
+runtime and already wired up on Android.
 
 ## FAQ
 
@@ -145,6 +157,14 @@ Pull the run log from the device with:
 ```
 adb shell run-as com.wiicompiled.android cat files/WiiCompiled/android_runtime_attempt.log
 ```
+
+**Why doesn't my Switch Pro Controller rumble?**
+Confirmed at the kernel level (`adb shell getevent -pl`): stock Android's Bluetooth HID gamepad
+driver doesn't expose any force-feedback capability for this controller at all - Nintendo's
+rumble motor uses its own proprietary HID protocol, not the generic one Android supports. This
+isn't something the app can fix from user space; it would need a from-scratch low-level HID
+output-report driver specifically for Nintendo controllers. Controllers with real Android-exposed
+vibrator support (most Xbox/PlayStation-style pads) should rumble correctly.
 
 ## AI usage
 AI coding tools were used extensively during development of this fork, including for debugging,
