@@ -196,7 +196,10 @@ class TouchControlsOverlay private constructor(context: Context, parent: ViewGro
                 // L=item, R=drift (digital shoulder buttons, per the Classic Controller Pro
                 // preset AutoConfigureTouchControllerIfPresent applies - see TouchInputBridge).
                 ControlSpec("l", "L", TouchInputBridge.BUTTON_L, 0.05f, 0.10f, 68f, true),
-                ControlSpec("r", "R", TouchInputBridge.BUTTON_R, 0.90f, 0.10f, 68f, true),
+                // Lower than L: the top-right corner is shared with the settings gear and the FPS
+                // counter - confirmed on-device, R's hit-circle up there was swallowing taps
+                // meant for the gear.
+                ControlSpec("r", "R", TouchInputBridge.BUTTON_R, 0.90f, 0.22f, 68f, true),
                 // No Select control: Mario Kart Wii has no Select-equivalent action, so a touch
                 // button for it would just do nothing.
                 ControlSpec("start", "Start", TouchInputBridge.BUTTON_START, 0.5f, 0.92f, 60f, true),

@@ -52,6 +52,16 @@ void create_context() noexcept {
   io.LogFilename = g_imguiLog.c_str();
   ImGui::LoadIniSettingsFromMemory("", 0);
   io.WantSaveIniSettings = false;
+
+#if defined(__ANDROID__)
+  // Every ImGui surface here (the top settings bar, its Resolution/Graphics/Controller/Audio
+  // panels, the FPS overlay) was sized for a mouse cursor on a desktop monitor - confirmed
+  // on-device: at the desktop default scale, both the top bar's text and the FPS counter are
+  // hard to read, and the panels' checkboxes/sliders are hard to hit with a finger. Scaling both
+  // font and layout geometry together keeps hit targets and text proportional to each other.
+  io.FontGlobalScale = 1.8f;
+  ImGui::GetStyle().ScaleAllSizes(1.8f);
+#endif
 }
 
 void initialize() noexcept {
