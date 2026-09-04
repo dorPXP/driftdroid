@@ -85,8 +85,7 @@ int g_frameInterpolationMode = [] {
         return 0;
     }
 }();
-int g_displayMode = [] {
-    const std::string mode = RuntimeConfigFile::DisplayMode("windowed");
+int ParseDisplayModeConfig(const std::string& mode) {
     if (mode == "borderless") {
         return static_cast<int>(AURORA_DISPLAY_MODE_BORDERLESS);
     }
@@ -94,7 +93,9 @@ int g_displayMode = [] {
         return static_cast<int>(AURORA_DISPLAY_MODE_EXCLUSIVE);
     }
     return static_cast<int>(AURORA_DISPLAY_MODE_WINDOWED);
-}();
+}
+
+int g_displayMode = ParseDisplayModeConfig(RuntimeConfigFile::DisplayMode("borderless"));
 bool g_skipUnreadyPipelines = RuntimeConfigFile::SkipUnreadyPipelines(true);
 bool g_disableCopyFilter = RuntimeConfigFile::DisableCopyFilter(true);
 bool g_showFps = RuntimeConfigFile::ShowFps(true);
@@ -740,6 +741,74 @@ void DrawStartupScreen() {
     ImGui::PopStyleColor();
 }
 
+#if defined(__ANDROID__)
+// The touch controls (runtime/src/android_touch_controls.cpp) present themselves as a brand-new
+// SDL gamepad named exactly this - never seen before, so it has no saved mapping and would
+// otherwise land on whatever raw/default bindings SDL happens to pick (confirmed on-device: B
+// triggered drift, L and R did nothing useful). Auto-apply the same "GameCube" preset the button
+// above writes, the instant this device shows up, so touch controls work correctly with zero
+// setup. Once per process: a player who deliberately re-customizes the touch mapping should not
+// have it silently reset every time the app backgrounds/foregrounds and the virtual device gets
+// re-enumerated.
+bool g_touchControllerAutoConfigured = false;
+
+void AutoConfigureTouchControllerIfPresent() {
+    if (g_touchControllerAutoConfigured) {
+        return;
+    }
+    const uint32_t controllerCount = PADCount();
+    RT_LOG(RT_TAG_CONFIG) << "AutoConfigureTouchControllerIfPresent: scanning " << controllerCount
+                           << " controller(s)";
+    for (uint32_t index = 0; index < controllerCount; ++index) {
+        const char* name = PADGetNameForControllerIndex(index);
+        RT_LOG(RT_TAG_CONFIG) << "  [" << index << "] " << (name != nullptr ? name : "(null)");
+        if (name == nullptr || std::string_view(name) != "WiiCompiled Touch Controls") {
+            continue;
+        }
+
+        // First port that is not already a *different*, real controller - confirmed on-device
+        // this matters: hard-coding port 0 silently evicted an already-connected, already
+        // correctly-mapped Nintendo Switch Pro Controller the instant the touch overlay was
+        // touched for the first time. An empty port, or a port already holding this exact touch
+        // device (e.g. a re-run of this function after g_touchControllerAutoConfigured was somehow
+        // reset), are both fair game; anything else is a real pad and must be left alone.
+        uint32_t targetPort = 0;
+        bool foundPort = false;
+        for (uint32_t port = 0; port < PAD_MAX_CONTROLLERS; ++port) {
+            const char* portName = PADGetName(port);
+            if (portName == nullptr || std::string_view(portName) == "WiiCompiled Touch Controls") {
+                targetPort = port;
+                foundPort = true;
+                break;
+            }
+        }
+        if (!foundPort) {
+            RT_LOG(RT_TAG_CONFIG) << "AutoConfigureTouchControllerIfPresent: all ports already "
+                                      "hold a different controller, leaving touch controls unbound";
+            return;
+        }
+        PADSetPortForIndex(index, targetPort);
+        // Classic Controller Pro, not GameCube: matches TouchControlsOverlay's L/R buttons,
+        // which send SDL_GAMEPAD_BUTTON_LEFT/RIGHT_SHOULDER (this preset's "left_shoulder"/
+        // "right_shoulder"), not an analog trigger axis.
+        for (size_t i = 0; i < kControllerButtons.size(); ++i) {
+            if (const NativeButtonItem* native = FindNativeButton(kClassicProPreset[i])) {
+                PADSetButtonMapping(targetPort,
+                                     PADButtonMapping{native->nativeButton, kControllerButtons[i].padButton});
+                PADSetAltButtonMapping(
+                    targetPort, PADButtonMapping{PAD_NATIVE_BUTTON_INVALID, kControllerButtons[i].padButton});
+                RuntimeConfigFile::SetControllerButton(i, kClassicProPreset[i]);
+            }
+        }
+        PADSerializeMappings();
+        g_touchControllerAutoConfigured = true;
+        RT_LOG(RT_TAG_CONFIG) << "AutoConfigureTouchControllerIfPresent: configured index " << index
+                               << " on port " << targetPort;
+        return;
+    }
+}
+#endif  // __ANDROID__
+
 void DrawTopBar() {
     if (!g_topBarVisible || !ImGui::BeginMainMenuBar()) {
         return;
@@ -842,6 +911,39 @@ void PersistDisplayModeIfChanged() {
 } // namespace
 
 void InitializeRuntimeSettings() noexcept {
+#if defined(__ANDROID__)
+    // The g_* globals above were initialized at static-init time, which on Android runs
+    // before Kotlin's JNI call to SetAndroidFilesDir() - so RuntimeConfigFile::ApplicationDataDirectory()
+    // still resolved to nothing back then, and every read silently fell back to its hardcoded
+    // default (this is why persisted settings like display mode "didn't save": they were never
+    // actually being read back, on any launch). SetAndroidFilesDir() has definitely run by the
+    // time SDL_main calls this function, so re-read everything from the real config now.
+    g_resolutionScale = RuntimeConfigFile::ResolutionMultiplier(1.0f);
+    g_audioVolumePercent = static_cast<int>(std::lround(RuntimeConfigFile::AudioVolume(1.0f) * 100.0f));
+    g_musicVolumePercent = static_cast<int>(std::lround(RuntimeConfigFile::MusicVolume(1.0f) * 100.0f));
+    g_soundEffectsVolumePercent =
+        static_cast<int>(std::lround(RuntimeConfigFile::SoundEffectsVolume(1.0f) * 100.0f));
+    g_uiVolumePercent = static_cast<int>(std::lround(RuntimeConfigFile::UiVolume(1.0f) * 100.0f));
+    g_voicesVolumePercent = static_cast<int>(std::lround(RuntimeConfigFile::VoicesVolume(1.0f) * 100.0f));
+    g_audioMuted = RuntimeConfigFile::AudioMuted(false);
+    g_audioMixWorker = RuntimeConfigFile::AudioMixWorkerEnabled(true);
+    g_attenuateMusicWhenMediaPlays = RuntimeConfigFile::AttenuateMusicWhenMediaPlays(false);
+    g_frameInterpolationMode = [] {
+        switch (RuntimeConfigFile::FrameInterpolationFps(0)) {
+        case 120:
+            return 1;
+        case 180:
+            return 2;
+        default:
+            return 0;
+        }
+    }();
+    g_displayMode = ParseDisplayModeConfig(RuntimeConfigFile::DisplayMode("borderless"));
+    g_skipUnreadyPipelines = RuntimeConfigFile::SkipUnreadyPipelines(true);
+    g_disableCopyFilter = RuntimeConfigFile::DisableCopyFilter(true);
+    g_showFps = RuntimeConfigFile::ShowFps(true);
+    g_disabledPostProcessingPaths = RuntimeConfigFile::DisabledPostProcessingPaths(0);
+#endif
     controller_mapping_wizard::LoadPersistedMappings();
     ApplyConfiguredMappings();
     AudioBackend::Instance().SetMasterVolume(static_cast<float>(g_audioVolumePercent) / 100.0f);
@@ -871,6 +973,11 @@ void HandleEvents(const AuroraEvent* events) noexcept {
     for (const AuroraEvent* ev = events; ev->type != AURORA_NONE; ++ev) {
         if (ev->type == AURORA_CONTROLLER_ADDED || ev->type == AURORA_CONTROLLER_REMOVED) {
             g_configuredControllerIndices.fill(std::numeric_limits<int32_t>::min());
+#if defined(__ANDROID__)
+            if (ev->type == AURORA_CONTROLLER_ADDED) {
+                AutoConfigureTouchControllerIfPresent();
+            }
+#endif
         }
         if (ev->type != AURORA_SDL_EVENT) {
             continue;
@@ -907,6 +1014,10 @@ void Draw() noexcept {
 bool StartupScreenVisible() noexcept {
     return !g_strapInputAccepted.load(std::memory_order_acquire) ||
            g_presentedFrame < g_startupDismissFrame.load(std::memory_order_relaxed);
+}
+
+void ToggleTopBar() noexcept {
+    SetTopBarVisible(!g_topBarVisible);
 }
 
 void NotifyStrapInputAccepted() noexcept {

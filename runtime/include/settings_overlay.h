@@ -10,6 +10,8 @@ void InitializeRuntimeSettings() noexcept;
 void HandleEvents(const AuroraEvent* events) noexcept;
 void Draw() noexcept;
 bool StartupScreenVisible() noexcept;
+// Android only: there is no F10 key to press, so the touch UI calls this directly instead.
+void ToggleTopBar() noexcept;
 void NotifyStrapInputAccepted() noexcept;
 void AdvancePresentedFrame() noexcept;
 } // namespace settings_overlay
