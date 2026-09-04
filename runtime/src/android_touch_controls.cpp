@@ -31,7 +31,7 @@ SDL_Joystick* EnsureVirtualJoystick() {
     desc.type = SDL_JOYSTICK_TYPE_GAMEPAD;
     // Only LEFTX/LEFTY are used (the on-screen stick); every button is digital, including L/R
     // (SDL_GAMEPAD_BUTTON_LEFT/RIGHT_SHOULDER), matching the Classic Controller Pro preset that
-    // AutoConfigureTouchControllerIfPresent (settings_overlay.cpp) applies to this device.
+    // AutoConfigureNewAndroidControllersIfPresent (settings_overlay.cpp) applies to this device.
     desc.naxes = SDL_GAMEPAD_AXIS_LEFTY + 1;
     desc.axis_mask = (1u << SDL_GAMEPAD_AXIS_LEFTX) | (1u << SDL_GAMEPAD_AXIS_LEFTY);
     // SDL's virtual joystick backend does NOT expose SDL_SetJoystickVirtualButton's "button"

@@ -3,7 +3,9 @@ package org.libsdl.app;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 import android.content.Context;
 import android.hardware.lights.Light;
@@ -12,6 +14,9 @@ import android.hardware.lights.LightsManager;
 import android.hardware.lights.LightState;
 import android.graphics.Color;
 import android.os.Build;
+import android.os.Handler;
+import android.os.Looper;
+import android.os.SystemClock;
 import android.os.VibrationEffect;
 import android.os.Vibrator;
 import android.os.VibratorManager;
@@ -511,6 +516,20 @@ class SDLJoystickHandler {
 }
 
 class SDLHapticHandler_API31 extends SDLHapticHandler {
+    // WiiCompiled's own guest rumble calls (PADControlMotor -> controller_rumble) always pass
+    // duration_ms=0 and rely on a separate stop call instead of an effect timeout - and the game
+    // issues very rapid start/stop rumble pulses tied to gameplay events, often stopping within a
+    // single frame (~16ms) of starting. Real Bluetooth/ERM/LRA vibration motors need real time to
+    // ramp up to commanded amplitude; cancelling that fast meant the motor essentially never
+    // finished starting before being told to stop, which is exactly why on-device rumble was
+    // reported as "lacking" despite the underlying intensity values matching the desktop build
+    // byte for byte. Deferring a too-early stop by the shortfall gives the motor a real chance to
+    // be felt, the same way a controller's own onboard rumble driver would naturally debounce a
+    // stop this close to a start.
+    private static final long MIN_VIBRATION_MS = 80;
+    private final Map<Vibrator, Long> mVibrateStartTimes = new HashMap<>();
+    private final Handler mMainHandler = new Handler(Looper.getMainLooper());
+
     @Override
     void run(int device_id, float intensity, int length) {
         SDLHaptic haptic = getHaptic(device_id);
@@ -550,7 +569,13 @@ class SDLHapticHandler_API31 extends SDLHapticHandler {
         }
 
         if (intensity == 0.0f) {
-            vibrator.cancel();
+            Long startedAtMs = mVibrateStartTimes.get(vibrator);
+            long elapsedMs = startedAtMs != null ? SystemClock.uptimeMillis() - startedAtMs : Long.MAX_VALUE;
+            if (elapsedMs >= MIN_VIBRATION_MS) {
+                vibrator.cancel();
+            } else {
+                mMainHandler.postDelayed(vibrator::cancel, MIN_VIBRATION_MS - elapsedMs);
+            }
             return;
         }
 
@@ -562,6 +587,7 @@ class SDLHapticHandler_API31 extends SDLHapticHandler {
             vibrator.cancel();
             return;
         }
+        mVibrateStartTimes.put(vibrator, SystemClock.uptimeMillis());
         try {
             vibrator.vibrate(VibrationEffect.createOneShot(length, value));
         }

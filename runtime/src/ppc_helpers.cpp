@@ -7,6 +7,7 @@
 #include "timebase_contract.h"
 
 #include <array>
+#include <atomic>
 #include <bitset>
 #include <chrono>
 #include <cmath>
@@ -44,11 +45,35 @@ uint32_t g_reservationAddr = 0;
 bool g_hasReservation = false;
 const auto g_timeBaseStart = std::chrono::steady_clock::now();
 
+// Real Wii hardware's timebase register never jumps: it ticks at a fixed rate no matter what the
+// game does. This host, however, can stall for seconds at a time on things the guest has no
+// concept of - most notably a one-time Vulkan/Dawn shader pipeline compile burst on first launch
+// of a new product (~24s observed for Retro Rewind's ~1374 pipelines on Android). Handing
+// translated PPC code (via mftb/mftbu) a raw unclamped host-clock read let one such stall present
+// as a ~24s timebase discontinuity to the real Wii sound-mixer code, which computed an
+// out-of-range ring-buffer index from it and crashed with a guest memory fault (see
+// ReportFatalGuestFault in guest_flat_memory.cpp) - confirmed on-device. Clamping the maximum
+// timebase advance any single read can contribute makes an arbitrarily long host stall look, from
+// the guest's perspective, like nothing more unusual than a few dropped frames - the same
+// "pause and resume" semantics a debugger breakpoint would already produce, which real Wii game
+// code has always had to tolerate.
+constexpr uint64_t kMaxTimeBaseDeltaNs = 250'000'000ull;  // 250ms: generous vs. one dropped frame.
+std::atomic<uint64_t> g_lastRealTimeBaseNs{0};
+std::atomic<uint64_t> g_virtualTimeBaseNs{0};
+
 uint64_t GetTimeBase() {
     const auto elapsed = std::chrono::steady_clock::now() - g_timeBaseStart;
-    const auto nanoseconds =
-        std::chrono::duration_cast<std::chrono::nanoseconds>(elapsed).count();
-    return TimeBaseContract::NanosecondsToTicks(static_cast<uint64_t>(nanoseconds));
+    const uint64_t realNanoseconds =
+        static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(elapsed).count());
+
+    const uint64_t lastRealNanoseconds = g_lastRealTimeBaseNs.exchange(realNanoseconds, std::memory_order_relaxed);
+    uint64_t delta = (realNanoseconds > lastRealNanoseconds) ? (realNanoseconds - lastRealNanoseconds) : 0;
+    if (delta > kMaxTimeBaseDeltaNs) {
+        delta = kMaxTimeBaseDeltaNs;
+    }
+    const uint64_t virtualNanoseconds = g_virtualTimeBaseNs.fetch_add(delta, std::memory_order_relaxed) + delta;
+
+    return TimeBaseContract::NanosecondsToTicks(virtualNanoseconds);
 }
 
 constexpr uint32_t kFpscrFx = 1u << 31;

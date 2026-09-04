@@ -18,7 +18,15 @@ class TouchButtonView(
     private val sdlButton: Int,
 ) : View(context) {
 
+    // A plain property here would leave the yellow edit-mode border painted stale until the next
+    // unrelated redraw (confirmed on-device: exiting edit mode left every button yellow until it
+    // was pressed once, which is what actually triggered onDraw again) - setting this externally
+    // (TouchControlsOverlay.setEditMode) must repaint immediately regardless of touch activity.
     var editMode: Boolean = false
+        set(value) {
+            field = value
+            invalidate()
+        }
     var onEditEnd: ((moved: Boolean) -> Unit)? = null
 
     private var pressed = false
