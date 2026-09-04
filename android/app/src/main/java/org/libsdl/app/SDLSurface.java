@@ -35,6 +35,14 @@ public class SDLSurface extends SurfaceView implements SurfaceHolder.Callback,
     View.OnApplyWindowInsetsListener, View.OnKeyListener, View.OnTouchListener,
     SensorEventListener, ScaleGestureDetector.OnScaleGestureListener {
 
+    // Aurora's own Android-only readiness gate (aurora-main/lib/window.cpp: g_surfaceReady,
+    // false until this fires). Without it, aurora::window::is_presentable() is permanently false,
+    // so is_paused() is permanently true, so the render/idle loop's aurora::window::poll_events()
+    // blocks in a plain (infinite-timeout) SDL_WaitEvent forever - confirmed on-device via a
+    // deliberate debuggerd backtrace showing the guest's VI-retrace wait stuck inside exactly that
+    // call, with no further SDL/Android event ever arriving to wake it back up.
+    private static native void auroraNativeSetSurfaceReady(boolean ready);
+
     // Sensors
     protected SensorManager mSensorManager;
     protected Display mDisplay;
@@ -109,6 +117,7 @@ public class SDLSurface extends SurfaceView implements SurfaceHolder.Callback,
         SDLActivity.handleNativeState();
 
         mIsSurfaceReady = false;
+        auroraNativeSetSurfaceReady(false);
         SDLActivity.onNativeSurfaceDestroyed();
     }
 
@@ -184,6 +193,7 @@ public class SDLSurface extends SurfaceView implements SurfaceHolder.Callback,
         if (skip) {
            Log.v("SDL", "Skip .. Surface is not ready.");
            mIsSurfaceReady = false;
+           auroraNativeSetSurfaceReady(false);
            return;
         }
 
@@ -192,6 +202,7 @@ public class SDLSurface extends SurfaceView implements SurfaceHolder.Callback,
 
         /* Surface is ready */
         mIsSurfaceReady = true;
+        auroraNativeSetSurfaceReady(true);
 
         SDLActivity.mNextNativeState = SDLActivity.NativeState.RESUMED;
         SDLActivity.handleNativeState();

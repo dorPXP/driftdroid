@@ -285,7 +285,7 @@ inline void EnsureConfigFile() {
               "widescreen = true\n"
               "resolution_multiplier = 1.0\n"
               "frame_interpolation_fps = 0\n"
-              "display_mode = \"windowed\"\n"
+              "display_mode = \"borderless\"\n"
               "graphics_api = \"auto\"\n"
               "skip_unready_pipelines = true\n"
               "disable_copy_filter = true\n"
@@ -798,7 +798,7 @@ inline std::string GraphicsApi(std::string fallback = "auto") {
     return Get().graphicsApi.value_or(std::move(fallback));
 }
 
-inline std::string DisplayMode(std::string fallback = "windowed") {
+inline std::string DisplayMode(std::string fallback = "borderless") {
     return Get().displayMode.value_or(std::move(fallback));
 }
 

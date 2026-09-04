@@ -75,6 +75,16 @@ inline std::optional<std::filesystem::path> BootstrapPayloadPath() {
         }
     }
 
+#if defined(__ANDROID__)
+    // Same reasoning as the dsp_coef.bin lookup in ax_mix.cpp: no executable directory and no
+    // checked-out source tree on-device, so the bootstrap payload (runtime/assets/wii on desktop)
+    // is instead staged alongside Config.toml, debug-only, the same way DiscData/dsp_coef.bin are.
+    const auto androidPayload = RuntimeConfigFile::ApplicationDataDirectory() / "wii_bootstrap";
+    if (ExistingDirectory(androidPayload / "shared2" / "wc24")) {
+        return androidPayload;
+    }
+#endif
+
     // This makes developer-tree launches work without changing their release layout.
     for (auto base = std::filesystem::current_path(); !base.empty();) {
         const auto candidate = base / "runtime" / "assets" / "wii";

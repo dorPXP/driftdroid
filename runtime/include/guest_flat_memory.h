@@ -15,7 +15,23 @@ namespace GuestFlat {
 // of a global. 16 TiB: clear of the Windows ASan shadow (32 TiB) and of the
 // usual image/heap placement.
 inline constexpr uint64_t kGuestSpaceSize = 0x1'0000'0000ull;
+#if defined(__ANDROID__)
+// The desktop base (16 TiB, 2^48) assumes a 48-bit (or wider) virtual address space - true on
+// Windows/desktop Linux, but NOT universal on Android. Confirmed directly on the user's real
+// device (Huawei nova 9, Kirin 985): the kernel silently ignores any mmap hint at or above 2^39
+// (redirects to an unrelated low address instead of failing, so this can't be detected any other
+// way than trying it) - most ARM64 Android kernels are built with a narrower VA_BITS
+// configuration than the CPU itself could support, to save page-table memory; 39-bit is a very
+// common choice. 128 GiB (2^37) has real margin below the empirically-found ~2^38 ceiling on
+// that device while still being far above where the heap/stack/loaded libraries actually sit, so
+// it should generalize to other/narrower-VA Android devices too, though this has only been
+// verified on the one device the project can currently test on - if a different Android device
+// hits the same "reserve the 4 GiB flat guest address space" runtime error, try successively
+// lower values here (0x0000'0010'0000'0000ull and below) and report which one works.
+inline constexpr uintptr_t kFixedFlatGuestBase = 0x0000'0020'0000'0000ull;
+#else
 inline constexpr uintptr_t kFixedFlatGuestBase = 0x0000'1000'0000'0000ull;
+#endif
 
 #define MKW_FLAT_GUEST_BASE (reinterpret_cast<uint8_t*>(GuestFlat::kFixedFlatGuestBase))
 

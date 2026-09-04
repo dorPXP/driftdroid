@@ -30,6 +30,10 @@ extern "C" void GxNotifyGuestRamDmaWrite(uint32_t addr, uint32_t size);
 #include <mutex>
 #include <sstream>
 #include <utility>
+#if defined(__ANDROID__)
+#include <chrono>
+#include <thread>
+#endif
 
 namespace fs = std::filesystem;
 
@@ -122,7 +126,8 @@ static bool IsDvdDataRoot(const fs::path& path) {
     std::error_code ec;
     return fs::is_directory(path, ec) && !ec &&
            fs::is_directory(path / "files", ec) && !ec &&
-           fs::is_regular_file(path / "sys" / "fst.bin", ec) && !ec;
+           fs::is_regular_file(path / "sys" / "fst.bin", ec) && !ec &&
+           fs::is_regular_file(path / "sys" / "main.dol", ec) && !ec;
 }
 
 // Single fatal idiom for this module: crash artifacts under `reason`, the same
@@ -155,15 +160,33 @@ static bool IsDvdDataRoot(const fs::path& path) {
     FailDvd("dvd_root", "DVD data is unavailable", details);
 }
 
+#if defined(__ANDROID__)
+// Unlike desktop, nothing has prompted the player for a game yet by the time this runs - the
+// Kotlin-side ROM import overlay (MainActivity/RomImportOverlay) prompts and extracts into this
+// same path concurrently, after the native thread is already running. Poll instead of the normal
+// FailDvdRoot exit, so the (still-blank) SDL surface just waits under that overlay until
+// extraction lands, rather than killing the whole process before the player can pick anything.
+static void WaitForAndroidDvdRoot(const fs::path& path) {
+    constexpr auto kPollInterval = std::chrono::milliseconds(250);
+    while (!IsDvdDataRoot(path)) {
+        std::this_thread::sleep_for(kPollInterval);
+    }
+}
+#endif
+
 static const std::string& GetDvdRoot() {
     std::call_once(g_dvdRootOnce, []() {
         const fs::path path = RuntimeConfigFile::ResolvedDvdRoot();
         if (path.empty()) {
             FailDvdRoot("No DVD root is configured");
         }
+#if defined(__ANDROID__)
+        WaitForAndroidDvdRoot(path);
+#else
         if (!IsDvdDataRoot(path)) {
             FailDvdRoot("Configured DVD root is not an extracted DATA directory", path);
         }
+#endif
         g_dvdRoot = NormalizeDvdHostPath(path.string());
     });
 

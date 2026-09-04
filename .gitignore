@@ -1,6 +1,7 @@
 /generated/
 /Assets/
 /assets/
+/DiscData/
 /PulsarPacks/
 *.dol
 *.rel
@@ -86,4 +87,8 @@ android/.externalNativeBuild/
 # contain the user's own compiled/translated game code - same "never commit game-derived output"
 # rule as /generated/, /build/, /Assets/ above. Never committed, never distributed via the repo.
 android/*/src/main/jniLibs/
+
+# Reference clone of another project (chrissotraidis/kartpad), pulled locally for research only -
+# not part of this project and must never be committed here.
+/kartpadrepo/
 

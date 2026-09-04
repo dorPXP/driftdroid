@@ -39,6 +39,17 @@ std::filesystem::path FindDspCoefficientRom() {
         }
     }
 
+#if defined(__ANDROID__)
+    // No "next to the executable" or source-tree concept on Android (ExecutableDirectory() is
+    // always nullopt there, and there is no checked-out source tree on-device) - the ROM instead
+    // lives alongside Config.toml in the app's own data directory, staged the same debug-only way
+    // DiscData is (see android_jni_bridge.cpp / MainActivity.kt).
+    const auto androidAsset = RuntimeConfigFile::ApplicationDataDirectory() / "dsp_coef.bin";
+    if (std::filesystem::is_regular_file(androidAsset)) {
+        return androidAsset;
+    }
+#endif
+
     for (auto base = std::filesystem::current_path(); !base.empty();) {
         const auto sourceTreeAsset = base / "runtime" / "assets" / "dsp" / "dsp_coef.bin";
         if (std::filesystem::is_regular_file(sourceTreeAsset)) {
