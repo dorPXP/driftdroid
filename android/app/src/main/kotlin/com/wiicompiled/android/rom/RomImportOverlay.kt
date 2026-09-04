@@ -4,12 +4,17 @@ import android.app.Activity
 import android.content.Intent
 import android.graphics.Color
 import android.net.Uri
+import android.os.Handler
+import android.os.Looper
+import android.os.ParcelFileDescriptor
 import android.provider.OpenableColumns
 import android.view.Gravity
+import android.view.View
 import android.view.ViewGroup
 import android.widget.Button
 import android.widget.FrameLayout
 import android.widget.LinearLayout
+import android.widget.ProgressBar
 import android.widget.TextView
 import java.io.File
 
@@ -19,14 +24,25 @@ import java.io.File
  * of failing outright on Android specifically, for exactly this reason: this overlay and native
  * boot are racing, and native just waits for this to finish.
  *
- * This stage only picks and validates a disc image (region-checks a plain ISO/GCM by reading its
- * header directly; WBFS's header is behind its own block table, so that only gets a container-type
- * check for now). Extraction into [dvdRoot] itself is a follow-up - see the TODO in [onFilePicked].
+ * Picks a disc image via Storage Access Framework, then hands the raw file descriptor to the
+ * native extractor (runtime/src/hle/storage/wii_disc_extractor.cpp) on a background thread, which
+ * decrypts and unpacks it straight into [dvdRoot]/sys and [dvdRoot]/files. [onImportComplete]
+ * fires once that succeeds, after this overlay has removed itself.
  */
-class RomImportOverlay private constructor(private val activity: Activity, private val dvdRoot: File) {
+class RomImportOverlay private constructor(
+    private val activity: Activity,
+    private val dvdRoot: File,
+    private val onImportComplete: () -> Unit,
+) {
 
     private val container = FrameLayout(activity)
     private val statusText = TextView(activity)
+    private val selectButton = Button(activity)
+    private val progressBar = ProgressBar(activity, null, android.R.attr.progressBarStyleHorizontal)
+    private val mainHandler = Handler(Looper.getMainLooper())
+
+    private var openFd: ParcelFileDescriptor? = null
+    private var progressPoller: Runnable? = null
 
     init {
         container.setBackgroundColor(Color.rgb(18, 18, 22))
@@ -38,7 +54,7 @@ class RomImportOverlay private constructor(private val activity: Activity, priva
         column.setPadding(pad, pad, pad, pad)
 
         val title = TextView(activity)
-        title.text = "Please select the Mario Kart Wii ROM"
+        title.text = "Please select the Mario Kart Wii ROM ISO"
         title.setTextColor(Color.WHITE)
         title.textSize = 20f
         title.gravity = Gravity.CENTER
@@ -50,9 +66,14 @@ class RomImportOverlay private constructor(private val activity: Activity, priva
         subtitle.gravity = Gravity.CENTER
         subtitle.setPadding(0, dp(8), 0, dp(24))
 
-        val button = Button(activity)
-        button.text = "Select ROM file (.iso / .wbfs)"
-        button.setOnClickListener { launchPicker() }
+        selectButton.text = "Select ROM file (.iso / .wbfs)"
+        selectButton.setOnClickListener { launchPicker() }
+
+        progressBar.max = 1000
+        progressBar.visibility = View.GONE
+        val progressParams =
+            LinearLayout.LayoutParams(dp(260), ViewGroup.LayoutParams.WRAP_CONTENT)
+        progressParams.topMargin = dp(16)
 
         statusText.setTextColor(Color.argb(200, 255, 255, 255))
         statusText.textSize = 13f
@@ -61,7 +82,8 @@ class RomImportOverlay private constructor(private val activity: Activity, priva
 
         column.addView(title)
         column.addView(subtitle)
-        column.addView(button)
+        column.addView(selectButton)
+        column.addView(progressBar, progressParams)
         column.addView(statusText)
 
         val columnParams =
@@ -91,34 +113,87 @@ class RomImportOverlay private constructor(private val activity: Activity, priva
             return
         }
 
-        if (extension == "wbfs") {
-            // WBFS wraps the disc header behind its own block table - reading the region code
-            // needs the real WBFS parser (not built yet), so this only confirms the container
-            // type for now.
-            statusText.setTextColor(Color.WHITE)
-            statusText.text =
-                "\"$name\" looks like a WBFS image. Region check and extraction aren't " +
-                    "implemented yet - nothing further happens with this pick."
-            return
+        // WBFS hides the game ID behind its own block table, so this quick check only covers
+        // plain disc images - the native extractor checks the real game ID either way before it
+        // touches anything else, so a wrong WBFS pick still fails cleanly, just a bit later.
+        if (extension != "wbfs") {
+            val gameId = readGameId(uri)
+            if (gameId == null) {
+                showResult(false, "Couldn't read \"$name\" - make sure it's a valid disc image.")
+                return
+            }
+            if (gameId != "RMCP01") {
+                showResult(
+                    false,
+                    "\"$name\" is game ID $gameId, not RMCP01 (PAL Mario Kart Wii). Only the PAL release is supported.",
+                )
+                return
+            }
         }
 
-        val gameId = readGameId(uri)
-        when {
-            gameId == null -> showResult(false, "Couldn't read \"$name\" - make sure it's a valid disc image.")
-            gameId != "RMCP01" -> showResult(
-                false,
-                "\"$name\" is game ID $gameId, not RMCP01 (PAL Mario Kart Wii). Only the PAL release is supported.",
-            )
-            else -> {
-                showResult(
-                    true,
-                    "\"$name\" is a valid PAL Mario Kart Wii disc (RMCP01). " +
-                        "Extraction into the game isn't implemented yet.",
-                )
-                // TODO(extraction stage): decrypt/extract this disc image straight into
-                // dvdRoot/sys and dvdRoot/files. dvd.cpp's WaitForAndroidDvdRoot poll picks up
-                // the finished folder on its own - no further native wiring needed past that.
+        startExtraction(uri, name)
+    }
+
+    private fun startExtraction(uri: Uri, name: String) {
+        val fd =
+            try {
+                activity.contentResolver.openFileDescriptor(uri, "r")
+            } catch (e: Exception) {
+                null
             }
+        if (fd == null) {
+            showResult(false, "Couldn't open \"$name\" for reading.")
+            return
+        }
+        openFd = fd
+
+        selectButton.visibility = View.GONE
+        progressBar.visibility = View.VISIBLE
+        progressBar.progress = 0
+        statusText.setTextColor(Color.WHITE)
+        statusText.text = "Extracting \"$name\" - this can take a while for a multi-GB disc..."
+
+        val poller =
+            object : Runnable {
+                override fun run() {
+                    val total = nativeExtractBytesTotal()
+                    val done = nativeExtractBytesDone()
+                    if (total > 0) {
+                        progressBar.progress = ((done * 1000) / total).toInt().coerceIn(0, 1000)
+                        val percent = (done * 100) / total
+                        statusText.text = "Extracting \"$name\"... $percent%"
+                    }
+                    mainHandler.postDelayed(this, 400)
+                }
+            }
+        progressPoller = poller
+        mainHandler.postDelayed(poller, 400)
+
+        Thread {
+            val error = nativeExtractDisc(fd.fd, dvdRoot.absolutePath)
+            mainHandler.post { finishExtraction(error) }
+        }.start()
+    }
+
+    private fun finishExtraction(error: String?) {
+        progressPoller?.let { mainHandler.removeCallbacks(it) }
+        progressPoller = null
+        try {
+            openFd?.close()
+        } catch (_: Exception) {
+        }
+        openFd = null
+
+        if (error == null) {
+            progressBar.progress = 1000
+            statusText.setTextColor(Color.rgb(120, 255, 150))
+            statusText.text = "Done! Starting the game..."
+            (container.parent as? ViewGroup)?.removeView(container)
+            onImportComplete()
+        } else {
+            progressBar.visibility = View.GONE
+            selectButton.visibility = View.VISIBLE
+            showResult(false, error)
         }
     }
 
@@ -154,6 +229,12 @@ class RomImportOverlay private constructor(private val activity: Activity, priva
             null
         }
 
+    private external fun nativeExtractDisc(fd: Int, destDataFolder: String): String?
+
+    private external fun nativeExtractBytesDone(): Long
+
+    private external fun nativeExtractBytesTotal(): Long
+
     companion object {
         const val REQUEST_CODE_PICK_ROM = 0x524F4D // "ROM"
 
@@ -161,8 +242,13 @@ class RomImportOverlay private constructor(private val activity: Activity, priva
 
         fun isRomAlreadyImported(dvdRoot: File): Boolean = File(dvdRoot, "sys/main.dol").isFile
 
-        fun attach(activity: Activity, parent: ViewGroup, dvdRoot: File): RomImportOverlay {
-            val overlay = RomImportOverlay(activity, dvdRoot)
+        fun attach(
+            activity: Activity,
+            parent: ViewGroup,
+            dvdRoot: File,
+            onImportComplete: () -> Unit,
+        ): RomImportOverlay {
+            val overlay = RomImportOverlay(activity, dvdRoot, onImportComplete)
             parent.addView(
                 overlay.container,
                 ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT),

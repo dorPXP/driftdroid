@@ -3,6 +3,7 @@
 #include <cctype>
 #include <chrono>
 #include <csignal>
+#include <utility>
 #include <cstdio>
 #include <cstdlib>
 #include <cmath>
@@ -168,12 +169,19 @@ std::filesystem::path GetDefaultRuntimeLogDirectory() {
 
 // Every entry in the Logs root - both the per-run folders written by this
 // scheme and any flat .log files left over from the previous one - is removed
-// once it is older than the retention window.
+// once it is older than the retention window. A crash writes an uncompressed
+// MEM1+MEM2 snapshot (~150-190MB) into its run folder regardless of how minor
+// the fault was (confirmed on-device: a burst of testing produced 66 folders,
+// 5.2GB, well inside the 4-day age window), so age alone doesn't bound size on
+// a device that happens to crash repeatedly in a short span - cap the *count*
+// of retained runs too, independent of age.
 void PruneOldRunLogs(const std::filesystem::path& logRoot) {
     constexpr auto kRetention = std::chrono::hours(24 * 4);
+    constexpr size_t kMaxRetainedRuns = 10;
 
     std::error_code ec;
     const auto now = std::filesystem::file_time_type::clock::now();
+    std::vector<std::pair<std::filesystem::file_time_type, std::filesystem::path>> survivors;
     for (const auto& entry : std::filesystem::directory_iterator(logRoot, ec)) {
         std::error_code entryEc;
         const auto writeTime = std::filesystem::last_write_time(entry.path(), entryEc);
@@ -182,7 +190,19 @@ void PruneOldRunLogs(const std::filesystem::path& logRoot) {
         }
         if (now - writeTime > kRetention) {
             std::filesystem::remove_all(entry.path(), entryEc);
+        } else {
+            survivors.emplace_back(writeTime, entry.path());
         }
+    }
+
+    if (survivors.size() <= kMaxRetainedRuns) {
+        return;
+    }
+    std::sort(survivors.begin(), survivors.end(),
+              [](const auto& a, const auto& b) { return a.first > b.first; });
+    for (size_t i = kMaxRetainedRuns; i < survivors.size(); ++i) {
+        std::error_code removeEc;
+        std::filesystem::remove_all(survivors[i].second, removeEc);
     }
 }
 

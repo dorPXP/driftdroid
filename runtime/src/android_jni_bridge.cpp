@@ -12,6 +12,7 @@
 #include <string>
 #include <unistd.h>
 
+#include "hle/storage/wii_disc_extractor.h"
 #include "runtime_config.h"
 #include "runtime_product.h"
 #include "settings_overlay.h"
@@ -75,6 +76,30 @@ Java_com_wiicompiled_android_MainActivity_nativeSetInstallPaths(JNIEnv* env, job
     const char* dvdRootChars = env->GetStringUTFChars(dvdRoot, nullptr);
     g_androidDvdRoot = dvdRootChars;
     env->ReleaseStringUTFChars(dvdRoot, dvdRootChars);
+}
+
+// RomImportOverlay calls this from a background thread it owns (extraction of a multi-GB disc
+// is far too slow for the UI thread) and polls the two progress getters below from a timer on
+// the main thread meanwhile. Returns null on success, or a human-readable error string.
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_wiicompiled_android_rom_RomImportOverlay_nativeExtractDisc(JNIEnv* env, jobject /* this */,
+                                                                      jint sourceFd,
+                                                                      jstring destDataFolder) {
+    const char* destChars = env->GetStringUTFChars(destDataFolder, nullptr);
+    char error[512] = {};
+    const int result = WiiDiscExtractor_Extract(sourceFd, destChars, error, sizeof(error));
+    env->ReleaseStringUTFChars(destDataFolder, destChars);
+    return result == 0 ? nullptr : env->NewStringUTF(error);
+}
+
+extern "C" JNIEXPORT jlong JNICALL
+Java_com_wiicompiled_android_rom_RomImportOverlay_nativeExtractBytesDone(JNIEnv*, jobject) {
+    return static_cast<jlong>(WiiDiscExtractor_BytesDone());
+}
+
+extern "C" JNIEXPORT jlong JNICALL
+Java_com_wiicompiled_android_rom_RomImportOverlay_nativeExtractBytesTotal(JNIEnv*, jobject) {
+    return static_cast<jlong>(WiiDiscExtractor_BytesTotal());
 }
 
 // The real SDL3 Android entry point. MainActivity now extends SDLActivity (see MainActivity.kt),
