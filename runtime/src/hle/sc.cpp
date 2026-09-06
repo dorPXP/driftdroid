@@ -1,6 +1,7 @@
 #include "hle_stubs.h"
 
 #include "console_identity.h"
+#include "sc_serial_contract.h"
 #include <cstdlib>
 #include <cstddef>
 #include <cstdint>
@@ -82,12 +83,9 @@ PPC_NATIVE_OVERRIDE(801B2424, SCGetProductCode_HLE, uint32_t, (), ());
 extern "C" uint32_t SCGetProductSN_HLE(uint32_t serialAddress)
 {
     const std::string& serial = RuntimeConsoleIdentity::Current().serial;
-    if (!serialAddress || !Memory::Contains(serialAddress, serial.size() + 1)) {
-        return 0;
-    }
-    std::memcpy(Memory::GetPointer(serialAddress, serial.size() + 1),
-                serial.c_str(), serial.size() + 1);
-    return 1;
+    return RuntimeScSerial::Write(serial, serialAddress,
+        [](uint32_t address, size_t size) { return Memory::Contains(address, size); },
+        [](uint32_t address, uint32_t value) { Memory::Write32(address, value); });
 }
 
 PPC_NATIVE_OVERRIDE(801B2460, SCGetProductSN_HLE, uint32_t, (uint32_t serialAddress), (serialAddress));
