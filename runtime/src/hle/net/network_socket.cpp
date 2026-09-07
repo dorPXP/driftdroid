@@ -13,6 +13,21 @@ static int32_t NewWiiSocket(uint32_t af, uint32_t type, uint32_t protocol) {
     }
     NativeSocket s = ::socket(nativeAf, nativeType, protocol);
     const int hostError = s == kInvalidSocket ? NativeLastError() : 0;
+    // Real IOS/Wii hardware never has this problem in practice: each guest ioctl is a real IPC
+    // round-trip with genuine scheduling delay between it and the next one, which happens to give
+    // a delayed ACK time to land between a game's back-to-back small sends. Our HLE issues those
+    // same back-to-back sends essentially instantly, so with Nagle's algorithm left on (the OS
+    // default), a small second write can sit buffered waiting for an ACK the peer is ALSO
+    // delaying - the classic Nagle/delayed-ACK stall. Confirmed on the NAS "GET /payload" request,
+    // which is split across exactly two small sendto calls: the peer's reply never arrived even
+    // after waiting a full 250ms real-world. Disabling Nagle for every stream socket removes the
+    // failure mode outright with no real downside for a client that isn't doing high-volume
+    // streaming writes.
+    if (s != kInvalidSocket && nativeType == SOCK_STREAM) {
+        const int nodelay = 1;
+        ::setsockopt(s, IPPROTO_TCP, TCP_NODELAY, reinterpret_cast<const char*>(&nodelay),
+                     sizeof(nodelay));
+    }
     const int32_t wiiFd = AddWiiSocket(s, nativeAf, nativeType, static_cast<int>(protocol));
     if (wiiFd < 0) {
         NetFail("SO_SOCKET af=%u type=%u proto=%u failed host=%d wii=%d", af, type, protocol,
@@ -499,13 +514,29 @@ int32_t HandleIpTopIoctlv(uint32_t cmd, const std::vector<IoVector>& in, const s
         // Nonblocking sockets get -SO_EAGAIN immediately (Dolphin's retry predicate
         // short-circuits on nonBlock/forceNonBlock, IOS/Network/Socket.cpp:715-718);
         // waiting here anyway stalled the whole emulation thread on every empty read.
+        //
+        // EXCEPTION (temporary, hermes/11-WFC-CONNECT-SCHEDULER-STALL.md): the NAS/payload
+        // socket (plain TCP, port 80) closes after exactly one failed nonblocking recv instead
+        // of polling again next frame - on real hardware the reply has time to arrive because
+        // each ioctl is a real IOS IPC round-trip; our in-process HLE calls recv() essentially
+        // the instant the request was sent, before the real network round-trip (confirmed via
+        // curl: the server replies fine, just not in zero milliseconds) has had a chance to
+        // land. Give this one known call site a real, bounded wait even though it's nonblocking.
+        // Every other nonblocking socket keeps the original instant-EAGAIN behavior.
         constexpr int kStreamRecvWaitMs = 250;
-        const int streamWaitMs = (forceNonBlock || s->nonblocking) ? 0 : kStreamRecvWaitMs;
-        const bool waited = ret < 0 && !fromPtr && s->type == SOCK_STREAM &&
+        const bool isNasPayloadSocket = s->type == SOCK_STREAM && s->peerPort == 80;
+        const int streamWaitMs =
+            (forceNonBlock || s->nonblocking) ? (isNasPayloadSocket ? kStreamRecvWaitMs : 0)
+                                               : kStreamRecvWaitMs;
+        // The NAS/payload exception also has to bypass !fromPtr: the guest's recvfrom call here
+        // supplies an address-out buffer (numOut==2) even though the socket is a connected TCP
+        // stream, so fromPtr is never null for this call site - it would otherwise silently skip
+        // the wait added above regardless of streamWaitMs. See the comment above kStreamRecvWaitMs.
+        const bool waitReady = ret < 0 && (!fromPtr || isNasPayloadSocket) && s->type == SOCK_STREAM &&
             IsWouldBlockError(nativeErr) && WaitForReadable(s->native, streamWaitMs);
-        if (waited) {
-            ret = recvfrom(s->native, data, static_cast<int>(out[0].size), static_cast<int>(flags), nullptr,
-                           nullptr);
+        if (waitReady) {
+            ret = recvfrom(s->native, data, static_cast<int>(out[0].size), static_cast<int>(flags),
+                           fromPtr, fromPtr ? &fromLen : nullptr);
             // WaitForReadable also returns true for POLLERR/POLLHUP, so the retry
             // is where a reset connection surfaces; the first call's would-block
             // error must not be reused or the guest retries that socket forever.
@@ -515,6 +546,7 @@ int32_t HandleIpTopIoctlv(uint32_t cmd, const std::vector<IoVector>& in, const s
         if (ret >= 0 && fromPtr) {
             WriteWiiSockAddr(out[1].address, from, static_cast<uint32_t>(fromLen));
         }
+
         const int32_t result = ret >= 0 ? SocketResult(ret) : SocketErrorResult(nativeErr);
         if (ret < 0 && result != -SO_EAGAIN && result != s->lastLoggedRecvError) {
             s->lastLoggedRecvError = result;

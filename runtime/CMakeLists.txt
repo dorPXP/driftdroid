@@ -406,8 +406,12 @@ set(MKW_RETRO_REWIND_PRODUCT_SOURCE "${CMAKE_CURRENT_LIST_DIR}/src/product/retro
 # x86-64-v3 flags, so it gets its own object library instead of riding along in
 # mkw_runtime_common. See cmake/PublicProducts.cmake and the file's own header.
 set(MKW_CPU_BASELINE_SOURCE "${CMAKE_CURRENT_LIST_DIR}/src/host_cpu_baseline.cpp")
+# Android-only combined-library provider (see cmake/PublicProducts.cmake's MKW_TARGET_ANDROID
+# branch) - like the two product sources above, it defines RuntimeProduct::Active() and must
+# stay out of mkw_runtime_common's shared object graph or every product duplicate-symbols it.
+set(MKW_COMBINED_PRODUCT_SOURCE "${CMAKE_CURRENT_LIST_DIR}/src/product/combined_product.cpp")
 list(REMOVE_ITEM SOURCES ${MKW_BASE_PRODUCT_SOURCE} ${MKW_RETRO_REWIND_PRODUCT_SOURCE}
-     ${MKW_CPU_BASELINE_SOURCE})
+     ${MKW_CPU_BASELINE_SOURCE} ${MKW_COMBINED_PRODUCT_SOURCE})
 
 # The translator emits the complete, content-addressed source graph. Consuming
 # this one manifest keeps configure independent of the 28k generated function

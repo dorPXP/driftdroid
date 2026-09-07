@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <iostream>
 #include <mutex>
+#include <thread>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -18,6 +19,36 @@
 #include "timebase_contract.h"
 #include "runtime_log.h"
 #include "os_internal.h"
+#include "hle/net/network.h"
+
+namespace {
+// A guest thread that can't park here is one running a "wait ~N frames for an async op"
+// idiom (e.g. DWC/SO readiness polling) from inside a deferred guest-callback batch where
+// switching fibers isn't safe (see SchedulerCanSwitchAway, below). On real hardware each of
+// those waits is a real park that gives the OS a chance to run the async work; here the retry
+// is instant and synchronous, so nothing ever pumps the host-side network/NAND completions
+// that the awaited condition depends on - the retry loop just burns through its bounded retry
+// count and the guest gives up (observed as WFC's "error during login"). Pump those
+// completions directly and yield a slice of real wall-clock time so the async work (which
+// normally runs on genuine host threads - see network_deferred.cpp) gets a chance to finish
+// before the guest's retry budget runs out.
+//
+// TRIED AND REVERTED (see hermes/11-WFC-CONNECT-SCHEDULER-STALL.md): scoping a much larger
+// (~500ms) pump budget to the known DWC connect-poll queue looked promising, but on-device
+// logs proved the guest gives up right after its last permitted OSSleepThread call regardless
+// of how long that one call's pump runs - the real gap wasn't wall-clock time here at all, it
+// was that RunDeferredReschedule (os_alarm.cpp) never got a chance to flush the wake this pump
+// produces while still inside VI's retrace dispatch. That's fixed at the source now
+// (VI_HLE_ProcessRetracesDeferred calls OS_HLE_RunDeferredReschedule once the dispatch unwinds,
+// in vi.cpp), so this stays a flat, cheap slice for every caller again.
+void PumpHostWorkWhileUnparkable(CpuContext* cpu)
+{
+    if (cpu != nullptr) {
+        Network_HLE_ProcessCompletions(cpu);
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+}
+} // namespace
 
 namespace OsHleInternal {
 std::mutex gSleepTimerMutex;
@@ -122,9 +153,8 @@ bool ProcessSleepTimers(CpuContext* cpu)
             continue;
         }
         if (stateAtFire != kThreadStateReady || countAtFire < 1) {
-            RT_LOG(RT_TAG_OS) << "sleep-timer stale for thread 0x" << std::hex << threadPtr
-                      << std::dec << " (state=" << stateAtFire << " suspends=" << countAtFire
-                      << "); dropped without consuming a suspension" << std::endl;
+            // The thread already woke on its own (state/suspend count moved past what a timer
+            // fire expects) - drop the stale timer without consuming a suspension.
             ClearOutstandingPark(threadPtr);
             continue;
         }
@@ -142,8 +172,18 @@ bool ProcessSleepTimers(CpuContext* cpu)
 
     // Stranded-sleeper reconciler: heals a thread whose park has no pending wake timer (lost to a
     // race) by resuming it once that shape persists for 100ms, sampled every 50ms so no strand is
-    // missed. The atomic CAS below lets exactly one caller run the scan when ProcessSleepTimers
-    // executes on more than one host thread; the rest skip it.
+    // missed.
+    //
+    // TRIED TIGHTENING TO 10ms/5ms, THEN REVERTED (see hermes/11-WFC-CONNECT-SCHEDULER-STALL.md):
+    // looked promising for DWC's connect-poll (near-zero patience for a stranded wake), but
+    // on-device logs later showed the guest still gave up right after a 10ms-healed resume just
+    // as it did before - the reconciler's own latency was never the deciding factor, so shrinking
+    // it process-wide only bought continuous extra mutex contention and host wakeups for the rest
+    // of the game, working against the goal of not needing max-perf mode on Android. The
+    // DWC-specific fix now lives in the connect-in-flight-gated padding below instead, which
+    // targets only the one call site that actually needs the real wall-clock time.
+    // The atomic CAS below lets exactly one caller run the scan when ProcessSleepTimers executes
+    // on more than one host thread; the rest skip it.
     static std::atomic<Clock::rep> strandScanDueAt{0};
     auto strandScanClaim = strandScanDueAt.load(std::memory_order_relaxed);
     const bool runStrandReconciler =
@@ -237,6 +277,34 @@ extern "C" void OS__SleepTicks_HLE_801aaca8(CpuContext* ctx)
 
     const uint64_t ticks = (static_cast<uint64_t>(cpu->gpr[3]) << 32) | cpu->gpr[4];
     const int32_t irqState = OS__DisableInterrupts_801a65ac();
+    const auto entryTime = std::chrono::steady_clock::now();
+    const bool isDwcConnectPoll = (cpu->lr == kDwcConnectPollLr);
+    // See kDwcConnectPollLr's comment (os_internal.h): pad this one known call site up to
+    // roughly one render frame of real elapsed time, regardless of whether the fiber switch
+    // above actually happened, so the guest's bounded connect-retry loop spans real wall-clock
+    // time comparable to real hardware instead of completing in single-digit milliseconds.
+    //
+    // SCOPED FURTHER (see hermes/11-WFC-CONNECT-SCHEDULER-STALL.md): this same retry idiom is
+    // reused for every earlier DNS lookup DWC does before it ever reaches the actual WFC connect
+    // (gpcm/gpsp/gamestats/natneg/etc.) - on-device logs showed ~100 of these padded calls firing
+    // before SO_CONNECT was even issued, burning ~6.7 of DWC's real ~7-8s total login patience on
+    // waits that had nothing to actually wait for. Only pad while a real deferred connect is
+    // in flight, so that budget survives for the part that actually needs it.
+    const auto padToMinimumDwcConnectPollDuration = [&]() {
+        if (!isDwcConnectPoll || !Network_HLE_HasPendingConnect()) {
+            return;
+        }
+        constexpr auto kMinDuration = std::chrono::milliseconds(16);
+        const auto deadline = entryTime + kMinDuration;
+        while (std::chrono::steady_clock::now() < deadline) {
+            ProcessSleepTimers(cpu);
+            Audio_HLE_Poll(cpu);
+            VI_HLE_PollRetrace(cpu);
+            ProcessAlarmQueue(cpu, 8);
+            Network_HLE_ProcessCompletions(cpu);
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+    };
 
     try {
         uint32_t currentThread = ::Memory::Read32(kOSRunningContextAddr);
@@ -267,6 +335,8 @@ extern "C" void OS__SleepTicks_HLE_801aaca8(CpuContext* ctx)
                           << sleepIdleFlag << "); busy-returning so the caller retries."
                           << std::endl;
             }
+            PumpHostWorkWhileUnparkable(cpu);
+            padToMinimumDwcConnectPollDuration();
             OS__RestoreInterrupts_801a65d4(irqState);
             return;
         }
@@ -281,7 +351,6 @@ extern "C" void OS__SleepTicks_HLE_801aaca8(CpuContext* ctx)
         // consumed before we suspend. Either way we're still executing with a positive suspension
         // count, so revert it fully instead of leaving an inflated counter or a stale timer that
         // could half-wake a future sleep.
-        const bool timerStillPending = SleepTimerIsPending(currentThread);
         const int32_t suspendCount =
             static_cast<int32_t>(::Memory::Read32(currentThread + kThreadSuspendOffset));
         if (suspendCount > 0) {
@@ -299,13 +368,38 @@ extern "C" void OS__SleepTicks_HLE_801aaca8(CpuContext* ctx)
                     Fiber::GuestFiberManager::ResumeGuestThread(currentThread);
                 }
             }
-            thread_local std::unordered_set<uint32_t> reportedFailedTickParks;
-            if (reportedFailedTickParks.insert(currentThread).second) {
-                RT_LOG(RT_TAG_OS) << "OSSleepTicks: thread 0x" << std::hex << currentThread
-                          << std::dec << " failed to switch away while parking; "
-                          << "reverted the suspension and busy-returned." << std::endl;
+            // A caller that asks to sleep N ticks and gets back instantly (because the fiber
+            // switch above could not happen) sees an elapsed time of ~0 instead of ~N - for a
+            // "wait, then check if the network op finished" retry loop (see
+            // hermes/11-WFC-CONNECT-SCHEDULER-STALL.md) that burns through its whole retry
+            // budget in a single guest-visible instant. Honor the requested duration for real by
+            // busy-waiting it out here, pumping the same host/idle work SelectThread's own idle
+            // loop pumps so completions keep flowing.
+            //
+            // Capped at one render frame, not the request itself: this path can be hit by ANY
+            // guest thread's OSSleepTicks (not just DWC's connect-poll - that call site gets its
+            // own, separately-gated padding below), so a caller asking for a much longer sleep
+            // still only pays up to ~one frame of extra host-thread blocking here instead of
+            // hanging its caller for the full requested duration (previously capped at 250ms,
+            // which is a lot of dead time for an unrelated audio/render-adjacent thread to eat).
+            {
+                const uint64_t requestedNs = (ticks * TimeBaseContract::kTickRatioDenominator) /
+                                              TimeBaseContract::kTickRatioNumerator;
+                const auto requestedDuration = std::min(std::chrono::nanoseconds(requestedNs),
+                    std::chrono::nanoseconds(std::chrono::milliseconds(16)));
+                const auto deadline = std::chrono::steady_clock::now() + requestedDuration;
+                while (std::chrono::steady_clock::now() < deadline) {
+                    ProcessSleepTimers(cpu);
+                    Audio_HLE_Poll(cpu);
+                    VI_HLE_PollRetrace(cpu);
+                    ProcessAlarmQueue(cpu, 8);
+                    Network_HLE_ProcessCompletions(cpu);
+                    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                }
             }
+            PumpHostWorkWhileUnparkable(cpu);
         }
+        padToMinimumDwcConnectPollDuration();
     } catch (const ::Memory::AccessViolation& e) {
         LogMemoryError(RT_TAG_OS, "OSSleepTicks", e);
     }
@@ -318,15 +412,30 @@ namespace {
 // OSSleepThread must reach SelectThread with the scheduler-disable count at zero, or the thread
 // relinks into the wait queue a second time and OSWakeupThread livelocks. The SDK guarantees this;
 // deferred guest-callback batches (VI retrace, alarms) can raise the count and violate it.
-bool SchedulerCanSwitchAway()
+//
+// TRIED AND REVERTED (see hermes/11-WFC-CONNECT-SCHEDULER-STALL.md): splitting our own VI/audio/
+// alarm dispatch bookkeeping out of kSchedulerIdleFlagAddr and gating only on
+// VI_HLE_IsAdvancingRetrace() here looked right (it's what breaks Retro WFC's login, error
+// 20912) but on-device testing showed the blanket refusal is protecting more than VI's
+// renderer-ownership window alone - relaxing it FOR EVERY QUEUE let a guest OSSleepThread call
+// made during an audio-callback-driven archive-load wait actually switch fibers, and something
+// that ran during that switch left HomeMenuMgr's constructor observing a half-built object
+// (crash on ordinary boot). This version is narrower: only the one specific wait queue known to
+// be DWC's connect poll is exempted from the blanket refusal; every other queue (including
+// whatever else legitimately relies on the blanket protection during VI/audio/alarm dispatch)
+// keeps the exact prior behavior.
+bool SchedulerCanSwitchAway(uint32_t queuePtr)
 {
+    if (queuePtr == kDwcConnectWaitQueueAddr) {
+        return true;
+    }
     return ::Memory::Read32(kSchedulerIdleFlagAddr) == 0;
 }
 
 // A blocking call from a non-switchable region can't park, so the caller's retry loop spins; that's
 // survivable if host-side work (alarm, IOS completion) eventually satisfies the wait, terminal if
 // not. Report once per wait queue and escalate if a site stays wedged long enough to read as a freeze.
-void ReportUnparkableSleep(uint32_t queuePtr, uint32_t thread)
+void ReportUnparkableSleep(uint32_t queuePtr, uint32_t thread, uint32_t pc)
 {
     using Clock = std::chrono::steady_clock;
 
@@ -343,6 +452,7 @@ void ReportUnparkableSleep(uint32_t queuePtr, uint32_t thread)
     if (reportedQueues.insert(queuePtr).second) {
         RT_LOG(RT_TAG_OS) << "OSSleepThread: thread 0x" << std::hex << thread
                   << " tried to block on wait queue 0x" << queuePtr
+                  << " from pc=0x" << pc
                   << std::dec << " but the scheduler could not switch away";
         if (disableCount != 0) {
             std::cerr << " (OSDisableScheduler nesting count " << disableCount << ")";
@@ -365,7 +475,8 @@ void ReportUnparkableSleep(uint32_t queuePtr, uint32_t thread)
         RT_LOG(RT_TAG_OS) << "OSSleepThread: wait queue 0x" << std::hex << queuePtr
                   << " has been unsatisfiable for " << std::dec
                   << std::chrono::duration_cast<std::chrono::seconds>(now - wedgedSince).count()
-                  << "s from a non-switchable region. The guest callback that is"
+                  << "s from a non-switchable region (last retry pc=0x" << std::hex << pc
+                  << std::dec << "). The guest callback that is"
                      " blocking here must not block, or the deferred-callback"
                      " scope around it is wrong." << std::endl;
     }
@@ -414,8 +525,9 @@ extern "C" void OSSleepThread_HLE_801aa9b8(CpuContext* ctx)
         // See SchedulerCanSwitchAway: parking is only safe when SelectThread is
         // permitted to switch. Otherwise leave the thread RUNNING and the wait
         // queue untouched and let the caller's retry loop re-test its condition.
-        if (!SchedulerCanSwitchAway()) {
-            ReportUnparkableSleep(queuePtr, currentThread);
+        if (!SchedulerCanSwitchAway(queuePtr)) {
+            ReportUnparkableSleep(queuePtr, currentThread, cpu->lr);
+            PumpHostWorkWhileUnparkable(cpu);
             OS__RestoreInterrupts_801a65d4(irqState);
             return;
         }
@@ -451,6 +563,38 @@ extern "C" void OSSleepThread_HLE_801aa9b8(CpuContext* ctx)
         // this block never fires there.
         if (::Memory::Read16(currentThread + kThreadStateOffset) == kThreadStateWaiting &&
             ::Memory::Read32(currentThread + kThreadQueueOffset) == queuePtr) {
+            // DWC's connect poll (func_8020FE24) treats this sleep as a real "wait one frame"
+            // and aborts the whole login the moment it comes back unsatisfied - it has no retry
+            // budget to spend, which is what surfaces as Retro WFC error 20912 (see
+            // hermes/11-WFC-CONNECT-SCHEDULER-STALL.md). SelectThread could not switch away, so
+            // nothing else will advance the frame on our behalf; run the same work its own idle
+            // loop runs, inline, until the guest's retrace/alarm handling wakes this thread off
+            // the queue. Scoped to that one queue: every other unparkable sleep keeps the
+            // existing unlink-and-retry behavior below.
+            if (queuePtr == kDwcConnectWaitQueueAddr) {
+                using Clock = std::chrono::steady_clock;
+                const auto deadline = Clock::now() + std::chrono::milliseconds(200);
+                while (Clock::now() < deadline) {
+                    ProcessSleepTimers(cpu);
+                    Audio_HLE_Poll(cpu);
+                    VI_HLE_PollRetrace(cpu);
+                    ProcessAlarmQueue(cpu, 8);
+                    Network_HLE_ProcessCompletions(cpu);
+                    if (::Memory::Read16(currentThread + kThreadStateOffset) !=
+                            kThreadStateWaiting ||
+                        ::Memory::Read32(currentThread + kThreadQueueOffset) != queuePtr) {
+                        break;
+                    }
+                    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                }
+                // Woken for real: the queue released this thread, so return as a normal sleep.
+                if (::Memory::Read16(currentThread + kThreadStateOffset) != kThreadStateWaiting ||
+                    ::Memory::Read32(currentThread + kThreadQueueOffset) != queuePtr) {
+                    OS__RestoreInterrupts_801a65d4(irqState);
+                    return;
+                }
+            }
+
             // Reverse of the priority-sorted insert above, so a thread is never
             // left WAITING and linked while its caller keeps running on the
             // same stack.
@@ -462,7 +606,8 @@ extern "C" void OSSleepThread_HLE_801aa9b8(CpuContext* ctx)
                 Fiber::GuestFiberManager::HasFiber(currentThread)) {
                 Fiber::GuestFiberManager::ResumeGuestThread(currentThread);
             }
-            ReportUnparkableSleep(queuePtr, currentThread);
+            ReportUnparkableSleep(queuePtr, currentThread, cpu->lr);
+            PumpHostWorkWhileUnparkable(cpu);
         }
 
     } catch (const ::Memory::AccessViolation& e) {

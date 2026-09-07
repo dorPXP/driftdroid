@@ -48,6 +48,27 @@ constexpr uint32_t kSchedulerPendingFlagAddr = 0x80386920u;
 constexpr uint32_t kSchedulerIdleFlagAddr = 0x80386918u;
 constexpr uint32_t kAlarmQueueOffsetFromR13 = 0x6360u;
 
+// The wait queue func_8020FE24 (DWC's per-frame connect-retry poll, called from inside a VI
+// retrace callback) blocks on - see hermes/11-WFC-CONNECT-SCHEDULER-STALL.md. On-device logs
+// proved this specific park is refused exactly ONCE and the guest gives up immediately with no
+// further retry, so SchedulerCanSwitchAway (os_sleep.cpp) and SelectThread (os_scheduler.cpp)
+// both carve out an exception for this one queue - letting the park actually happen - while
+// leaving every other queue's blanket VI/audio/alarm-dispatch protection untouched. The same
+// address is also used by an unrelated early-boot async wait (a shared low-level utility, not
+// connect-specific); letting that one really park too is expected to be equally safe, since
+// it's waiting on host work (NAND) with the same "can't spin through it" shape.
+constexpr uint32_t kDwcConnectWaitQueueAddr = 0x804294A4u;
+
+// Guest link-register value on entry to OSSleepTicks for DWC's connect-poll's own short
+// (~0.5ms) per-attempt wait (see hermes/11-WFC-CONNECT-SCHEDULER-STALL.md). On real hardware
+// this idiom effectively costs close to a full render frame per attempt, because something
+// higher-priority is normally scheduled in between; that's what gives the guest's bounded
+// retry count enough real elapsed time (hundreds of ms) for the actual network connect to
+// settle. Our fiber switch resolves this near-instantly whether it "succeeds" or not, so
+// OSSleepTicks pads this one known call site up to a minimum real duration - see
+// kDwcConnectPollMinDuration below - without touching every other short sleep in the game.
+constexpr uint32_t kDwcConnectPollLr = 0x80009700u;
+
 constexpr uint32_t kThreadStateOffset = 0x2C8u;
 constexpr uint32_t kThreadAttrOffset = 0x2CAu;
 constexpr uint32_t kThreadSuspendOffset = 0x2CCu;

@@ -22,11 +22,13 @@ import java.util.zip.ZipInputStream
 
 /**
  * The app's actual launcher (see AndroidManifest.xml). Chooses Original Mario Kart Wii vs. Retro
- * Rewind BEFORE any product .so loads, since Android cannot swap which native library is resident
- * in a process - MainActivity.EXTRA_PRODUCT tells it which one to System.loadLibrary().
+ * Rewind BEFORE any guest engine state exists, since neither the combined native library
+ * (libGameCombined.so - both products, see runtime/cmake/build_combined_android_lib.py) nor a
+ * running game has a supported way to reset and switch profiles live - MainActivity.EXTRA_PRODUCT
+ * tells it which one nativeSetActiveProduct() should select.
  *
  * Retro Rewind's pack (tracks/textures, ~2GB - distinct from Code.pul, which only carries the
- * mod's patched game LOGIC and is already compiled into libRetroRewind.so) is never bundled or
+ * mod's patched game LOGIC and is already compiled into libGameCombined.so) is never bundled or
  * downloaded by this app, matching how the PC version works: WiiCompiled.Setup's
  * RetroRewindSource.cs only ever resolves a folder the user already has (normally obtained via the
  * separate Wheel Wizard tool) - it never packages or downloads it itself. This picker offers two
@@ -39,6 +41,7 @@ class ModePickerActivity : Activity() {
     private lateinit var root: LinearLayout
     private lateinit var baseButton: Button
     private lateinit var retroButton: Button
+    private lateinit var retroMenuButton: Button
     private lateinit var statusText: TextView
     private lateinit var progressBar: ProgressBar
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -92,6 +95,23 @@ class ModePickerActivity : Activity() {
         val buttonParams = LinearLayout.LayoutParams(dp(260), ViewGroup.LayoutParams.WRAP_CONTENT)
         buttonParams.topMargin = dp(12)
 
+        retroMenuButton = Button(this)
+        retroMenuButton.text = "⋮" // vertical ellipsis ("3 dots")
+        retroMenuButton.setOnClickListener { showRetroRewindMenuDialog() }
+
+        val retroRowParams =
+            LinearLayout.LayoutParams(dp(260), ViewGroup.LayoutParams.WRAP_CONTENT)
+        retroRowParams.topMargin = dp(12)
+        val retroRow = LinearLayout(this)
+        retroRow.orientation = LinearLayout.HORIZONTAL
+        val retroButtonParams =
+            LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+        val retroMenuButtonParams =
+            LinearLayout.LayoutParams(dp(48), ViewGroup.LayoutParams.WRAP_CONTENT)
+        retroMenuButtonParams.marginStart = dp(8)
+        retroRow.addView(retroButton, retroButtonParams)
+        retroRow.addView(retroMenuButton, retroMenuButtonParams)
+
         progressBar = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal)
         progressBar.max = 1000
         progressBar.visibility = View.GONE
@@ -104,7 +124,7 @@ class ModePickerActivity : Activity() {
 
         root.addView(title)
         root.addView(baseButton, buttonParams)
-        root.addView(retroButton, buttonParams)
+        root.addView(retroRow, retroRowParams)
         root.addView(progressBar, buttonParams)
         root.addView(statusText)
 
@@ -113,7 +133,36 @@ class ModePickerActivity : Activity() {
     }
 
     private fun refreshRetroButtonLabel() {
-        retroButton.text = if (isRetroRewindInstalled()) "Retro Rewind" else "Install Retro Rewind..."
+        val installed = isRetroRewindInstalled()
+        retroButton.text = if (installed) "Retro Rewind" else "Install Retro Rewind..."
+        // Nothing to update or delete until a copy is actually installed.
+        retroMenuButton.visibility = if (installed) View.VISIBLE else View.GONE
+    }
+
+    private fun showRetroRewindMenuDialog() {
+        AlertDialog.Builder(this)
+            .setTitle("Retro Rewind")
+            .setItems(arrayOf("Update", "Delete")) { _, which ->
+                when (which) {
+                    0 -> showInstallRetroRewindDialog()
+                    1 -> showDeleteRetroRewindDialog()
+                }
+            }
+            .show()
+    }
+
+    private fun showDeleteRetroRewindDialog() {
+        AlertDialog.Builder(this)
+            .setTitle("Delete Retro Rewind")
+            .setMessage("This removes the installed Retro Rewind files from the app. You'll need to import them again to play.")
+            .setPositiveButton("Delete") { _, _ ->
+                retroRewindRoot().deleteRecursively()
+                refreshRetroButtonLabel()
+                statusText.setTextColor(Color.argb(200, 255, 255, 255))
+                statusText.text = "Retro Rewind deleted."
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
     }
 
     private fun isRetroRewindInstalled(): Boolean =

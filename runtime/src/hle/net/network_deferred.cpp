@@ -931,8 +931,9 @@ static std::optional<int32_t> ProbeDeferredConnect(
     }
 
     using NetworkConnectContract::ProbeDisposition;
-    switch (NetworkConnectContract::ClassifyProbe(
-        identityIsCurrent, pollResult, work.timeout.IsExpired(now))) {
+    const ProbeDisposition disposition = NetworkConnectContract::ClassifyProbe(
+        identityIsCurrent, pollResult, work.timeout.IsExpired(now));
+    switch (disposition) {
     case ProbeDisposition::StaleSocket:
         return -SO_EBADF;
     case ProbeDisposition::PollError:
@@ -1067,4 +1068,10 @@ bool Network_HLE_ProcessCompletions(CpuContext* cpu) {
         handledAny = true;
     }
     return handledAny;
+}
+
+bool Network_HLE_HasPendingConnect() {
+    // pendingConnects is only ever touched from the emulation/scheduler thread (see the comment
+    // above AbortPendingDeferredConnects), so this read needs no lock.
+    return !GetDeferredNetworkStore().pendingConnects.empty();
 }

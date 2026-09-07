@@ -137,9 +137,19 @@ extern "C" void SelectThread_801a9c08(CpuContext* ctx)
     // Read scheduler state
     const uint32_t idleFlag = ::Memory::Read32(kSchedulerIdleFlagAddr);
     if (idleFlag >= 1) {
-        // Scheduler is idle/disabled, return 0
-        cpu->gpr[3] = 0;
-        return;
+        // Mirrors the exception in SchedulerCanSwitchAway (os_sleep.cpp): a thread parked
+        // specifically on the known DWC connect-poll queue is allowed to actually switch here
+        // too, or OSSleepThread's own relaxation is moot - this is the function that performs
+        // the real fiber switch. See kDwcConnectWaitQueueAddr's comment in os_internal.h and
+        // hermes/11-WFC-CONNECT-SCHEDULER-STALL.md.
+        const uint32_t runningThread = ::Memory::Read32(kOSRunningContextAddr);
+        const uint32_t runningQueue =
+            (runningThread != 0) ? ::Memory::Read32(runningThread + kThreadQueueOffset) : 0;
+        if (runningQueue != kDwcConnectWaitQueueAddr) {
+            // Scheduler is idle/disabled, return 0
+            cpu->gpr[3] = 0;
+            return;
+        }
     }
 
     // Get current context
@@ -267,7 +277,7 @@ extern "C" void SelectThread_801a9c08(CpuContext* ctx)
 
     // Find highest priority thread
     uint32_t pendingMask = ::Memory::Read32(kSchedulerPendingFlagAddr);
-    
+
     if (pendingMask == 0) {
         // No runnable threads in the run queue at this point
         cpu->gpr[3] = 0;
@@ -355,14 +365,14 @@ extern "C" void SelectThread_801a9c08(CpuContext* ctx)
             OS__LoadContext_801a1f58(cpu);
             return;
         }
-        
+
         // If we still don't have a current guest thread (no running context),
         // we can't do a proper fiber switch. Just return and let the caller handle it.
         if (currentGuestThread == 0) {
             Fiber::GuestFiberManager::SwitchToThread(nextThread, cpu);
             return;
         }
-        
+
         // Perform the fiber switch!
         Fiber::GuestFiberManager::SwitchToThread(nextThread, cpu);
         // When we return here, we've been switched back

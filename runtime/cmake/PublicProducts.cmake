@@ -331,6 +331,43 @@ if(MKW_HAVE_RETRO_REWIND)
     if(MKW_RETRO_BLOB_OBJECTS)
         target_sources(RetroRewind PRIVATE ${MKW_RETRO_BLOB_OBJECTS})
     endif()
+
+    if(MKW_TARGET_ANDROID)
+        # Android-only: one combined libGameCombined.so instead of separate
+        # libWiiCompiled.so/libRetroRewind.so. See runtime/cmake/build_combined_android_lib.py
+        # for the full rationale (live-device profiling showed real cross-.so call overhead
+        # from the split) and how the 1,341 same-name-different-body translated functions
+        # between the two profiles are resolved. Desktop's WiiCompiled/RetroRewind targets
+        # above are completely unaffected - this reuses their already-compiled objects
+        # read-only, it does not modify them.
+        add_library(mkw_combined_product OBJECT "${MKW_COMBINED_PRODUCT_SOURCE}")
+        mkw_configure_object_target(mkw_combined_product)
+        target_compile_features(mkw_combined_product PRIVATE cxx_std_20)
+
+        # NDK's android.toolchain.cmake sets CMAKE_OBJCOPY; fall back to deriving it from the
+        # compiler path (same bin/ directory) if some other Android toolchain file doesn't.
+        if(CMAKE_OBJCOPY)
+            set(MKW_ANDROID_OBJCOPY "${CMAKE_OBJCOPY}")
+        else()
+            get_filename_component(MKW_ANDROID_TOOLCHAIN_BIN "${CMAKE_CXX_COMPILER}" DIRECTORY)
+            set(MKW_ANDROID_OBJCOPY "${MKW_ANDROID_TOOLCHAIN_BIN}/llvm-objcopy")
+        endif()
+
+        set(MKW_COMBINED_ANDROID_LIB "${CMAKE_CURRENT_BINARY_DIR}/libGameCombined.so")
+        add_custom_command(
+            OUTPUT "${MKW_COMBINED_ANDROID_LIB}"
+            COMMAND python3
+                "${MKW_RUNTIME_SOURCE_DIR}/cmake/build_combined_android_lib.py"
+                "${CMAKE_CURRENT_BINARY_DIR}" "${CMAKE_MAKE_PROGRAM}"
+                "${MKW_ANDROID_OBJCOPY}" "${MKW_COMBINED_ANDROID_LIB}"
+            DEPENDS WiiCompiled RetroRewind mkw_combined_product
+                "${MKW_RUNTIME_SOURCE_DIR}/cmake/build_combined_android_lib.py"
+            WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}"
+            COMMENT "Linking combined Android library (WiiCompiled + RetroRewind, one .so)"
+            VERBATIM)
+        add_custom_target(GameCombined ALL DEPENDS "${MKW_COMBINED_ANDROID_LIB}")
+    endif()
+
     add_custom_target(mkw_release DEPENDS WiiCompiled RetroRewind)
 else()
     add_custom_target(mkw_release DEPENDS WiiCompiled)

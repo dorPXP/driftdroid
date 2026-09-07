@@ -127,6 +127,21 @@ Java_com_wiicompiled_android_MainActivity_nativeSetRetroRewindRoot(JNIEnv* env, 
     env->ReleaseStringUTFChars(retroRewindRoot, chars);
 }
 
+// Only meaningful (and only linked) for the combined libGameCombined.so, where both profiles'
+// translated code live in one binary and RuntimeProduct::Active() reads a value set here instead
+// of being a compile-time constant per product .so (see runtime_product.h and
+// src/product/combined_product.cpp). Same ordering rule as nativeSetInstallPaths above: must be
+// called before super.onCreate() lets SDLMain's thread start, since guest boot reads Active()
+// immediately. A no-op / link error on the old separate libWiiCompiled.so/libRetroRewind.so
+// build - those still link base_product.cpp/retro_rewind_product.cpp, which don't define
+// RuntimeProduct::SetActive at all, by design (see runtime_product.h's comment on SetActive).
+extern "C" JNIEXPORT void JNICALL
+Java_com_wiicompiled_android_MainActivity_nativeSetActiveProduct(JNIEnv* /* env */, jobject /* this */,
+                                                                    jboolean retroRewind) {
+    RuntimeProduct::SetActive(retroRewind ? RuntimeProduct::Kind::RetroRewind
+                                           : RuntimeProduct::Kind::BaseGame);
+}
+
 extern "C" JNIEXPORT void JNICALL
 Java_com_wiicompiled_android_MainActivity_nativeSetInstallPaths(JNIEnv* env, jobject /* this */,
                                                                   jstring filesDir, jstring dvdRoot) {

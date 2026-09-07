@@ -453,6 +453,15 @@ void VI_HLE_ProcessRetracesDeferred(int maxToProcess) {
         throw;
     }
     OS_HLE_EndDeferredGuestCallbacks();
+
+    // A network/NAND completion pumped from inside an unparkable OSSleepThread refusal during
+    // the retrace dispatch above (see PumpHostWorkWhileUnparkable in os_sleep.cpp) can wake a
+    // guest thread, but RunDeferredReschedule declines to actually switch to it while
+    // VI_HLE_IsAdvancingRetrace() is true - which it was, for that whole dispatch. Flush it now
+    // that the dispatch has fully unwound, instead of leaving the woken thread "Ready" until the
+    // 100ms stranded-sleeper safety net in ProcessSleepTimers force-resumes it - too slow for
+    // WFC's own bounded connect-retry budget. See hermes/11-WFC-CONNECT-SCHEDULER-STALL.md.
+    OS_HLE_RunDeferredReschedule(cpu);
 }
 
 void VI_HLE_WaitForNextRetracePoll() {
