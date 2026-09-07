@@ -185,6 +185,9 @@ position-tracked).
   WiiConnect24 bootstrap tree bundled with the runtime.
 - **[Retro Rewind](https://wiki.tockdom.com/wiki/Retro_Rewind)** by ZPL and team - the mod
   distribution the underlying runtime supports.
+- **[KartPad](https://github.com/chrissotraidis/kartpad)** by Chris Sotraidis - the iOS/Android
+  sibling port this fork's settings sidebar layout, touch control styling, and motion (tilt)
+  steering calibration curve were directly modeled on.
 - Everyone in the static recompilation community.
 
 Bundled third-party components and their licenses live in
