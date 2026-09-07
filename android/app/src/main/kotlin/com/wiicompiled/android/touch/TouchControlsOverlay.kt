@@ -21,7 +21,11 @@ import android.widget.SeekBar
 import android.widget.TextView
 import org.json.JSONObject
 
-/** One on-screen control's identity and default placement (fractions of the play area, 0..1). */
+/** One on-screen control's identity and default placement (fractions of the play area, 0..1).
+ * color/pill give each button its own look by default (matching a real Wii Classic Controller
+ * Pro's color-coded face buttons and stretched L/R shoulder buttons - requested directly after
+ * comparing against KartPad's Android port, which does the same, instead of every button being an
+ * identical plain gray circle). */
 private data class ControlSpec(
     val id: String,
     val label: String,
@@ -31,6 +35,10 @@ private data class ControlSpec(
     val defaultSizeDp: Float,
     val defaultEnabled: Boolean,
     val isJoystick: Boolean = false,
+    val color: Int = TouchButtonView.DEFAULT_FILL_COLOR,
+    val pill: Boolean = false,
+    val textColor: Int = Color.WHITE,
+    val outlineColor: Int = TouchButtonView.DEFAULT_OUTLINE_COLOR,
 )
 
 /**
@@ -55,14 +63,18 @@ class TouchControlsOverlay private constructor(private val activity: Activity, p
     private val toolbar = LinearLayout(activity)
     private var pendingExportJson: String? = null
 
-    // Effective visibility is userVisible AND NOT controllerConnected: a real Bluetooth controller
-    // auto-hides the touch overlay (see MainActivity.onNativeGamepadConnectionChanged, driven by
-    // aurora-main/lib/window.cpp's SDL_EVENT_GAMEPAD_ADDED/REMOVED), while userVisible is the
-    // persisted "Touch controls" checkbox in the in-game settings menu
+    // Effective visibility is userVisible AND NOT controllerConnected AND NOT settingsOpen: a real
+    // Bluetooth controller auto-hides the touch overlay (see
+    // MainActivity.onNativeGamepadConnectionChanged, driven by aurora-main/lib/window.cpp's
+    // SDL_EVENT_GAMEPAD_ADDED/REMOVED), the settings sidebar hides it while open (see
+    // MainActivity.onNativeSettingsVisibilityChanged - the sidebar docks to the same screen edge
+    // these buttons do, and gameplay input is already blocked while it's open anyway), and
+    // userVisible is the persisted "Touch controls" checkbox in the in-game settings menu
     // (MainActivity.onNativeSetTouchOverlayVisible). Independent of the per-button drag/hide state
     // stored below - this only ever hides/shows the WHOLE overlay at once.
     private var userVisible = true
     private var controllerConnected = false
+    private var settingsOpen = false
 
     /** Lets MainActivity keep the settings gear's dimmed/highlighted state in sync when edit mode
      * exits via the toolbar's "Done" button rather than however it was entered. */
@@ -125,14 +137,25 @@ class TouchControlsOverlay private constructor(private val activity: Activity, p
 
     private fun addControl(spec: ControlSpec) {
         val sizePx = dp(spec.defaultSizeDp)
+        // Pills get a wider-than-tall base size (not just a rounded square) so they actually read
+        // as stretched shoulder buttons - scaleX/scaleY below stay uniform, so this aspect ratio
+        // is preserved through resizing.
+        val widthPx = if (spec.pill) (sizePx * 1.8f).toInt() else sizePx
+        val heightPx = sizePx
         val view: View =
             if (spec.isJoystick) {
-                TouchJoystickView(container.context)
+                TouchJoystickView(container.context).apply {
+                    baseColor = prefs.getInt(key(spec.id, "fillColor"), TouchJoystickView.DEFAULT_BASE_COLOR)
+                    outlineColor = prefs.getInt(key(spec.id, "outlineColor"), TouchJoystickView.DEFAULT_OUTLINE_COLOR)
+                    knobColor = prefs.getInt(key(spec.id, "knobColor"), TouchJoystickView.DEFAULT_KNOB_COLOR)
+                }
             } else {
-                TouchButtonView(container.context, spec.label, spec.sdlButton)
+                val fillColor = prefs.getInt(key(spec.id, "fillColor"), spec.color)
+                val outlineColor = prefs.getInt(key(spec.id, "outlineColor"), spec.outlineColor)
+                TouchButtonView(container.context, spec.label, spec.sdlButton, fillColor, spec.pill, Color.WHITE, outlineColor)
             }
 
-        val params = FrameLayout.LayoutParams(sizePx, sizePx)
+        val params = FrameLayout.LayoutParams(widthPx, heightPx)
         container.addView(view, params)
 
         val containerWidth = container.width.takeIf { it > 0 } ?: container.resources.displayMetrics.widthPixels
@@ -144,8 +167,8 @@ class TouchControlsOverlay private constructor(private val activity: Activity, p
         val enabled = prefs.getBoolean(key(spec.id, "enabled"), spec.defaultEnabled)
         val opacity = prefs.getFloat(key(spec.id, "opacity"), 1f)
 
-        view.x = xFraction * containerWidth - sizePx / 2f
-        view.y = yFraction * containerHeight - sizePx / 2f
+        view.x = xFraction * containerWidth - widthPx / 2f
+        view.y = yFraction * containerHeight - heightPx / 2f
         view.scaleX = scale
         view.scaleY = scale
         view.visibility = if (enabled) View.VISIBLE else View.GONE
@@ -187,6 +210,22 @@ class TouchControlsOverlay private constructor(private val activity: Activity, p
         visibleCheckbox.text = "Visible"
         visibleCheckbox.isChecked = view.visibility == View.VISIBLE
         root.addView(visibleCheckbox)
+
+        // Color/outline customization - white/translucent by default for every control, this is
+        // purely an opt-in choice (requested directly: "the touchpad controls should just be
+        // white by default... there should be customizability for custom colors, outlines etc"),
+        // and covers the joystick too ("make it so the joystick can be colored").
+        when (view) {
+            is TouchButtonView -> {
+                addColorPickerRow(root, "Color", view.fillColor) { view.fillColor = it }
+                addColorPickerRow(root, "Outline", view.outlineColor) { view.outlineColor = it }
+            }
+            is TouchJoystickView -> {
+                addColorPickerRow(root, "Base Color", view.baseColor) { view.baseColor = it }
+                addColorPickerRow(root, "Outline", view.outlineColor) { view.outlineColor = it }
+                addColorPickerRow(root, "Knob Color", view.knobColor) { view.knobColor = it }
+            }
+        }
 
         val opacityLabel = TextView(activityContext)
         opacityLabel.text = "Opacity"
@@ -273,30 +312,141 @@ class TouchControlsOverlay private constructor(private val activity: Activity, p
         sizeRow.addView(sizeInput)
         root.addView(sizeRow)
 
-        AlertDialog.Builder(activityContext)
-            .setTitle(spec.label.ifEmpty { "Joystick" })
-            .setView(root)
-            .setPositiveButton("Close") { _, _ ->
-                val enabled = visibleCheckbox.isChecked
-                val opacity = opacitySeekBar.progress.coerceAtLeast(10) / 100f
-                view.visibility = if (enabled) View.VISIBLE else View.GONE
-                view.alpha = if (enabled) opacity else 0.35f
-                val containerWidth = container.width.takeIf { it > 0 } ?: container.resources.displayMetrics.widthPixels
-                val containerHeight = container.height.takeIf { it > 0 } ?: container.resources.displayMetrics.heightPixels
+        val scroll = android.widget.ScrollView(activityContext)
+        scroll.addView(root, ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+
+        // Persists on ANY dismiss path (Close button, tapping outside the dialog, or the back
+        // button), not just an explicit "Close" tap - confirmed directly as a real loss: colors
+        // (and everything else here) apply live to the view immediately, so dismissing the dialog
+        // by tapping outside it - a completely natural thing to do - looked like it worked but
+        // silently discarded the change instead of saving it, since only the "Close" button used
+        // to persist anything. OnDismissListener fires for every one of those paths uniformly.
+        fun persist() {
+            val enabled = visibleCheckbox.isChecked
+            val opacity = opacitySeekBar.progress.coerceAtLeast(10) / 100f
+            view.visibility = if (enabled) View.VISIBLE else View.GONE
+            view.alpha = if (enabled) opacity else 0.35f
+            val containerWidth = container.width.takeIf { it > 0 } ?: container.resources.displayMetrics.widthPixels
+            val containerHeight = container.height.takeIf { it > 0 } ?: container.resources.displayMetrics.heightPixels
+            val editor =
                 prefs
                     .edit()
                     .putBoolean(key(spec.id, "enabled"), enabled)
                     .putFloat(key(spec.id, "scale"), view.scaleX)
                     .putFloat(key(spec.id, "opacity"), opacity)
-                    .apply()
-                saveTransform(spec.id, view, containerWidth, containerHeight)
-                // Edit mode keeps disabled controls visible-but-dimmed so they stay reachable -
-                // matches the pre-dialog behavior.
-                if (!enabled) {
-                    view.visibility = View.VISIBLE
+            when (view) {
+                is TouchButtonView -> {
+                    editor.putInt(key(spec.id, "fillColor"), view.fillColor)
+                    editor.putInt(key(spec.id, "outlineColor"), view.outlineColor)
                 }
+                is TouchJoystickView -> {
+                    editor.putInt(key(spec.id, "fillColor"), view.baseColor)
+                    editor.putInt(key(spec.id, "outlineColor"), view.outlineColor)
+                    editor.putInt(key(spec.id, "knobColor"), view.knobColor)
+                }
+                else -> {}
             }
+            editor.apply()
+            saveTransform(spec.id, view, containerWidth, containerHeight)
+            // Edit mode keeps disabled controls visible-but-dimmed so they stay reachable -
+            // matches the pre-dialog behavior.
+            if (!enabled) {
+                view.visibility = View.VISIBLE
+            }
+        }
+
+        AlertDialog.Builder(activityContext)
+            .setTitle(spec.label.ifEmpty { "Joystick" })
+            .setView(scroll)
+            .setPositiveButton("Close", null)
+            .setOnDismissListener { persist() }
             .show()
+    }
+
+    /** A label plus a horizontal row of tappable color swatches (including a "reset to white/
+     * translucent default" swatch first) - [onPick] fires immediately on tap for a live preview,
+     * same as the opacity/size controls above it. */
+    /** A standard SV-square + hue-strip + hex-field color picker (see SaturationValuePickerView's
+     * doc comment) rather than a fixed swatch list or plain sliders - "having a limited selection
+     * kinda sucks" led to sliders, then a reference screenshot asked for this specific layout.
+     * [onPick] fires live on every drag/edit for an immediate preview, same as the opacity/size
+     * controls elsewhere in this dialog. */
+    private fun addColorPickerRow(root: LinearLayout, label: String, initialColor: Int, onPick: (Int) -> Unit) {
+        val activityContext = activity
+        val rowLabel = TextView(activityContext)
+        rowLabel.text = label
+        rowLabel.setPadding(0, dp(12f), 0, dp(4f))
+        root.addView(rowLabel)
+
+        val hsv = FloatArray(3)
+        Color.colorToHSV(initialColor, hsv)
+        var alpha = Color.alpha(initialColor)
+
+        val preview = View(activityContext)
+        val svPicker = SaturationValuePickerView(activityContext)
+        val hueSlider = HueSliderView(activityContext)
+        val hexField = EditText(activityContext)
+
+        fun currentColor(): Int = Color.HSVToColor(alpha, hsv)
+
+        var syncingHexField = false
+        fun refreshPreview() {
+            val color = currentColor()
+            preview.setBackgroundColor(color)
+            syncingHexField = true
+            hexField.setText(String.format("#%06X", 0xFFFFFF and color))
+            syncingHexField = false
+            onPick(color)
+        }
+
+        val pickerRow = LinearLayout(activityContext)
+        pickerRow.orientation = LinearLayout.HORIZONTAL
+        val previewParams = LinearLayout.LayoutParams(dp(56f), dp(140f))
+        pickerRow.addView(preview, previewParams)
+        val svParams = LinearLayout.LayoutParams(0, dp(140f), 1f)
+        svParams.marginStart = dp(8f)
+        pickerRow.addView(svPicker, svParams)
+        root.addView(pickerRow)
+
+        val hueParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(36f))
+        hueParams.topMargin = dp(8f)
+        root.addView(hueSlider, hueParams)
+
+        val hexLabel = TextView(activityContext)
+        hexLabel.text = "HEX"
+        hexLabel.textSize = 12f
+        hexLabel.setPadding(0, dp(10f), 0, dp(2f))
+        root.addView(hexLabel)
+        hexField.inputType = InputType.TYPE_CLASS_TEXT
+        hexField.filters = arrayOf(android.text.InputFilter.LengthFilter(7))
+        root.addView(hexField)
+
+        svPicker.hue = hsv[0]
+        svPicker.setSaturationValue(hsv[1], hsv[2])
+        hueSlider.setHue(hsv[0])
+        refreshPreview()
+
+        svPicker.onColorChanged = { saturation, value ->
+            hsv[1] = saturation
+            hsv[2] = value
+            refreshPreview()
+        }
+        hueSlider.onHueChanged = { hue ->
+            hsv[0] = hue
+            svPicker.hue = hue
+            refreshPreview()
+        }
+        hexField.setOnFocusChangeListener { _, hasFocus ->
+            if (hasFocus || syncingHexField) return@setOnFocusChangeListener
+            val typed = hexField.text.toString().removePrefix("#")
+            val parsed = typed.toLongOrNull(16)?.takeIf { typed.length == 6 } ?: return@setOnFocusChangeListener
+            val color = Color.rgb((parsed shr 16 and 0xFF).toInt(), (parsed shr 8 and 0xFF).toInt(), (parsed and 0xFF).toInt())
+            Color.colorToHSV(color, hsv)
+            svPicker.hue = hsv[0]
+            svPicker.setSaturationValue(hsv[1], hsv[2])
+            hueSlider.setHue(hsv[0])
+            refreshPreview()
+        }
     }
 
     private fun saveTransform(id: String, view: View, containerWidth: Int, containerHeight: Int) {
@@ -327,8 +477,31 @@ class TouchControlsOverlay private constructor(private val activity: Activity, p
         applyMasterVisibility()
     }
 
+    /** From MainActivity.onNativeSettingsVisibilityChanged - the native settings sidebar just
+     * opened/closed. */
+    fun setSettingsOpen(open: Boolean) {
+        settingsOpen = open
+        applyMasterVisibility()
+    }
+
     private fun applyMasterVisibility() {
-        container.visibility = if (userVisible && !controllerConnected) View.VISIBLE else View.GONE
+        container.visibility =
+            if (userVisible && !controllerConnected && !settingsOpen) View.VISIBLE else View.GONE
+    }
+
+    /** From MotionSteering - hides just the on-screen steering stick while gravity-based steering
+     * is driving the same virtual axis (TouchInputBridge.AXIS_LEFT_X), so the two don't fight over
+     * it. Restores whatever hidden/visible + opacity state the player had saved for it. */
+    fun setMotionSteeringActive(active: Boolean) {
+        val view = views[JOYSTICK_CONTROL_ID] ?: return
+        if (active) {
+            view.visibility = View.GONE
+            return
+        }
+        val enabled = prefs.getBoolean(key(JOYSTICK_CONTROL_ID, "enabled"), true)
+        val opacity = prefs.getFloat(key(JOYSTICK_CONTROL_ID, "opacity"), 1f)
+        view.visibility = if (enabled) View.VISIBLE else View.GONE
+        view.alpha = if (enabled) opacity else 0.35f
     }
 
     /** Enter/exit layout editing (drag to move, pinch to resize, tap to open the hide/resize
@@ -393,6 +566,17 @@ class TouchControlsOverlay private constructor(private val activity: Activity, p
             obj.put("scale", prefs.getFloat(key(spec.id, "scale"), 1f).toDouble())
             obj.put("enabled", prefs.getBoolean(key(spec.id, "enabled"), spec.defaultEnabled))
             obj.put("opacity", prefs.getFloat(key(spec.id, "opacity"), 1f).toDouble())
+            // Colors were saved straight to the shared per-device prefs, not into named layouts -
+            // meaning switching layouts never changed them, so every saved layout looked like it
+            // used "the same" (whatever was currently live) colors. Confirmed directly ("touchpad
+            // colors arent being saved to their layouts, the colors apply to every layout saved").
+            val defaultFill = if (spec.isJoystick) TouchJoystickView.DEFAULT_BASE_COLOR else spec.color
+            val defaultOutline = if (spec.isJoystick) TouchJoystickView.DEFAULT_OUTLINE_COLOR else spec.outlineColor
+            obj.put("fillColor", prefs.getInt(key(spec.id, "fillColor"), defaultFill))
+            obj.put("outlineColor", prefs.getInt(key(spec.id, "outlineColor"), defaultOutline))
+            if (spec.isJoystick) {
+                obj.put("knobColor", prefs.getInt(key(spec.id, "knobColor"), TouchJoystickView.DEFAULT_KNOB_COLOR))
+            }
             root.put(spec.id, obj)
         }
         return root
@@ -407,6 +591,13 @@ class TouchControlsOverlay private constructor(private val activity: Activity, p
             editor.putFloat(key(spec.id, "scale"), obj.optDouble("scale", 1.0).toFloat())
             editor.putBoolean(key(spec.id, "enabled"), obj.optBoolean("enabled", spec.defaultEnabled))
             editor.putFloat(key(spec.id, "opacity"), obj.optDouble("opacity", 1.0).toFloat())
+            val defaultFill = if (spec.isJoystick) TouchJoystickView.DEFAULT_BASE_COLOR else spec.color
+            val defaultOutline = if (spec.isJoystick) TouchJoystickView.DEFAULT_OUTLINE_COLOR else spec.outlineColor
+            editor.putInt(key(spec.id, "fillColor"), obj.optInt("fillColor", defaultFill))
+            editor.putInt(key(spec.id, "outlineColor"), obj.optInt("outlineColor", defaultOutline))
+            if (spec.isJoystick) {
+                editor.putInt(key(spec.id, "knobColor"), obj.optInt("knobColor", TouchJoystickView.DEFAULT_KNOB_COLOR))
+            }
         }
         editor.apply()
         rebuildControls()
@@ -471,6 +662,15 @@ class TouchControlsOverlay private constructor(private val activity: Activity, p
             val nameParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
             row.addView(nameButton, nameParams)
 
+            // Replaces this saved layout with whatever is currently live, rather than only being
+            // able to save a brand new named layout - requested directly ("there should also be
+            // an overwrite option to replace one of the saved ones with the current one you have").
+            val overwriteButton = toolbarButton("Overwrite") {
+                saveNamedLayout(name, currentLayoutJson())
+                showLayoutLibraryDialog()
+            }
+            row.addView(overwriteButton)
+
             val exportButton = toolbarButton("Export") {
                 val json = library.getString(libraryKey(name), null) ?: return@toolbarButton
                 launchExportLayout(json)
@@ -486,10 +686,13 @@ class TouchControlsOverlay private constructor(private val activity: Activity, p
             root.addView(row)
         }
 
+        val scroll = android.widget.ScrollView(activity)
+        scroll.addView(root, ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+
         val dialog =
             AlertDialog.Builder(activity)
                 .setTitle("Layouts")
-                .setView(root)
+                .setView(scroll)
                 .setPositiveButton("Import from file...") { _, _ -> launchImportLayout() }
                 .setNegativeButton("Close", null)
                 .create()
@@ -577,6 +780,7 @@ class TouchControlsOverlay private constructor(private val activity: Activity, p
         private const val PREFS_NAME = "touch_controls"
         private const val LIBRARY_PREFS_NAME = "touch_controls_library"
         private const val KEY_MASTER_VISIBLE = "master_visible"
+        private const val JOYSTICK_CONTROL_ID = "joystick"
         private const val KEY_LIBRARY_NAMES = "layout_names"
 
         const val REQUEST_CODE_EXPORT_LAYOUT = 0x544C4558 // "TLEX"
@@ -587,28 +791,35 @@ class TouchControlsOverlay private constructor(private val activity: Activity, p
                 // Smaller than the first draft and moved down so it no longer overlaps L or the
                 // D-Pad above it - the drag-anywhere zone is this view's own bounds, so the visual
                 // size here doubles as the steering hit area.
-                ControlSpec("joystick", "", -1, 0.13f, 0.74f, 170f, true, isJoystick = true),
+                // Position and colors are the user's own fully hand-tuned layout, pulled live from
+                // an installed device and adopted as the shipped default for every install
+                // ("ok now make the default layout the one i have, with the colors and stuff").
+                ControlSpec("joystick", "", -1, 0.12939323f, 0.68577796f, 170f, true, isJoystick = true),
                 // Enabled by default: bikes need Up on the D-Pad to wheelie, which the analog
                 // stick alone cannot do.
-                ControlSpec("dpad_up", "▲", TouchInputBridge.BUTTON_DPAD_UP, 0.13f, 0.28f, 46f, true),
-                ControlSpec("dpad_down", "▼", TouchInputBridge.BUTTON_DPAD_DOWN, 0.13f, 0.40f, 46f, true),
-                ControlSpec("dpad_left", "◀", TouchInputBridge.BUTTON_DPAD_LEFT, 0.07f, 0.34f, 46f, true),
-                ControlSpec("dpad_right", "▶", TouchInputBridge.BUTTON_DPAD_RIGHT, 0.19f, 0.34f, 46f, true),
+                ControlSpec("dpad_up", "▲", TouchInputBridge.BUTTON_DPAD_UP, 0.12407264f, 0.23613377f, 46f, true, color = 1862270975, outlineColor = -939524096),
+                ControlSpec("dpad_down", "▼", TouchInputBridge.BUTTON_DPAD_DOWN, 0.12449999f, 0.3633333f, 46f, true, color = 1862270975, outlineColor = -939524096),
+                ControlSpec("dpad_left", "◀", TouchInputBridge.BUTTON_DPAD_LEFT, 0.06703846f, 0.30883333f, 46f, true, color = 1862270975, outlineColor = -939524096),
+                ControlSpec("dpad_right", "▶", TouchInputBridge.BUTTON_DPAD_RIGHT, 0.18196154f, 0.30883333f, 46f, true, color = 1862270975, outlineColor = -939524096),
                 // Switch Pro Controller diamond: X top, Y left, A right (the big button), B bottom.
-                ControlSpec("x", "X", TouchInputBridge.BUTTON_X, 0.88f, 0.44f, 66f, true),
-                ControlSpec("y", "Y", TouchInputBridge.BUTTON_Y, 0.79f, 0.62f, 66f, true),
-                ControlSpec("a", "A", TouchInputBridge.BUTTON_A, 0.97f, 0.62f, 66f, true),
-                ControlSpec("b", "B", TouchInputBridge.BUTTON_B, 0.88f, 0.80f, 74f, true),
+                // Custom colors are a per-button customization the player can further override via
+                // the control editor (tap a button in edit mode). Only the L/R/Start shape is
+                // structurally different by default: a stretched "pill" instead of a circle,
+                // matching a real shoulder button's proportions.
+                ControlSpec("x", "X", TouchInputBridge.BUTTON_X, 0.85796094f, 0.47683534f, 66f, true, color = 1862257920, outlineColor = -931108096),
+                ControlSpec("y", "Y", TouchInputBridge.BUTTON_Y, 0.774085f, 0.64033693f, 66f, true, color = 1845559067, outlineColor = -937015552),
+                ControlSpec("a", "A", TouchInputBridge.BUTTON_A, 0.93149424f, 0.623813f, 66f, true, color = 1862205440, outlineColor = -939524096),
+                ControlSpec("b", "B", TouchInputBridge.BUTTON_B, 0.8581538f, 0.8199371f, 74f, true, color = 1846542591, outlineColor = -939524010),
                 // L=item, R=drift (digital shoulder buttons, per the Classic Controller Pro
                 // preset AutoConfigureTouchControllerIfPresent applies - see TouchInputBridge).
-                ControlSpec("l", "L", TouchInputBridge.BUTTON_L, 0.05f, 0.10f, 68f, true),
+                ControlSpec("l", "L", TouchInputBridge.BUTTON_L, 0.085525885f, 0.08287472f, 68f, true, pill = true, color = 1862270975, outlineColor = -922746881),
                 // Lower than L: the top-right corner is shared with the FPS counter - confirmed
                 // on-device, R's hit-circle up there was swallowing taps. The settings gear no
                 // longer lives up here at all (moved to top-center, see MainActivity).
-                ControlSpec("r", "R", TouchInputBridge.BUTTON_R, 0.90f, 0.22f, 68f, true),
+                ControlSpec("r", "R", TouchInputBridge.BUTTON_R, 0.86071074f, 0.2600174f, 68f, true, pill = true, color = 1862270975, outlineColor = -922746881),
                 // No Select control: Mario Kart Wii has no Select-equivalent action, so a touch
                 // button for it would just do nothing.
-                ControlSpec("start", "Start", TouchInputBridge.BUTTON_START, 0.5f, 0.92f, 60f, true),
+                ControlSpec("start", "Start", TouchInputBridge.BUTTON_START, 0.47884616f, 0.83566666f, 60f, true, pill = true, color = 1862270975, outlineColor = -922746881),
             )
 
         fun attach(activity: Activity, parent: ViewGroup): TouchControlsOverlay = TouchControlsOverlay(activity, parent)

@@ -14,8 +14,10 @@
 
 #include <SDL3/SDL_system.h>
 
+#include "android_jni_dispatch.h"
 #include "android_touch_overlay_bridge.h"
 #include "hle/storage/wii_disc_extractor.h"
+#include "music_attenuation.h"
 #include "runtime_config.h"
 #include "runtime_product.h"
 #include "settings_overlay.h"
@@ -24,22 +26,41 @@ bool g_androidTouchControlsVisibleCache = true;
 
 namespace {
 
-// Shared by both native->Java callbacks below - SDL's own helpers hand back an env already
-// attached to whatever thread calls this (the SDL_main thread for the gamepad-connect hook, the
-// ImGui/render thread for the settings checkbox), so no manual AttachCurrentThread bookkeeping is
-// needed here.
+// Shared by both native->Java callbacks below. Posted through AndroidJniDispatch rather than
+// called inline - both call sites can run from inside the guest fiber's translated execution
+// (settings_overlay::Draw() for the settings checkbox; SDL's gamepad-connect event handling isn't
+// guaranteed not to for the other), and a JNI call made from a fiber's swapped native stack
+// corrupts ART's CheckJNI bookkeeping - see android_jni_dispatch.h.
 void CallVoidMethodOnActivity(const char* methodName, bool value) {
-    JNIEnv* env = static_cast<JNIEnv*>(SDL_GetAndroidJNIEnv());
-    jobject activity = static_cast<jobject>(SDL_GetAndroidActivity());
-    if (env == nullptr || activity == nullptr) {
-        return;
-    }
-    jclass activityClass = env->GetObjectClass(activity);
-    jmethodID method = env->GetMethodID(activityClass, methodName, "(Z)V");
-    if (method != nullptr) {
-        env->CallVoidMethod(activity, method, value ? JNI_TRUE : JNI_FALSE);
-    }
-    env->DeleteLocalRef(activityClass);
+    AndroidJniDispatch::Post([methodName, value] {
+        JNIEnv* env = static_cast<JNIEnv*>(SDL_GetAndroidJNIEnv());
+        jobject activity = static_cast<jobject>(SDL_GetAndroidActivity());
+        if (env == nullptr || activity == nullptr) {
+            return;
+        }
+        jclass activityClass = env->GetObjectClass(activity);
+        jmethodID method = env->GetMethodID(activityClass, methodName, "(Z)V");
+        if (method != nullptr) {
+            env->CallVoidMethod(activity, method, value ? JNI_TRUE : JNI_FALSE);
+        }
+        env->DeleteLocalRef(activityClass);
+    });
+}
+
+void CallVoidMethodOnActivity(const char* methodName) {
+    AndroidJniDispatch::Post([methodName] {
+        JNIEnv* env = static_cast<JNIEnv*>(SDL_GetAndroidJNIEnv());
+        jobject activity = static_cast<jobject>(SDL_GetAndroidActivity());
+        if (env == nullptr || activity == nullptr) {
+            return;
+        }
+        jclass activityClass = env->GetObjectClass(activity);
+        jmethodID method = env->GetMethodID(activityClass, methodName, "()V");
+        if (method != nullptr) {
+            env->CallVoidMethod(activity, method);
+        }
+        env->DeleteLocalRef(activityClass);
+    });
 }
 
 }  // namespace
@@ -57,6 +78,22 @@ extern "C" void AndroidSetTouchOverlayVisible(bool visible) {
     CallVoidMethodOnActivity("onNativeSetTouchOverlayVisible", visible);
 }
 
+// Called from SetTopBarVisible (settings_overlay.cpp) whenever the settings sidebar's own
+// visibility changes.
+extern "C" void AndroidNotifySettingsVisibilityChanged(bool visible) {
+    CallVoidMethodOnActivity("onNativeSettingsVisibilityChanged", visible);
+}
+
+// Called from the ImGui settings sidebar's "Edit Touch Layout" button (settings_overlay.cpp).
+extern "C" void AndroidStartTouchLayoutEdit() {
+    CallVoidMethodOnActivity("onNativeStartTouchLayoutEdit");
+}
+
+// Called from the ImGui settings sidebar's "Motion Steering" button (settings_overlay.cpp).
+extern "C" void AndroidShowMotionSteeringDialog() {
+    CallVoidMethodOnActivity("onNativeShowMotionSteeringDialog");
+}
+
 // Called once from MainActivity.showGameUi() right after creating the touch overlay, so the
 // settings checkbox above starts in sync with whatever the user last chose (persisted Kotlin-side
 // - see TouchControlsOverlay.kt) instead of defaulting to "on" every launch.
@@ -64,6 +101,17 @@ extern "C" JNIEXPORT void JNICALL
 Java_com_wiicompiled_android_MainActivity_nativeSetTouchControlsVisibleCache(JNIEnv*, jobject /* this */,
                                                                                 jboolean visible) {
     g_androidTouchControlsVisibleCache = (visible == JNI_TRUE);
+}
+
+// Called from MainActivity's AudioManager.OnAudioFocusChangeListener - Android's real equivalent
+// of the Windows-only media-session monitor in music_attenuation.cpp. This direction (Java calling
+// an exported native function) runs on whichever normal Java thread triggered it, with its own
+// proper native call frame - unlike the native->Java direction (CallVoidMethodOnActivity above),
+// there is no guest-fiber JNI hazard here, so no AndroidJniDispatch involved.
+extern "C" JNIEXPORT void JNICALL
+Java_com_wiicompiled_android_MainActivity_nativeReportExternalMediaPlaying(JNIEnv*, jobject /* this */,
+                                                                             jboolean playing) {
+    MusicAttenuation::ReportExternalMediaPlaying(playing == JNI_TRUE);
 }
 
 extern "C" int MkwHostCpuBaselineInit();
@@ -192,17 +240,20 @@ extern "C" int SDL_main(int argc, char** argv) {
     std::error_code ec;
     std::filesystem::create_directories(configPath.parent_path(), ec);
 
-    // Overwrite (not EnsureConfigFile, which leaves dvd_root commented out) with a minimal config
-    // that actually points at the staged disc data - the whole point of this test.
-    {
-        std::ofstream config(configPath, std::ios::trunc);
-        config << "[video]\n"
-                  "graphics_api = \"auto\"\n\n"
-                  "[paths]\n"
-                  "dvd_root = \"" << g_androidDvdRoot << "\"\n";
-        if (!g_androidRetroRewindRoot.empty()) {
-            config << "retro_rewind_root = \"" << g_androidRetroRewindRoot << "\"\n";
-        }
+    // Set dvd_root/retro_rewind_root/graphics_api via the same read-modify-write path the in-game
+    // settings sidebar uses (RuntimeConfigFile::WriteSetting), NOT a raw truncating overwrite.
+    // The truncating version this replaced destroyed every other saved setting - audio volumes,
+    // the "mute music while external media plays" toggle, resolution scale, controller mappings,
+    // all of it - on EVERY single app launch, before InitializeRuntimeSettings() ever got a chance
+    // to read them back. Confirmed directly: a toggle enabled one session showed disabled again
+    // next time, which is not "didn't save" so much as "got wiped a few hundred milliseconds after
+    // boot, before you could even background the app." dvd_root itself needs a real, uncommented
+    // value even on a first launch with no config file yet, which is exactly what WriteSetting
+    // already provides (EnsureConfigFile leaves it commented out).
+    RuntimeConfigFile::WriteSetting("video", "graphics_api", "\"auto\"");
+    RuntimeConfigFile::WriteSetting("paths", "dvd_root", "\"" + g_androidDvdRoot + "\"");
+    if (!g_androidRetroRewindRoot.empty()) {
+        RuntimeConfigFile::WriteSetting("paths", "retro_rewind_root", "\"" + g_androidRetroRewindRoot + "\"");
     }
 
     // RuntimeConfigFile::Get() memoizes into a function-local static on its first call, and

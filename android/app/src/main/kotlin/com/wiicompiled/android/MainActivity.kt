@@ -1,23 +1,27 @@
 package com.wiicompiled.android
 
 import android.app.AlarmManager
+import android.app.AlertDialog
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
 import android.content.SharedPreferences
-import android.animation.ValueAnimator
 import android.graphics.Color
-import android.graphics.drawable.ClipDrawable
-import android.graphics.drawable.ColorDrawable
+import android.media.AudioAttributes
+import android.media.AudioFocusRequest
+import android.media.AudioManager
 import android.net.wifi.WifiManager
+import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.os.Process
-import android.view.Gravity
-import android.view.MotionEvent
+import android.view.ViewGroup
 import android.widget.Button
+import android.widget.LinearLayout
 import android.widget.RelativeLayout
+import android.widget.ScrollView
+import android.widget.TextView
 import com.wiicompiled.android.rom.RomImportOverlay
 import com.wiicompiled.android.touch.EditGestureHelper
 import com.wiicompiled.android.touch.TouchControlsOverlay
@@ -48,11 +52,14 @@ class MainActivity : SDLActivity() {
     private external fun nativeSetActiveProduct(retroRewind: Boolean)
     private external fun nativeToggleSettingsOverlay()
     private external fun nativeSetTouchControlsVisibleCache(visible: Boolean)
+    private external fun nativeReportExternalMediaPlaying(playing: Boolean)
 
     private var touchControls: TouchControlsOverlay? = null
     private var romImportOverlay: RomImportOverlay? = null
     private var multicastLock: WifiManager.MulticastLock? = null
     private var resolvedProduct: String = PRODUCT_BASE
+    private var motionSteering: MotionSteering? = null
+    private var audioFocusRequest: AudioFocusRequest? = null
 
     override fun getLibraries(): Array<String> {
         // REVERTED (2026-09-05): the combined libGameCombined.so build (see
@@ -77,6 +84,9 @@ class MainActivity : SDLActivity() {
             return
         }
         sLoadedProduct = resolvedProduct
+        // Must run before any System.loadLibrary() call below - network_deferred.cpp reads this
+        // env var once, at process/native-library load time.
+        PrivateServerSettings.configureLaunch(this)
         loadNativeLibraries(resolvedProduct)
 
         // Both of these must happen before super.onCreate(), which is what starts SDLActivity's
@@ -171,6 +181,258 @@ class MainActivity : SDLActivity() {
         touchControls = TouchControlsOverlay.attach(this, mLayout)
         nativeSetTouchControlsVisibleCache(touchControls?.isUserVisible() ?: true)
         touchControls?.onEditModeChanged = { editing -> gearButton.alpha = if (editing) 1f else 0.55f }
+        // No floating button (pulled per direct request: "remove steering with motion the button
+        // pls for now") - Motion Steering now lives in the settings sidebar's Controller page
+        // instead, matching KartPad's own menu placement and dialog exactly.
+        motionSteering = MotionSteering(this)
+        if (motionSteering?.enabled == true) {
+            touchControls?.setMotionSteeringActive(true)
+            motionSteering?.start()
+        }
+        requestAudioFocus()
+    }
+
+    /**
+     * Android's real equivalent of the PC version's "mute game music while external media is
+     * playing" (music_attenuation.cpp - Windows-only there via WinRT media sessions). Requesting
+     * normal AUDIOFOCUS_GAIN means a well-behaved music app (Spotify, YouTube Music, etc.)
+     * requesting its own focus when the player starts playback triggers our loss callback, and we
+     * get AUDIOFOCUS_GAIN back when they stop - the standard Android mechanism for this, not a
+     * custom polling loop. Only reports up to native; native decides whether to actually attenuate
+     * (gated by the existing "Mute game music while external media is playing" setting).
+     */
+    private var audioFocusListener: AudioManager.OnAudioFocusChangeListener? = null
+    private var duckedForExternalMedia = false
+
+    /**
+     * A plain (non-transient) AUDIOFOCUS_LOSS - what a real music app (Spotify, YouTube Music,
+     * etc.) triggers, since those request permanent focus for a whole listening session, not a
+     * short transient one - is NOT guaranteed to ever hand focus back to us automatically. That
+     * guarantee only applies to AUDIOFOCUS_LOSS_TRANSIENT/_CAN_DUCK, where the framework itself
+     * re-delivers AUDIOFOCUS_GAIN once the transient interruption ends.
+     *
+     * A first attempt at working around that (periodically re-requesting AUDIOFOCUS_GAIN on a
+     * timer while ducked) was wrong and actively harmful: requesting non-transient GAIN is an
+     * EXCLUSIVE request - succeeding at it forcibly steals focus away from whoever currently holds
+     * it. Confirmed directly ("when i turn on my music it mutes... the check you added mutes the
+     * external music") - the background timer was repeatedly stealing focus back from the
+     * player's own music app every few seconds while they were actively listening to it, muting
+     * THEM instead of helping.
+     *
+     * Fix: only ever attempt a reclaim once, at a natural, low-frequency, user-driven point - this
+     * app returning to the foreground (onResume) - never on a running background timer. This
+     * doesn't guarantee instant recovery the moment the other app stops, but it never fights
+     * anyone for focus while they're actively using it either, which matters more.
+     */
+    private fun requestAudioFocus() {
+        val audioManager = getSystemService(Context.AUDIO_SERVICE) as? AudioManager ?: return
+
+        val listener =
+            AudioManager.OnAudioFocusChangeListener { focusChange ->
+                when (focusChange) {
+                    AudioManager.AUDIOFOCUS_LOSS,
+                    AudioManager.AUDIOFOCUS_LOSS_TRANSIENT,
+                    AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK,
+                    -> {
+                        duckedForExternalMedia = true
+                        nativeReportExternalMediaPlaying(true)
+                    }
+                    AudioManager.AUDIOFOCUS_GAIN -> {
+                        duckedForExternalMedia = false
+                        nativeReportExternalMediaPlaying(false)
+                    }
+                }
+            }
+        audioFocusListener = listener
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val attributes =
+                AudioAttributes.Builder()
+                    .setUsage(AudioAttributes.USAGE_GAME)
+                    .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
+                    .build()
+            val request =
+                AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
+                    .setAudioAttributes(attributes)
+                    .setOnAudioFocusChangeListener(listener)
+                    .build()
+            audioFocusRequest = request
+            audioManager.requestAudioFocus(request)
+        } else {
+            @Suppress("DEPRECATION")
+            audioManager.requestAudioFocus(listener, AudioManager.STREAM_MUSIC, AudioManager.AUDIOFOCUS_GAIN)
+        }
+    }
+
+    /**
+     * A single reclaim attempt on onResume alone turned out not to be enough: it only helps if the
+     * player actually leaves and comes back to this app. Staying in-app the whole time while
+     * toggling external music on/off - a completely normal thing to do - never generates a resume
+     * event at all, so ducked audio just stayed muted indefinitely. Confirmed directly ("music
+     * ducking is still not working well, its not unmuting").
+     *
+     * There is no way to check "is something else playing" on this platform without either (a)
+     * briefly re-requesting focus - which can interrupt the other app if it's still going, since a
+     * successful non-transient AUDIOFOCUS_GAIN request is exclusive - or (b) a passive check like
+     * isMusicActive(), which this game's own continuously-running audio output would contaminate
+     * regardless of whether anything external is playing. Given that, this polls for reclaim
+     * periodically (not just once), but only while the app is actually resumed/foreground (never
+     * while backgrounded) and at a much slower interval than the original, fully-broken attempt
+     * (8s here vs. the original 3s) to keep how often it can possibly interrupt another app as low
+     * as practical while still being reasonably responsive.
+     */
+    private var audioFocusPollHandler: Handler? = null
+    private var audioFocusPollRunnable: Runnable? = null
+
+    private fun tryReclaimAudioFocusIfDucked() {
+        if (!duckedForExternalMedia) return
+        val audioManager = getSystemService(Context.AUDIO_SERVICE) as? AudioManager ?: return
+        val result =
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                audioFocusRequest?.let { audioManager.requestAudioFocus(it) } ?: AudioManager.AUDIOFOCUS_REQUEST_FAILED
+            } else {
+                val listener = audioFocusListener ?: return
+                audioManager.requestAudioFocus(listener, AudioManager.STREAM_MUSIC, AudioManager.AUDIOFOCUS_GAIN)
+            }
+        if (result == AudioManager.AUDIOFOCUS_REQUEST_GRANTED) {
+            duckedForExternalMedia = false
+            nativeReportExternalMediaPlaying(false)
+        }
+    }
+
+    private fun startAudioFocusPolling() {
+        if (audioFocusPollHandler == null) audioFocusPollHandler = Handler(Looper.getMainLooper())
+        if (audioFocusPollRunnable != null) return
+        val runnable =
+            object : Runnable {
+                override fun run() {
+                    tryReclaimAudioFocusIfDucked()
+                    audioFocusPollHandler?.postDelayed(this, AUDIO_FOCUS_POLL_INTERVAL_MS)
+                }
+            }
+        audioFocusPollRunnable = runnable
+        audioFocusPollHandler?.postDelayed(runnable, AUDIO_FOCUS_POLL_INTERVAL_MS)
+    }
+
+    private fun stopAudioFocusPolling() {
+        audioFocusPollRunnable?.let { audioFocusPollHandler?.removeCallbacks(it) }
+        audioFocusPollRunnable = null
+    }
+
+    override fun onPause() {
+        super.onPause()
+        if (motionSteering?.enabled == true) motionSteering?.stop()
+        stopAudioFocusPolling()
+    }
+
+    override fun onResume() {
+        super.onResume()
+        if (motionSteering?.enabled == true) motionSteering?.start()
+        tryReclaimAudioFocusIfDucked()
+        startAudioFocusPolling()
+    }
+
+    /** Called from native (settings_overlay.cpp's "Motion Steering" sidebar button, via
+     * AndroidShowMotionSteeringDialog). May arrive off the UI thread. */
+    fun onNativeShowMotionSteeringDialog() {
+        runOnUiThread { showMotionSteeringOptionsDialog() }
+    }
+
+    /**
+     * Action-list dialog matching KartPad's own Motion Steering menu exactly (dev.kartpad.android's
+     * KartPadActivity.showMotionSteering): a "Turn On & Recenter"/"Turn Off" action, "Recenter Now"
+     * (only while on), an invert toggle, and a sensitivity CYCLE (0.5x -> 1x -> 2x -> 0.5x) rather
+     * than a slider, plus "Continue Playing" to dismiss. Every action except "Continue Playing"
+     * reopens the dialog afterward so the updated state is immediately visible, same as KartPad.
+     */
+    private fun showMotionSteeringOptionsDialog() {
+        val steering = motionSteering ?: return
+        val available = steering.sensorAvailable
+        val state =
+            when {
+                !available -> "Unavailable on this device"
+                steering.enabled -> "On"
+                else -> "Off"
+            }
+        val actions =
+            if (!available) {
+                arrayOf("Continue Playing")
+            } else if (steering.enabled) {
+                arrayOf(
+                    "Turn Off",
+                    "Recenter Now",
+                    if (steering.inverted) "Use Standard Direction" else "Invert Direction",
+                    "Cycle Sensitivity",
+                    "Continue Playing",
+                )
+            } else {
+                arrayOf(
+                    "Turn On & Recenter",
+                    if (steering.inverted) "Use Standard Direction" else "Invert Direction",
+                    "Cycle Sensitivity",
+                    "Continue Playing",
+                )
+            }
+
+        val content = LinearLayout(this)
+        content.orientation = LinearLayout.VERTICAL
+        val pad = (24 * resources.displayMetrics.density).toInt()
+        content.setPadding(pad, (4 * resources.displayMetrics.density).toInt(), pad, (8 * resources.displayMetrics.density).toInt())
+
+        val label = TextView(this)
+        label.text =
+            if (available) {
+                "Tilt the device like a steering wheel. Current state: $state. " +
+                    "Sensitivity: ${steering.sensitivity}x. Physical controllers take priority."
+            } else {
+                "Motion data is unavailable on this device or emulator. Touch and " +
+                    "physical-controller steering remain available."
+            }
+        content.addView(label)
+
+        val dialog =
+            AlertDialog.Builder(this)
+                .setTitle("Motion Steering")
+                .setView(ScrollView(this).apply { addView(content) })
+                .create()
+
+        fun applyEnabled(value: Boolean) {
+            steering.enabled = value
+            touchControls?.setMotionSteeringActive(value)
+            if (value) steering.start() else steering.stop()
+        }
+
+        actions.forEach { action ->
+            content.addView(
+                Button(this).apply {
+                    text = action
+                    contentDescription = action
+                    setOnClickListener {
+                        dialog.dismiss()
+                        when (action) {
+                            "Turn Off" -> applyEnabled(false)
+                            "Recenter Now" -> steering.recenter()
+                            "Invert Direction" -> steering.inverted = true
+                            "Use Standard Direction" -> steering.inverted = false
+                            "Cycle Sensitivity" ->
+                                steering.sensitivity =
+                                    when (steering.sensitivity) {
+                                        0.5f -> 1f
+                                        1f -> 2f
+                                        else -> 0.5f
+                                    }
+                            "Turn On & Recenter" -> {
+                                applyEnabled(true)
+                                steering.recenter()
+                            }
+                        }
+                        if (action != "Continue Playing") {
+                            mLayout.post { showMotionSteeringOptionsDialog() }
+                        }
+                    }
+                },
+            )
+        }
+        dialog.show()
     }
 
     /** Called from native (android_jni_bridge.cpp's AndroidNotifyGamepadConnectionChanged), which
@@ -185,6 +447,22 @@ class MainActivity : SDLActivity() {
      * settings_overlay.cpp, via AndroidSetTouchOverlayVisible). May arrive off the UI thread. */
     fun onNativeSetTouchOverlayVisible(visible: Boolean) {
         runOnUiThread { touchControls?.setUserVisible(visible) }
+    }
+
+    /** Called from native (the settings sidebar's "Edit Touch Layout" button, settings_overlay.cpp
+     * via AndroidStartTouchLayoutEdit). May arrive off the UI thread. Replaces the old "hold the
+     * gear button for 5 seconds" gesture now that the sidebar has an explicit entry point. */
+    fun onNativeStartTouchLayoutEdit() {
+        runOnUiThread { touchControls?.setEditMode(true) }
+    }
+
+    /** Called from native (SetTopBarVisible in settings_overlay.cpp, via
+     * AndroidNotifySettingsVisibilityChanged) whenever the settings sidebar opens/closes - touch
+     * controls hide while it's open since they'd otherwise sit underneath it (confirmed directly
+     * on-device) and gameplay input is already blocked while it's up regardless. May arrive off
+     * the UI thread. */
+    fun onNativeSettingsVisibilityChanged(visible: Boolean) {
+        runOnUiThread { touchControls?.setSettingsOpen(visible) }
     }
 
     // Desktop's CMake build copies these next to the built executable (see
@@ -261,8 +539,7 @@ class MainActivity : SDLActivity() {
         private const val GEAR_DEFAULT_X_FRACTION = 0.55f
         private const val GEAR_DEFAULT_Y_FRACTION = 0.08f
 
-        // 5s, then 3s, were both reported as feeling too long directly.
-        private const val HOLD_TO_EDIT_MS = 1000L
+        private const val AUDIO_FOCUS_POLL_INTERVAL_MS = 8000L
     }
 
     // Desktop opens the (already fully built) in-game settings overlay with F10 - there is no
@@ -278,19 +555,21 @@ class MainActivity : SDLActivity() {
         val button = Button(this)
         button.text = "⚙"
         button.alpha = 0.55f
-        button.setBackgroundColor(Color.argb(120, 0, 0, 0))
         button.setTextColor(Color.WHITE)
+        // Circular instead of the default square button background - requested directly, and
+        // pairs with the settings sidebar now being the single entry point for both opening
+        // settings and (via its own "Edit Touch Layout" button) touch layout editing.
+        val circleBackground =
+            android.graphics.drawable.GradientDrawable().apply {
+                shape = android.graphics.drawable.GradientDrawable.OVAL
+                setColor(Color.argb(120, 0, 0, 0))
+            }
+        button.background = circleBackground
 
-        // Fills gray from the bottom up while held, so the hold is visibly registering instead of
-        // looking unresponsive for the whole duration - confirmed as wanted directly ("the
-        // indicator should make it so it fills up the gear button with the color gray"). Only
-        // attached to the button as a foreground while a hold is actually in progress, not left in
-        // place permanently at level 0 - a ClipDrawable clipped to nothing can still leave a faint
-        // seam at its clip boundary on some GPU rendering paths, confirmed directly as "a barely
-        // visible gray line" on the idle button.
-        val holdFillDrawable = ClipDrawable(ColorDrawable(Color.argb(200, 160, 160, 160)), Gravity.BOTTOM, ClipDrawable.VERTICAL)
-        holdFillDrawable.level = 0
-
+        // Edit mode is now entered via the settings sidebar's "Edit Touch Layout" button
+        // (onNativeStartTouchLayoutEdit), not by holding this button - the old 5-second-hold
+        // gesture is gone. While edit mode IS active (entered from the sidebar), touches here
+        // still drag the gear itself out of the way of whatever's being edited.
         val editGesture =
             EditGestureHelper(this, button) { moved ->
                 if (moved) {
@@ -307,58 +586,13 @@ class MainActivity : SDLActivity() {
                     prefs.edit().putFloat(GEAR_KEY_X, xFraction).putFloat(GEAR_KEY_Y, yFraction).apply()
                 }
             }
-        // A plain long-click (Android's default ~500ms) turned out far too easy to trigger by
-        // accident during ordinary play (confirmed directly: "when i clicked on the gear it sent
-        // me to edit layout"). A held press is deliberate enough that it can only mean "I want to
-        // edit the layout" - exiting is the TouchControlsOverlay toolbar's explicit "Done" button
-        // instead of holding again, which is what made exiting confusing before ("i couldn't exit
-        // out of it").
-        val holdHandler = Handler(Looper.getMainLooper())
-        var holdRunnable: Runnable? = null
-        var holdFillAnimator: ValueAnimator? = null
-        // Captured once per gesture at ACTION_DOWN, not re-checked on every event: entering edit
-        // mode mid-hold (the postDelayed runnable fires while the finger is still down) previously
-        // let the REST of that same press - including any incidental finger drift before lifting,
-        // which real fingers always have over a multi-second hold - immediately register as a drag
-        // on the gear itself, silently relocating it the instant edit mode activated. Confirmed
-        // on-device as "the gear button just disappears" after exiting - it hadn't disappeared, it
-        // had been dragged somewhere else by the same press that turned edit mode on.
-        var routeThisTouchToEditGesture = false
         button.setOnTouchListener { _, event ->
-            when (event.actionMasked) {
-                MotionEvent.ACTION_DOWN -> {
-                    routeThisTouchToEditGesture = touchControls?.isEditMode() == true
-                    if (!routeThisTouchToEditGesture) {
-                        holdFillDrawable.level = 0
-                        button.foreground = holdFillDrawable
-                        val runnable =
-                            Runnable {
-                                touchControls?.setEditMode(true)
-                                button.alpha = 1f
-                                button.foreground = null
-                            }
-                        holdRunnable = runnable
-                        holdHandler.postDelayed(runnable, HOLD_TO_EDIT_MS)
-                        val animator = ValueAnimator.ofInt(0, 10000)
-                        animator.duration = HOLD_TO_EDIT_MS
-                        animator.addUpdateListener { holdFillDrawable.level = it.animatedValue as Int }
-                        holdFillAnimator = animator
-                        animator.start()
-                    }
-                }
-                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
-                    holdRunnable?.let { holdHandler.removeCallbacks(it) }
-                    holdRunnable = null
-                    holdFillAnimator?.cancel()
-                    holdFillAnimator = null
-                    button.foreground = null
-                }
-            }
-            if (routeThisTouchToEditGesture) {
+            if (touchControls?.isEditMode() == true) {
                 editGesture.onTouchEvent(event)
-                return@setOnTouchListener true
+                true
+            } else {
+                false
             }
-            false
         }
         button.setOnClickListener { nativeToggleSettingsOverlay() }
 

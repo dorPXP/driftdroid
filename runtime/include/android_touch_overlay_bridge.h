@@ -17,4 +17,21 @@ extern bool g_androidTouchControlsVisibleCache;
 // Tells Kotlin to show/hide the touch overlay and persist the user's choice.
 extern "C" void AndroidSetTouchOverlayVisible(bool visible);
 
+// Tells Kotlin to enter the touch layout editor (drag/resize/hide controls) - the settings
+// sidebar's Controller section replaces the old "hold the gear button for 5 seconds" gesture with
+// an explicit button that calls this.
+extern "C" void AndroidStartTouchLayoutEdit();
+
+// Tells Kotlin the settings sidebar just opened/closed, so touch controls (R/X/Y/A/B etc., docked
+// to the same screen edge the sidebar occupies) can hide for as long as it's up - confirmed
+// directly on-device that they otherwise sit underneath the sidebar, half-covering its content and
+// eating touches meant for it. Gameplay input is already blocked while the sidebar is open
+// (PADBlockInput), so the buttons have nothing to do anyway.
+extern "C" void AndroidNotifySettingsVisibilityChanged(bool visible);
+
+// Tells Kotlin to show the Motion Steering action dialog (Turn On/Off, Recenter Now, Invert
+// Direction, Cycle Sensitivity) - MainActivity.showMotionSteeringOptionsDialog, matching KartPad's
+// own Motion Steering menu exactly.
+extern "C" void AndroidShowMotionSteeringDialog();
+
 #endif  // __ANDROID__
