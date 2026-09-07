@@ -13,6 +13,13 @@
          SDLControllerManager.java) - without this permission that call silently no-ops on most
          OEM builds instead of throwing, which is why rumble looked like a code bug at first. -->
     <uses-permission android:name="android.permission.VIBRATE" />
+    <!-- RetroRewindInstallService runs the ~2GB Retro Rewind copy/extract as a foreground
+         service so Android doesn't reclaim the process mid-install when the app is backgrounded
+         (see the service's own doc comment). POST_NOTIFICATIONS is best-effort - if denied, the
+         install still runs, it just won't show live progress in the notification shade. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <application
         android:allowBackup="false"
@@ -40,6 +47,11 @@
             android:screenOrientation="sensorLandscape"
             android:configChanges="layoutDirection|locale|orientation|uiMode|screenLayout|screenSize|smallestScreenSize|keyboard|keyboardHidden|navigation">
         </activity>
+
+        <service
+            android:name=".RetroRewindInstallService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
 
     </application>
 
