@@ -15,6 +15,12 @@ bool IsExternalMediaPlaying() noexcept;
 bool IsMediaControlAvailable() noexcept;
 bool IsMediaControlInitializationComplete() noexcept;
 
+// Android has no polling monitor thread (see music_attenuation.cpp's StartMonitor) - instead the
+// platform layer (android_jni_bridge.cpp, driven by MainActivity's AudioManager focus listener)
+// reports state changes here directly as they happen. Also usable by any other platform that
+// wants to drive this externally instead of via a monitor thread.
+void ReportExternalMediaPlaying(bool playing) noexcept;
+
 // Called from the guest scheduler/audio path. This applies state changes to
 // the live SoundPlayer buses, so changing a category or entering/leaving
 // attenuation never requires a scene or race restart.

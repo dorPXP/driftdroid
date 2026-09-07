@@ -273,6 +273,9 @@ void SetTopBarVisible(bool visible) {
     }
     g_topBarVisible = visible;
     PADBlockInput(visible);
+#if defined(__ANDROID__)
+    AndroidNotifySettingsVisibilityChanged(visible);
+#endif
 }
 
 void ApplyConfiguredMappings() {
@@ -553,6 +556,17 @@ void DrawAudioSettings() {
             "suspect an audio problem; the mix then runs inline as it used to.");
     }
     ImGui::Separator();
+#if !defined(__ANDROID__)
+    // Android's version of this - detecting "is something else currently playing" via
+    // AudioManager focus - turned out to have no reliable, non-disruptive implementation: the
+    // only way to detect regain is to periodically re-request focus, which is an exclusive
+    // request and can itself interrupt whatever the player is actually listening to. Confirmed
+    // directly as still not working after two different mitigation attempts ("music ducking is
+    // still not working well, its not unmuting" / "doesn't work, let's just leave music ducking
+    // for the future, disable the toggle"). Hidden here rather than reworked further for now;
+    // MusicAttenuation itself is untouched and this can come back once Android exposes a real,
+    // passive way to answer "is anything else playing" (e.g. a properly attributable
+    // getActivePlaybackConfigurations()).
     if (ImGui::Checkbox("Mute game music while external media is playing",
                         &g_attenuateMusicWhenMediaPlays)) {
         MusicAttenuation::SetEnabled(g_attenuateMusicWhenMediaPlays);
@@ -569,6 +583,37 @@ void DrawAudioSettings() {
             ImGui::TextDisabled("No external media is currently playing.");
         }
     }
+#endif
+}
+
+// Render-resolution scale (0.5x-8x the Wii's native output), same list/logic as DrawTopBar's own
+// resolution dropdown. That one lives inline in DrawTopBar (desktop's menu bar) and is left alone
+// there; this is a separate, sidebar-appropriate (BeginCombo, not BeginMenu) copy for
+// DrawAndroidSidebar, which never actually included this setting at all when it replaced the top
+// bar on Android - confirmed directly as a real regression ("in Display settings add
+// resolution(the scaling settings, as those were removed fully.)").
+void DrawResolutionSettings() {
+    const auto resolutionIt = std::find_if(kResolutions.begin(), kResolutions.end(), [](const ResolutionItem& item) {
+        return std::fabs(item.scale - g_resolutionScale) < 0.001f;
+    });
+    const char* resolutionLabel = resolutionIt != kResolutions.end() ? resolutionIt->label : "Custom";
+    if (ImGui::BeginCombo("Resolution", resolutionLabel)) {
+        for (const auto& resolution : kResolutions) {
+            const bool selected = std::fabs(resolution.scale - g_resolutionScale) < 0.001f;
+            const bool disabled = IsHighFrameRateMode() && IsHighResolutionScale(resolution.scale);
+            ImGui::BeginDisabled(disabled);
+            const bool clicked = ImGui::Selectable(resolution.label, selected);
+            ImGui::EndDisabled();
+            if (clicked) {
+                SetResolutionScale(resolution.scale);
+            }
+            if (selected) {
+                ImGui::SetItemDefaultFocus();
+            }
+        }
+        ImGui::EndCombo();
+    }
+    ImGui::Separator();
 }
 
 void DrawGraphicsSettings() {
@@ -833,6 +878,139 @@ void AutoConfigureNewAndroidControllersIfPresent() {
                                << " on port " << targetPort;
     }
 }
+// Touch-friendly replacement for DrawTopBar() below - a top menu bar with hover-opened dropdowns
+// is a desktop/mouse pattern that doesn't translate well to touch (small hit targets, no hover).
+// Reuses DrawGraphicsSettings()/DrawControllerSettings()/DrawAudioSettings() as-is for content -
+// only the outer navigation changes, to avoid re-deriving already-working settings logic.
+// Requested directly: "the settings that already appear when you press the settings button but in
+// the sidebar, cleaner."
+// One full-width, left-aligned row in the root list - label plus an optional trailing glyph
+// (">" for a row that drills into a sub-page, nothing for a plain action). Matches KartPad's own
+// Android sidebar layout (icon+label+chevron rows in a flat scrollable list), which is what was
+// actually requested after seeing a screenshot of it, rather than the tabbed layout this replaces.
+bool DrawSidebarRow(const char* label, const char* trailing = ">") {
+    const float rowHeight = 56.0f;
+    const ImVec2 rowSize(ImGui::GetContentRegionAvail().x, rowHeight);
+    const bool clicked = ImGui::Button((std::string(label) + "##Row").c_str(), rowSize);
+    if (trailing && trailing[0] != '\0') {
+        const float trailingWidth = ImGui::CalcTextSize(trailing).x;
+        const ImVec2 rowMin = ImGui::GetItemRectMin();
+        const ImVec2 rowMax = ImGui::GetItemRectMax();
+        ImGui::GetWindowDrawList()->AddText(
+            ImVec2(rowMax.x - trailingWidth - 16.0f, (rowMin.y + rowMax.y) * 0.5f - ImGui::GetTextLineHeight() * 0.5f),
+            ImGui::GetColorU32(ImGuiCol_TextDisabled), trailing);
+    }
+    return clicked;
+}
+
+void DrawAndroidSidebar() {
+    if (!g_topBarVisible) {
+        return;
+    }
+
+    ImGuiIO& io = ImGui::GetIO();
+    // ~42% of screen width, matching KartPad's own Android sidebar proportions (measured directly
+    // from a screenshot of it, at the user's request to look at how it actually does this).
+    // Deliberately reaches into where the touch R/X/Y/A/B buttons normally sit; those are hidden
+    // for as long as the sidebar is open (TouchControlsOverlay.setSettingsOpen) rather than trying
+    // to squeeze around them, since gameplay input is already blocked while it's up.
+    const float sidebarWidth = io.DisplaySize.x * 0.42f;
+    ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x, 0.0f), ImGuiCond_Always, ImVec2(1.0f, 0.0f));
+    ImGui::SetNextWindowSize(ImVec2(sidebarWidth, io.DisplaySize.y), ImGuiCond_Always);
+    ImGui::SetNextWindowBgAlpha(0.94f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 12.0f);
+    constexpr ImGuiWindowFlags kFlags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
+                                         ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoCollapse |
+                                         ImGuiWindowFlags_NoResize;
+    if (!ImGui::Begin("Settings##AndroidSidebar", nullptr, kFlags)) {
+        ImGui::End();
+        ImGui::PopStyleVar();
+        return;
+    }
+
+    enum class SidebarPage { Root, Display, Controller, Audio };
+    static SidebarPage page = SidebarPage::Root;
+
+    ImGui::SetWindowFontScale(1.15f);
+    ImGui::TextUnformatted(page == SidebarPage::Root ? "Settings"
+                            : page == SidebarPage::Display ? "Display"
+                            : page == SidebarPage::Controller ? "Controller"
+                                                               : "Audio");
+    const float closeWidth = ImGui::CalcTextSize("Close").x + ImGui::GetStyle().FramePadding.x * 2.0f + 16.0f;
+    ImGui::SameLine(ImGui::GetContentRegionMax().x - closeWidth);
+    if (ImGui::Button("Close", ImVec2(closeWidth, 0.0f))) {
+        SetTopBarVisible(false);
+    }
+    ImGui::SetWindowFontScale(1.0f);
+    ImGui::Separator();
+    ImGui::Spacing();
+
+    ImGui::BeginChild("SidebarPageContent", ImVec2(0.0f, 0.0f), false);
+    if (page == SidebarPage::Root) {
+        if (DrawSidebarRow("Display")) {
+            page = SidebarPage::Display;
+        }
+        if (DrawSidebarRow("Controller")) {
+            page = SidebarPage::Controller;
+        }
+        if (DrawSidebarRow("Audio")) {
+            page = SidebarPage::Audio;
+        }
+        ImGui::Separator();
+        ImGui::Spacing();
+        // Every slider/checkbox on every page already writes straight to Config.toml the instant
+        // it changes (see e.g. DrawAudioSettings' RuntimeConfigFile::Set* calls) - there is
+        // nothing this button actually needs to commit. It exists anyway, requested directly
+        // while testing, as an explicit confirmation point rather than trusting that silently.
+        static Clock::time_point savedConfirmationUntil{};
+        if (ImGui::Button("Save Settings", ImVec2(-1.0f, 52.0f))) {
+            savedConfirmationUntil = Clock::now() + std::chrono::seconds(2);
+        }
+        if (Clock::now() < savedConfirmationUntil) {
+            ImGui::TextColored(ImVec4(0.4f, 0.9f, 0.5f, 1.0f), "Settings saved.");
+        }
+    } else {
+        if (DrawSidebarRow("Back to Settings", "<")) {
+            page = SidebarPage::Root;
+        }
+        ImGui::Separator();
+        ImGui::Spacing();
+        switch (page) {
+        case SidebarPage::Display:
+            DrawResolutionSettings();
+            DrawGraphicsSettings();
+            break;
+        case SidebarPage::Controller:
+            DrawControllerSettings();
+            ImGui::Separator();
+            ImGui::Spacing();
+            if (ImGui::Button("Edit Touch Layout", ImVec2(-1.0f, 48.0f))) {
+                // Editing happens in Kotlin's TouchControlsOverlay, not this ImGui panel - close
+                // the sidebar first so it isn't sitting on top of (and eating touches meant for)
+                // the layout editor that's about to appear.
+                SetTopBarVisible(false);
+                AndroidStartTouchLayoutEdit();
+            }
+            if (ImGui::Button("Motion Steering", ImVec2(-1.0f, 48.0f))) {
+                // Same reasoning as Edit Touch Layout above - the dialog is a real Kotlin
+                // AlertDialog, not an ImGui popup, so get the sidebar out of the way first.
+                SetTopBarVisible(false);
+                AndroidShowMotionSteeringDialog();
+            }
+            break;
+        case SidebarPage::Audio:
+            DrawAudioSettings();
+            break;
+        case SidebarPage::Root:
+            break;
+        }
+    }
+    ImGui::EndChild();
+
+    ImGui::End();
+    ImGui::PopStyleVar();
+}
+
 #endif  // __ANDROID__
 
 void DrawTopBar() {
@@ -908,8 +1086,20 @@ bool IsMouseActivity(const SDL_Event& event) {
 }
 
 // Runs on the thread that pumps SDL events (the same one that calls Draw), so
-// the SDL cursor calls are safe here.
+// the SDL cursor calls are safe here on platforms that have a real cursor to hide.
+//
+// Android has none - there is no mouse pointer on a touchscreen - and SDL_HideCursor()/
+// SDL_ShowCursor() there route through Android_JNI_SetCustomCursor -> SDLActivity.setCustomCursor
+// -> View.setPointerIcon -> a Binder call to IWindowSession.updatePointerIcon. Confirmed directly
+// on-device via a real Android debuggerd tombstone (our own SIGABRT interception normally hides
+// this - see main.cpp's AbortSignalHandler): that JNI chain aborted with "JNI DETECTED ERROR IN
+// APPLICATION: JNI ERROR (app bug): jstring is an invalid JNI transition frame reference", called
+// from settings_overlay::Draw() on the guest fiber thread - a call with no purpose on a device
+// with no cursor, so skipping it here removes both the pointless work and the crash.
 void UpdateCursorAutoHide() {
+#if defined(__ANDROID__)
+    return;
+#else
     const bool shouldHide =
         !g_topBarVisible && Clock::now() - g_lastMouseActivity >= kCursorAutoHideDelay;
     if (shouldHide == g_cursorHidden) {
@@ -921,6 +1111,7 @@ void UpdateCursorAutoHide() {
     } else {
         SDL_ShowCursor();
     }
+#endif
 }
 
 // Alt+Enter toggles the display mode inside aurora without going through the
@@ -953,7 +1144,10 @@ void InitializeRuntimeSettings() noexcept {
     g_voicesVolumePercent = static_cast<int>(std::lround(RuntimeConfigFile::VoicesVolume(1.0f) * 100.0f));
     g_audioMuted = RuntimeConfigFile::AudioMuted(false);
     g_audioMixWorker = RuntimeConfigFile::AudioMixWorkerEnabled(true);
-    g_attenuateMusicWhenMediaPlays = RuntimeConfigFile::AttenuateMusicWhenMediaPlays(false);
+    // Forced off, not just hidden - see DrawAudioSettings' matching #if for why. A player who had
+    // this on before it was disabled here shouldn't stay stuck silently ducked (or silently NOT
+    // ducked in a way they can no longer see/control) with no visible toggle to fix it.
+    g_attenuateMusicWhenMediaPlays = false;
     g_frameInterpolationMode = [] {
         switch (RuntimeConfigFile::FrameInterpolationFps(0)) {
         case 120:
@@ -974,6 +1168,7 @@ void InitializeRuntimeSettings() noexcept {
     ApplyConfiguredMappings();
     AudioBackend::Instance().SetMasterVolume(static_cast<float>(g_audioVolumePercent) / 100.0f);
     AudioBackend::Instance().SetMuted(g_audioMuted);
+    AxDspHle::SetMixWorkerEnabled(g_audioMixWorker);
     MusicAttenuation::SetMusicVolume(static_cast<float>(g_musicVolumePercent) / 100.0f);
     MusicAttenuation::SetSoundEffectsVolume(static_cast<float>(g_soundEffectsVolumePercent) / 100.0f);
     MusicAttenuation::SetUiVolume(static_cast<float>(g_uiVolumePercent) / 100.0f);
@@ -1029,7 +1224,11 @@ void Draw() noexcept {
         DrawShaderCompilationStatus();
     }
     DrawFpsOverlay();
+#if defined(__ANDROID__)
+    DrawAndroidSidebar();
+#else
     DrawTopBar();
+#endif
     controller_mapping_wizard::Draw();
     // The wizard captures raw presses; keep them out of the game even when the
     // top bar is hidden mid-setup.

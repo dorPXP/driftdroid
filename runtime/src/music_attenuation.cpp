@@ -198,6 +198,11 @@ void StartMonitor() noexcept {
     // The process owns this monitor for its remaining lifetime. Keeping it
     // detached avoids shutdown ordering between WinRT and static audio state.
     std::thread(MonitorWindowsMediaSessions).detach();
+#elif defined(__ANDROID__)
+    // No monitor thread here - MainActivity's AudioManager focus listener reports state changes
+    // directly via ReportExternalMediaPlaying as they happen (event-driven, not polled).
+    g_mediaControlAvailable.store(true, std::memory_order_release);
+    g_mediaControlInitializationComplete.store(true, std::memory_order_release);
 #else
     g_mediaControlAvailable.store(false, std::memory_order_release);
     g_mediaControlInitializationComplete.store(true, std::memory_order_release);
@@ -223,6 +228,10 @@ bool IsMediaControlAvailable() noexcept {
 
 bool IsMediaControlInitializationComplete() noexcept {
     return g_mediaControlInitializationComplete.load(std::memory_order_acquire);
+}
+
+void ReportExternalMediaPlaying(bool playing) noexcept {
+    g_externalMediaPlaying.store(playing, std::memory_order_release);
 }
 
 void SetMusicVolume(float volume) noexcept {
