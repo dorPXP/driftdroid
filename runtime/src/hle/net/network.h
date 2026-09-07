@@ -31,3 +31,9 @@ NetworkDeferredContract::StartOutcome Network_HLE_StartIoctlvAsync(
     uint32_t vectorPtr, uint32_t callback, uint32_t callbackArg);
 bool Network_HLE_TakeSyncResult(uint64_t token, int32_t* result);
 bool Network_HLE_ProcessCompletions(CpuContext* cpu);
+
+// True while at least one deferred (non-blocking) connect is still awaiting its outcome - see
+// hermes/11-WFC-CONNECT-SCHEDULER-STALL.md. Lets a caller distinguish "waiting on a real
+// in-flight connect" from every other short poll the same retry idiom is reused for, so it
+// only pays a real-time pacing cost where one is actually needed.
+bool Network_HLE_HasPendingConnect();

@@ -54,6 +54,17 @@ void EnsureSda1Base(CpuContext* cpu, bool logOnce = false)
     cpu->gpr[13] = RuntimeConfig::SDA1_BASE;
 }
 
+// REVERTED (see hermes/11-WFC-CONNECT-SCHEDULER-STALL.md): tried splitting this into a
+// host-only counter separate from kSchedulerIdleFlagAddr, on the theory that only
+// VI_HLE_IsAdvancingRetrace()'s renderer-ownership window actually needed to block a fiber
+// switch during our own VI/audio/alarm dispatch. On-device testing showed that's wrong: with
+// the split in place, a guest OSSleepThread call made during an audio-callback-driven
+// ArchiveMgr::WaitForLoad poll was allowed to actually switch fibers, and whatever ran during
+// that switch left HomeMenuMgr's constructor observing a half-built object (NULL 'this' inside
+// HomeMenuMgr::LoadHBMArc) - a hard crash on ordinary boot, not just an unfixed WFC login. The
+// blanket refusal this counter enforces is protecting more reentrancy hazards than just VI's,
+// so it stays tied to the same guest-visible kSchedulerIdleFlagAddr that real guest
+// OSDisableScheduler/OSEnableScheduler nesting uses.
 void IncrementSchedulerDisableCount()
 {
     const uint32_t count = ::Memory::Read32(kSchedulerIdleFlagAddr);
@@ -141,6 +152,13 @@ bool IsLikelyCodeAddress(uint32_t addr)
     return Memory::Contains(addr, 4);
 }
 } // namespace
+
+// Exposes RunDeferredReschedule (above) to other HLE subsystems - see the declaration in
+// hle_stubs.h for why this needs to be callable from outside os_alarm.cpp.
+extern "C" void OS_HLE_RunDeferredReschedule(CpuContext* cpu)
+{
+    RunDeferredReschedule(cpu);
+}
 
 namespace OsHleInternal {
 bool ProcessAlarmQueue(CpuContext* cpu, int maxToProcess)
