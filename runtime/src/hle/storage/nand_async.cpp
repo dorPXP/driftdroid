@@ -411,6 +411,9 @@ extern "C" int32_t NANDSafeOpen_HLE(uint32_t pathPtr, uint32_t fileInfoPtr, uint
         if (!file && IsFaceLibResourcePath(path) && SeedFaceLibResource(hostPath)) {
             file = std::fopen(hostPath.c_str(), "rb");
         }
+        if (!file && IsFaceLibDatabasePath(path) && SeedFaceLibDatabase(hostPath)) {
+            file = std::fopen(hostPath.c_str(), "rb");
+        }
         if (!file) {
             LogNandError("NANDSafeOpen", "FAILED to open '%s' for reading", hostPath.c_str());
             return NAND_RESULT_NOEXISTS;

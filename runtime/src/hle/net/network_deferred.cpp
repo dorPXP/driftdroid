@@ -5,10 +5,50 @@
 #include "ppc_runtime.h"
 #include "runtime_log.h"
 
+#include <cstdlib>
+#include <cstring>
+
 void OS_HLE_WakeupThreadNoReschedule(CpuContext* ctx, uint32_t waitQueue);
 void NandQueueIosCallback(uint32_t callbackPtr, int32_t result, uint32_t callbackArg);
 
 namespace NetworkHle {
+
+namespace {
+
+bool HasSuffixCaseInsensitive(const std::string& value, const char* suffix) {
+    const size_t suffixLen = std::strlen(suffix);
+    if (value.size() < suffixLen) {
+        return false;
+    }
+    const char* tail = value.c_str() + (value.size() - suffixLen);
+    for (size_t i = 0; i < suffixLen; ++i) {
+        if (std::tolower(static_cast<unsigned char>(tail[i])) !=
+            std::tolower(static_cast<unsigned char>(suffix[i]))) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// Wii game-service DNS names only - never anything else the guest happens to resolve (unrelated
+// TLS/HTTP hosts stay untouched). Retro Rewind's own payload already rewrites the retail
+// *.nintendowifi.net names to *.rwfc.net before the guest ever asks for them, so both suffixes
+// have to be covered here.
+bool IsWiiServiceHostname(const std::string& hostname) {
+    return HasSuffixCaseInsensitive(hostname, ".nintendowifi.net") ||
+           HasSuffixCaseInsensitive(hostname, ".rwfc.net");
+}
+
+// Opt-in experimental redirect for an alternate Wii-service host, set by the Android app's
+// "Experimental Server Settings" dialog (PrivateServerSettings.kt) via Os.setenv() before the
+// native library loads. Empty/unset means "use the real service" (the default, and the only
+// supported configuration for online play against real Nintendo/RWFC infrastructure).
+const char* PrivateWfcHostOverride() {
+    const char* value = std::getenv("WIICOMPILED_PRIVATE_WFC_HOST");
+    return (value && *value) ? value : nullptr;
+}
+
+}  // namespace
 
 enum class DeferredDnsKind {
     GetHostByName,
@@ -233,7 +273,13 @@ static DeferredDnsCompletion ResolveDeferredDns(DeferredDnsWork work) {
     }
 
     addrinfo* nativeResults = nullptr;
-    const char* node = completion.work.node.empty() ? nullptr : completion.work.node.c_str();
+    const char* overrideHost = PrivateWfcHostOverride();
+    const bool redirected = overrideHost && IsWiiServiceHostname(completion.work.node);
+    const char* node =
+        redirected ? overrideHost : (completion.work.node.empty() ? nullptr : completion.work.node.c_str());
+    if (redirected) {
+        NetFail("dns override '%s' -> '%s'", completion.work.node.c_str(), overrideHost);
+    }
     const char* service = completion.work.service.empty() ? nullptr : completion.work.service.c_str();
     const int gai = getaddrinfo(node, service, hintPtr, &nativeResults);
     if (gai != 0 || !nativeResults) {

@@ -156,6 +156,9 @@ extern "C" int32_t NANDOpen_HLE(uint32_t pathPtr, uint32_t fileInfoPtr, uint32_t
         if (IsFaceLibResourcePath(path) && SeedFaceLibResource(hostPath)) {
             file = std::fopen(hostPath.c_str(), fopenMode);
         }
+        if (!file && IsFaceLibDatabasePath(path) && SeedFaceLibDatabase(hostPath)) {
+            file = std::fopen(hostPath.c_str(), fopenMode);
+        }
         if (!file) {
             LogNandError("NANDOpen", "FAILED to open");
             return NAND_RESULT_NOEXISTS;

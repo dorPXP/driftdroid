@@ -387,6 +387,60 @@ bool IsFaceLibResourcePath(const char* path) {
     return std::strcmp(path, "/shared2/menu/FaceLib/RFL_Res.dat") == 0;
 }
 
+// RFL_Res.dat (above) ships on the retail disc and gets extracted from it. RFL_DB.dat - the
+// player's actual Mii database - does not: on a real Wii it is created once by the System Menu
+// during initial console setup, not by any individual game or disc. This emulator never runs the
+// System Menu (it boots straight into a game), so nothing ever created this file - confirmed
+// directly: playing a full race left /shared2/menu/FaceLib entirely absent on-device, breaking
+// every Mii-related feature (in-game Mii display, and the Android app's whole-database/single-Mii
+// import) with no way for the player to get past it. Seed a valid, empty database instead -
+// same layout SuperFromND/rfl_mii_extractor's real-world testing confirms (4-byte "RNOD" magic,
+// zeroed Mii slots, CRC-16/XMODEM at 0x1F1DE covering everything before it, matching KartPad's
+// own already-reviewed validator) - so a fresh install behaves the same as a Wii whose owner
+// already set up their console, just with zero Miis instead of the ones they'd have made.
+static constexpr size_t kFaceLibDatabaseSize = 779968;
+static constexpr size_t kFaceLibDatabaseCrcOffset = 0x1F1DE;
+
+static uint16_t ComputeRflDatabaseCrc(const uint8_t* data, size_t length) {
+    uint32_t crc = 0;
+    for (size_t index = 0; index < length; ++index) {
+        crc ^= static_cast<uint32_t>(data[index]) << 8;
+        for (int bit = 0; bit < 8; ++bit) {
+            crc = (crc & 0x8000u) ? ((crc << 1) ^ 0x1021u) : (crc << 1);
+            crc &= 0xFFFFu;
+        }
+    }
+    return static_cast<uint16_t>(crc);
+}
+
+bool SeedFaceLibDatabase(const std::string& hostPath) {
+    std::vector<uint8_t> database(kFaceLibDatabaseSize, 0);
+    std::memcpy(database.data(), "RNOD", 4);
+
+    const uint16_t crc = ComputeRflDatabaseCrc(database.data(), kFaceLibDatabaseCrcOffset);
+    database[kFaceLibDatabaseCrcOffset] = static_cast<uint8_t>(crc >> 8);
+    database[kFaceLibDatabaseCrcOffset + 1] = static_cast<uint8_t>(crc & 0xFF);
+
+    CreateParentDirectories(hostPath);
+
+    std::ofstream out(hostPath, std::ios::binary);
+    if (!out) {
+        LogNandError("FaceLibSeed", "Failed to create %s", hostPath.c_str());
+        return false;
+    }
+    out.write(reinterpret_cast<const char*>(database.data()), static_cast<std::streamsize>(database.size()));
+    if (!out) {
+        LogNandError("FaceLibSeed", "Failed to write %s", hostPath.c_str());
+        return false;
+    }
+
+    return true;
+}
+
+bool IsFaceLibDatabasePath(const char* path) {
+    return std::strcmp(path, "/shared2/menu/FaceLib/RFL_DB.dat") == 0;
+}
+
 // Create directories recursively
 bool CreateDirectoryPath(const std::string& path) {
     if (path.empty()) {

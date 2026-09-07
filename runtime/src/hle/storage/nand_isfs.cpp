@@ -336,6 +336,9 @@ extern "C" int32_t NAND_IOS_Open_HLE(uint32_t pathPtr, uint32_t mode) {
     if (!PathExists(hostPath) && IsFaceLibResourcePath(path)) {
         SeedFaceLibResource(hostPath);
     }
+    if (!PathExists(hostPath) && IsFaceLibDatabasePath(path)) {
+        SeedFaceLibDatabase(hostPath);
+    }
 
     // Determine file mode. IOS never creates files on open - creation happens
     // exclusively through ISFS CreateFile (which we implement). The previous
