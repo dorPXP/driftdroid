@@ -1,4 +1,4 @@
-package com.wiicompiled.android
+package com.driftdroid.android
 
 /**
  * One pinned, known-good Retro Rewind release, fetched straight from the same official

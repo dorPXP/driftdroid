@@ -1,4 +1,4 @@
-package com.wiicompiled.android.touch
+package com.driftdroid.android.touch
 
 /**
  * JNI bridge to the virtual SDL gamepad backing the on-screen touch controls

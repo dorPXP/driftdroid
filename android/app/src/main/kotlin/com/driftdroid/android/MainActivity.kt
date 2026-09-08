@@ -1,4 +1,4 @@
-package com.wiicompiled.android
+package com.driftdroid.android
 
 import android.app.AlarmManager
 import android.app.AlertDialog
@@ -22,9 +22,9 @@ import android.widget.LinearLayout
 import android.widget.RelativeLayout
 import android.widget.ScrollView
 import android.widget.TextView
-import com.wiicompiled.android.rom.RomImportOverlay
-import com.wiicompiled.android.touch.EditGestureHelper
-import com.wiicompiled.android.touch.TouchControlsOverlay
+import com.driftdroid.android.rom.RomImportOverlay
+import com.driftdroid.android.touch.EditGestureHelper
+import com.driftdroid.android.touch.TouchControlsOverlay
 import java.io.File
 import org.libsdl.app.SDLActivity
 

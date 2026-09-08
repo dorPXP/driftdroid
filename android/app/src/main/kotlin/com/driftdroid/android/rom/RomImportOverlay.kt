@@ -1,4 +1,4 @@
-package com.wiicompiled.android.rom
+package com.driftdroid.android.rom
 
 import android.app.Activity
 import android.content.Intent

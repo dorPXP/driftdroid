@@ -1,4 +1,4 @@
-package com.wiicompiled.android
+package com.driftdroid.android
 
 import android.content.Context
 import android.content.SharedPreferences
@@ -6,7 +6,7 @@ import android.hardware.Sensor
 import android.hardware.SensorEvent
 import android.hardware.SensorEventListener
 import android.hardware.SensorManager
-import com.wiicompiled.android.touch.TouchInputBridge
+import com.driftdroid.android.touch.TouchInputBridge
 import kotlin.math.PI
 import kotlin.math.abs
 import kotlin.math.atan2

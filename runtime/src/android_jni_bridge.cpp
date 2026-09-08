@@ -98,7 +98,7 @@ extern "C" void AndroidShowMotionSteeringDialog() {
 // settings checkbox above starts in sync with whatever the user last chose (persisted Kotlin-side
 // - see TouchControlsOverlay.kt) instead of defaulting to "on" every launch.
 extern "C" JNIEXPORT void JNICALL
-Java_com_wiicompiled_android_MainActivity_nativeSetTouchControlsVisibleCache(JNIEnv*, jobject /* this */,
+Java_com_driftdroid_android_MainActivity_nativeSetTouchControlsVisibleCache(JNIEnv*, jobject /* this */,
                                                                                 jboolean visible) {
     g_androidTouchControlsVisibleCache = (visible == JNI_TRUE);
 }
@@ -109,7 +109,7 @@ Java_com_wiicompiled_android_MainActivity_nativeSetTouchControlsVisibleCache(JNI
 // proper native call frame - unlike the native->Java direction (CallVoidMethodOnActivity above),
 // there is no guest-fiber JNI hazard here, so no AndroidJniDispatch involved.
 extern "C" JNIEXPORT void JNICALL
-Java_com_wiicompiled_android_MainActivity_nativeReportExternalMediaPlaying(JNIEnv*, jobject /* this */,
+Java_com_driftdroid_android_MainActivity_nativeReportExternalMediaPlaying(JNIEnv*, jobject /* this */,
                                                                              jboolean playing) {
     MusicAttenuation::ReportExternalMediaPlaying(playing == JNI_TRUE);
 }
@@ -119,12 +119,12 @@ int RuntimeMain(int argc, char** argv);  // NOT extern "C" - matches its real de
 
 // Touch equivalent of the desktop F10 settings-overlay hotkey - see MainActivity.kt's gear button.
 extern "C" JNIEXPORT void JNICALL
-Java_com_wiicompiled_android_MainActivity_nativeToggleSettingsOverlay(JNIEnv*, jobject /* this */) {
+Java_com_driftdroid_android_MainActivity_nativeToggleSettingsOverlay(JNIEnv*, jobject /* this */) {
     settings_overlay::ToggleTopBar();
 }
 
 extern "C" JNIEXPORT jstring JNICALL
-Java_com_wiicompiled_android_MainActivity_nativeRealRuntimeCheck(JNIEnv* env, jobject /* this */,
+Java_com_driftdroid_android_MainActivity_nativeRealRuntimeCheck(JNIEnv* env, jobject /* this */,
                                                                    jstring filesDir) {
     std::string result = "Real libWiiCompiled.so loaded via JNI.\n";
 
@@ -168,7 +168,7 @@ std::string g_androidRetroRewindRoot;
 // path never needs to pass anything for it. Same ordering rule as nativeSetInstallPaths: must be
 // called before super.onCreate() lets SDLMain's thread start.
 extern "C" JNIEXPORT void JNICALL
-Java_com_wiicompiled_android_MainActivity_nativeSetRetroRewindRoot(JNIEnv* env, jobject /* this */,
+Java_com_driftdroid_android_MainActivity_nativeSetRetroRewindRoot(JNIEnv* env, jobject /* this */,
                                                                      jstring retroRewindRoot) {
     const char* chars = env->GetStringUTFChars(retroRewindRoot, nullptr);
     g_androidRetroRewindRoot = chars;
@@ -184,14 +184,14 @@ Java_com_wiicompiled_android_MainActivity_nativeSetRetroRewindRoot(JNIEnv* env, 
 // build - those still link base_product.cpp/retro_rewind_product.cpp, which don't define
 // RuntimeProduct::SetActive at all, by design (see runtime_product.h's comment on SetActive).
 extern "C" JNIEXPORT void JNICALL
-Java_com_wiicompiled_android_MainActivity_nativeSetActiveProduct(JNIEnv* /* env */, jobject /* this */,
+Java_com_driftdroid_android_MainActivity_nativeSetActiveProduct(JNIEnv* /* env */, jobject /* this */,
                                                                     jboolean retroRewind) {
     RuntimeProduct::SetActive(retroRewind ? RuntimeProduct::Kind::RetroRewind
                                            : RuntimeProduct::Kind::BaseGame);
 }
 
 extern "C" JNIEXPORT void JNICALL
-Java_com_wiicompiled_android_MainActivity_nativeSetInstallPaths(JNIEnv* env, jobject /* this */,
+Java_com_driftdroid_android_MainActivity_nativeSetInstallPaths(JNIEnv* env, jobject /* this */,
                                                                   jstring filesDir, jstring dvdRoot) {
     const char* filesDirChars = env->GetStringUTFChars(filesDir, nullptr);
     RuntimeConfigFile::SetAndroidFilesDir(filesDirChars);
@@ -206,7 +206,7 @@ Java_com_wiicompiled_android_MainActivity_nativeSetInstallPaths(JNIEnv* env, job
 // is far too slow for the UI thread) and polls the two progress getters below from a timer on
 // the main thread meanwhile. Returns null on success, or a human-readable error string.
 extern "C" JNIEXPORT jstring JNICALL
-Java_com_wiicompiled_android_rom_RomImportOverlay_nativeExtractDisc(JNIEnv* env, jobject /* this */,
+Java_com_driftdroid_android_rom_RomImportOverlay_nativeExtractDisc(JNIEnv* env, jobject /* this */,
                                                                       jint sourceFd,
                                                                       jstring destDataFolder) {
     const char* destChars = env->GetStringUTFChars(destDataFolder, nullptr);
@@ -217,12 +217,12 @@ Java_com_wiicompiled_android_rom_RomImportOverlay_nativeExtractDisc(JNIEnv* env,
 }
 
 extern "C" JNIEXPORT jlong JNICALL
-Java_com_wiicompiled_android_rom_RomImportOverlay_nativeExtractBytesDone(JNIEnv*, jobject) {
+Java_com_driftdroid_android_rom_RomImportOverlay_nativeExtractBytesDone(JNIEnv*, jobject) {
     return static_cast<jlong>(WiiDiscExtractor_BytesDone());
 }
 
 extern "C" JNIEXPORT jlong JNICALL
-Java_com_wiicompiled_android_rom_RomImportOverlay_nativeExtractBytesTotal(JNIEnv*, jobject) {
+Java_com_driftdroid_android_rom_RomImportOverlay_nativeExtractBytesTotal(JNIEnv*, jobject) {
     return static_cast<jlong>(WiiDiscExtractor_BytesTotal());
 }
 

@@ -1,4 +1,4 @@
-package com.wiicompiled.android
+package com.driftdroid.android
 
 import android.app.Activity
 import android.app.AlertDialog

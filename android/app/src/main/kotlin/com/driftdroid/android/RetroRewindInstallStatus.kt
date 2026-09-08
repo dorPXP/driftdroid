@@ -1,4 +1,4 @@
-package com.wiicompiled.android
+package com.driftdroid.android
 
 /**
  * Shared, in-process status for whatever Retro Rewind install [RetroRewindInstallService] is

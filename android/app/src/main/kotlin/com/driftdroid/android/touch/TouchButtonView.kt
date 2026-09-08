@@ -1,4 +1,4 @@
-package com.wiicompiled.android.touch
+package com.driftdroid.android.touch
 
 import android.content.Context
 import android.graphics.Canvas

@@ -1,5 +1,5 @@
 
-# WiiCompiled Android
+# DriftDroid
 
 A native Android port of [WiiCompiled](https://github.com/patchzyy/Wiicompiled), a static
 recompilation of Mario Kart Wii to native code. This fork adds the Android application shell:
@@ -81,7 +81,7 @@ Everything you change is saved to `Config.toml` on the device and restored on th
 
 ## Installing
 
-Grab the latest APK from this repo's [Releases](https://github.com/dorPXP/wiicompiled-android/releases)
+Grab the latest APK from this repo's [Releases](https://github.com/dorPXP/driftdroid/releases)
 page (once one exists) and sideload it - it isn't on the Play Store. On first launch, the app
 will ask you to pick your Mario Kart Wii disc image; once the in-app extraction step is finished,
 picking a valid file there is the only setup you'll need to do.
@@ -155,7 +155,7 @@ end-to-end, without any manual file staging, is the current focus.
 **The game crashed / stopped with an error.**
 Pull the run log from the device with:
 ```
-adb shell run-as com.wiicompiled.android cat files/WiiCompiled/android_runtime_attempt.log
+adb shell run-as com.driftdroid.android cat files/WiiCompiled/android_runtime_attempt.log
 ```
 
 **Why doesn't my Switch Pro Controller rumble?**

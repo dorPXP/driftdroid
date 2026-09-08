@@ -1,4 +1,4 @@
-package com.wiicompiled.android
+package com.driftdroid.android
 
 import android.app.Notification
 import android.app.NotificationChannel
@@ -368,9 +368,9 @@ class RetroRewindInstallService : Service() {
     }
 
     companion object {
-        const val ACTION_INSTALL_FOLDER = "com.wiicompiled.android.INSTALL_RETRO_REWIND_FOLDER"
-        const val ACTION_INSTALL_ZIP = "com.wiicompiled.android.INSTALL_RETRO_REWIND_ZIP"
-        const val ACTION_INSTALL_DOWNLOAD = "com.wiicompiled.android.INSTALL_RETRO_REWIND_DOWNLOAD"
+        const val ACTION_INSTALL_FOLDER = "com.driftdroid.android.INSTALL_RETRO_REWIND_FOLDER"
+        const val ACTION_INSTALL_ZIP = "com.driftdroid.android.INSTALL_RETRO_REWIND_ZIP"
+        const val ACTION_INSTALL_DOWNLOAD = "com.driftdroid.android.INSTALL_RETRO_REWIND_DOWNLOAD"
         const val EXTRA_SOURCE_URI = "source_uri"
         const val EXTRA_ZIP_NAME = "zip_name"
 

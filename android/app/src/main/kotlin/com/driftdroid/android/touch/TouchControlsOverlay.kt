@@ -1,4 +1,4 @@
-package com.wiicompiled.android.touch
+package com.driftdroid.android.touch
 
 import android.app.Activity
 import android.app.AlertDialog
@@ -719,7 +719,7 @@ class TouchControlsOverlay private constructor(private val activity: Activity, p
         val intent = Intent(Intent.ACTION_CREATE_DOCUMENT)
         intent.addCategory(Intent.CATEGORY_OPENABLE)
         intent.type = "application/json"
-        intent.putExtra(Intent.EXTRA_TITLE, "wiicompiled_touch_layout.json")
+        intent.putExtra(Intent.EXTRA_TITLE, "driftdroid_touch_layout.json")
         activity.startActivityForResult(intent, REQUEST_CODE_EXPORT_LAYOUT)
     }
 
