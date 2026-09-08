@@ -12,7 +12,7 @@
 #endif
 
 extern "C" JNIEXPORT jstring JNICALL
-Java_com_wiicompiled_android_MainActivity_nativeToolchainCheck(JNIEnv* env, jobject /* this */) {
+Java_com_driftdroid_android_MainActivity_nativeToolchainCheck(JNIEnv* env, jobject /* this */) {
     std::string result = "libwii.so loaded via JNI.\n";
 
 #if defined(__aarch64__)
@@ -122,7 +122,7 @@ bool RunFaultCase(bool wantWrite, std::string& detail) {
 #endif
 
 extern "C" JNIEXPORT jstring JNICALL
-Java_com_wiicompiled_android_MainActivity_nativeArm64FaultCheck(JNIEnv* env, jobject /* this */) {
+Java_com_driftdroid_android_MainActivity_nativeArm64FaultCheck(JNIEnv* env, jobject /* this */) {
 #if defined(__aarch64__)
     std::string result = "arm64 ESR write/read fault detection (real hardware test):\n";
     std::string detail;

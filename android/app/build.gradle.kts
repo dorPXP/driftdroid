@@ -4,12 +4,12 @@ plugins {
 }
 
 android {
-    namespace = "com.wiicompiled.android"
+    namespace = "com.driftdroid.android"
     compileSdk = 34
     ndkVersion = "27.2.12479018"
 
     defaultConfig {
-        applicationId = "com.wiicompiled.android"
+        applicationId = "com.driftdroid.android"
         minSdk = 28
         targetSdk = 34
         versionCode = 1

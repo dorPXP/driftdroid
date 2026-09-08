@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.22)
-project(wiicompiled_android_native)
+project(driftdroid_android_native)
 
 # Placeholder libwii.so target for the P1 toolchain de-risking step.
 # The real runtime (runtime/ + aurora-main) gets wired in here during P3/P4

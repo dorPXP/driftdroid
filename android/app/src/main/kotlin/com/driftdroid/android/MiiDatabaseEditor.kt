@@ -1,4 +1,4 @@
-package com.wiicompiled.android
+package com.driftdroid.android
 
 /**
  * Inserts one standalone Mii record (the 74-byte "Mii Data" exchange format - offsets confirmed

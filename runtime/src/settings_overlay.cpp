@@ -792,7 +792,13 @@ void DrawStartupScreen() {
                                         ImGuiWindowFlags_NoBringToFrontOnFocus;
     if (ImGui::Begin("Wiicompiled Startup", nullptr, kFlags)) {
         ImGui::SetWindowFontScale(1.25f);
+        // Android app branding is "DriftDroid" - desktop stays "WiiCompiled" (the underlying
+        // static-recompilation project's own name, unrelated to the Android port's rebrand).
+#if defined(__ANDROID__)
+        constexpr const char* kTitle = "DriftDroid";
+#else
         constexpr const char* kTitle = "WiiCompiled";
+#endif
         const ImVec2 titleSize = ImGui::CalcTextSize(kTitle);
         const float titleX = std::max(0.0f, (viewport->Size.x - titleSize.x) * 0.5f);
         const float startY = std::max(0.0f, (viewport->Size.y - titleSize.y) * 0.5f);

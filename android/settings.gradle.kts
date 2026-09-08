@@ -14,5 +14,5 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "WiiCompiled"
+rootProject.name = "DriftDroid"
 include(":app")

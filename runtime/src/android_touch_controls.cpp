@@ -61,7 +61,7 @@ SDL_Joystick* EnsureVirtualJoystick() {
 // directly with Kotlin via TouchButton.kt's constants so there is exactly one place either side
 // could disagree.
 extern "C" JNIEXPORT void JNICALL
-Java_com_wiicompiled_android_touch_TouchInputBridge_nativeSetTouchButton(JNIEnv*, jclass, jint button,
+Java_com_driftdroid_android_touch_TouchInputBridge_nativeSetTouchButton(JNIEnv*, jclass, jint button,
                                                                           jboolean pressed) {
     if (SDL_Joystick* joystick = EnsureVirtualJoystick()) {
         SDL_SetJoystickVirtualButton(joystick, button, pressed == JNI_TRUE);
@@ -70,7 +70,7 @@ Java_com_wiicompiled_android_touch_TouchInputBridge_nativeSetTouchButton(JNIEnv*
 
 // axis is an SDL_GamepadAxis value; value is normalized [-1, 1].
 extern "C" JNIEXPORT void JNICALL
-Java_com_wiicompiled_android_touch_TouchInputBridge_nativeSetTouchAxis(JNIEnv*, jclass, jint axis,
+Java_com_driftdroid_android_touch_TouchInputBridge_nativeSetTouchAxis(JNIEnv*, jclass, jint axis,
                                                                         jfloat value) {
     if (SDL_Joystick* joystick = EnsureVirtualJoystick()) {
         const float clamped = std::clamp(value, -1.0f, 1.0f);

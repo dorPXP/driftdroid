@@ -7,6 +7,8 @@
 #include "hle/storage/riivolution.h"
 #include "runtime_log.h"
 
+#include <string_view>
+
 // ============================================================================
 // Configuration
 // ============================================================================
@@ -413,9 +415,80 @@ static uint16_t ComputeRflDatabaseCrc(const uint8_t* data, size_t length) {
     return static_cast<uint16_t>(crc);
 }
 
+namespace {
+
+constexpr size_t kMiiBlockOffset = 0x04;
+constexpr size_t kMiiNameOffset = 0x02;
+constexpr size_t kMiiCreatorNameOffset = 0x36;
+
+// Writes up to 10 characters as big-endian UTF-16, the RFL_DB name encoding - matching KartPad's
+// own already-reviewed WriteMiiName helper exactly. "DriftDroid" is exactly 10 characters, so it
+// fills the field with no truncation.
+void WriteMiiName(uint8_t* block, size_t offset, std::string_view name) {
+    constexpr size_t kMaxCharacters = 10;
+    std::memset(block + offset, 0, kMaxCharacters * 2);
+    for (size_t index = 0; index < name.size() && index < kMaxCharacters; ++index) {
+        block[offset + index * 2] = 0;
+        block[offset + index * 2 + 1] = static_cast<uint8_t>(name[index]);
+    }
+}
+
+void WriteBigEndian16(uint8_t* block, size_t offset, uint16_t value) {
+    block[offset] = static_cast<uint8_t>(value >> 8);
+    block[offset + 1] = static_cast<uint8_t>(value);
+}
+
+void WriteBigEndian32(uint8_t* block, size_t offset, uint32_t value) {
+    block[offset] = static_cast<uint8_t>(value >> 24);
+    block[offset + 1] = static_cast<uint8_t>(value >> 16);
+    block[offset + 2] = static_cast<uint8_t>(value >> 8);
+    block[offset + 3] = static_cast<uint8_t>(value);
+}
+
+// A conservative, non-personal default Mii named "DriftDroid" (KartPad's own equivalent seeds
+// theirs as "KartPad") so a fresh install isn't staring at an empty license/Mii list on first
+// boot. Byte layout matches KartPad's already-reviewed CreateDefaultMii exactly; the system-ID
+// bytes are fixed placeholders rather than tied to a real MAC address (unlike KartPad's), since
+// uniqueness here doesn't matter for a Mii the player can freely rename or delete in-game.
+void WriteDefaultMii(uint8_t* block) {
+    const uint16_t header = static_cast<uint16_t>((1u << 10) | (1u << 5));
+    WriteBigEndian16(block, 0x00, header);
+    WriteMiiName(block, kMiiNameOffset, "DriftDroid");
+    block[0x16] = 63;
+    block[0x17] = 63;
+    WriteBigEndian32(block, 0x18, 0x80000001u);
+    block[0x1C] = 0x44;  // 'D'
+    block[0x1D] = 0x72;  // 'r'
+    block[0x1E] = 0x6F;  // 'o'
+    block[0x1F] = 0x69;  // 'i'
+
+    WriteBigEndian16(block, 0x20, 0u);                     // face
+    WriteBigEndian16(block, 0x22, (33u << 9) | (1u << 6)); // hair
+    WriteBigEndian32(block, 0x24, (6u << 27) | (6u << 22) | (1u << 13) | (4u << 9) | (10u << 4) | 2u);
+    WriteBigEndian32(block, 0x28, (2u << 26) | (4u << 21) | (12u << 16) | (4u << 9) | (2u << 5));
+    WriteBigEndian16(block, 0x2C, (1u << 12) | (4u << 8) | (9u << 3));
+    WriteBigEndian16(block, 0x2E, (23u << 11) | (4u << 5) | 13u);
+    WriteBigEndian16(block, 0x30, (4u << 5) | 10u);
+    WriteBigEndian16(block, 0x32, (4u << 5) | 10u);
+    WriteBigEndian16(block, 0x34, (4u << 11) | (20u << 6) | (2u << 1));
+    WriteMiiName(block, kMiiCreatorNameOffset, "DriftDroid");
+}
+
+}  // namespace
+
 bool SeedFaceLibDatabase(const std::string& hostPath) {
     std::vector<uint8_t> database(kFaceLibDatabaseSize, 0);
     std::memcpy(database.data(), "RNOD", 4);
+    WriteDefaultMii(database.data() + kMiiBlockOffset);
+
+    // Marks Mii slot 0 as occupied and writes the "RNHD" guest-data table header, matching
+    // KartPad's own already-reviewed seed layout.
+    database[0x1CE0 + 0x0C] = 0x80;
+    std::memcpy(database.data() + 0x1D00, "RNHD", 4);
+    database[0x1D04] = 0xFF;
+    database[0x1D05] = 0xFF;
+    database[0x1D06] = 0xFF;
+    database[0x1D07] = 0xFF;
 
     const uint16_t crc = ComputeRflDatabaseCrc(database.data(), kFaceLibDatabaseCrcOffset);
     database[kFaceLibDatabaseCrcOffset] = static_cast<uint8_t>(crc >> 8);

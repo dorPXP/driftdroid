@@ -1,4 +1,4 @@
-package com.wiicompiled.android
+package com.driftdroid.android
 
 import android.app.Activity
 import android.app.AlertDialog
@@ -88,7 +88,7 @@ class ModePickerActivity : Activity() {
         root.setPadding(pad, pad, pad, pad)
 
         val title = TextView(this)
-        title.text = "WiiCompiled"
+        title.text = "DriftDroid"
         title.setTextColor(Color.WHITE)
         title.textSize = 22f
         title.gravity = Gravity.CENTER
@@ -444,7 +444,7 @@ class ModePickerActivity : Activity() {
         val intent = Intent(Intent.ACTION_CREATE_DOCUMENT)
         intent.addCategory(Intent.CATEGORY_OPENABLE)
         intent.type = "application/octet-stream"
-        intent.putExtra(Intent.EXTRA_TITLE, "WiiCompiled-Mii-$stamp.dat")
+        intent.putExtra(Intent.EXTRA_TITLE, "DriftDroid-Mii-$stamp.dat")
         startActivityForResult(intent, REQUEST_CODE_EXPORT_MII_DATA)
     }
 
@@ -520,7 +520,7 @@ class ModePickerActivity : Activity() {
         val intent = Intent(Intent.ACTION_CREATE_DOCUMENT)
         intent.addCategory(Intent.CATEGORY_OPENABLE)
         intent.type = "application/zip"
-        intent.putExtra(Intent.EXTRA_TITLE, "WiiCompiled-diagnostics-$stamp.zip")
+        intent.putExtra(Intent.EXTRA_TITLE, "DriftDroid-diagnostics-$stamp.zip")
         startActivityForResult(intent, REQUEST_CODE_EXPORT_DIAGNOSTICS)
     }
 
@@ -565,7 +565,7 @@ class ModePickerActivity : Activity() {
                     zip.putNextEntry(ZipEntry("README.txt"))
                     zip.write(
                         buildString {
-                            appendLine("WiiCompiled Android runtime diagnostics - review before sharing.")
+                            appendLine("DriftDroid runtime diagnostics - review before sharing.")
                             appendLine("Device: ${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL}")
                             appendLine("API level: ${android.os.Build.VERSION.SDK_INT}")
                             appendLine("Each log is truncated to its last $MAX_LOG_FILE_BYTES bytes.")
