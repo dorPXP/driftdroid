@@ -514,6 +514,11 @@ void SystemBridge::SeedLowMemDefaults(const Memory::Config& config) {
         entries.push_back({0x800017D8u, 0x00000001u, "Retro Rewind recomp runtime marker", true});
     }
 
+    // Retro Rewind's Kamek-module reservation is queued behind an explicit profile activation
+    // (RecompMod::RegisterProfileInitializer/ActivateProfile, see recomp_mod_loader.cpp and
+    // combined_product.cpp::SetActive) rather than registered at static-init time, so
+    // MemoryReservations() is simply empty here in a combined build unless Retro Rewind is
+    // active - no separate IsRetroRewind() gate needed for this loop.
     for (const auto& reservation : RecompMod::MemoryReservations()) {
         if (reservation.start >= kMem1ArenaLoDefault &&
             reservation.start < mem1ArenaHiDefault &&

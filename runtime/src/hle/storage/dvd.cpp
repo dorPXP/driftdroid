@@ -583,12 +583,21 @@ static void ApplyFolderByNameMapping(const RuntimeRiivolution::Mapping& mapping)
 
 static void ScanOverlayRoot(const RuntimeRiivolution::Overlay& overlay) {
     if (!overlay.patches) {
-        // Fallback for mod roots that mirror the disc filesystem directly (not a
-        // Riivolution pack, which wouldn't map anything useful this way).
+        // Fallback for mod roots with no Riivolution XML at all - most commonly a texture pack
+        // imported straight from a GameBanana-style zip (ModManager.kt), which typically
+        // ships as a flat handful of replacement files (e.g. just "Race_E.szs" at the pack root)
+        // with no folder structure and no XML describing where they belong on disc. Confirmed
+        // directly: an exact disc-path mirror (this used to call ScanDirectory(overlay.root, "/"),
+        // requiring e.g. "Scene/UI/Race_E.szs") silently matched nothing for a pack shaped that
+        // way - by-filename matching (the same mechanism Riivolution's own <folder> without a
+        // disc="" attribute uses, see ApplyFolderByNameMapping above) finds the file regardless of
+        // where in the pack it sits, which is what every no-XML overlay root actually needs here.
         RT_LOG(RT_TAG_DVD) << overlay.root.string()
-                  << ": no Riivolution XML found, treating the root as a disc-shaped overlay"
+                  << ": no Riivolution XML found, matching disc files by filename"
                   << std::endl;
-        ScanDirectory(overlay.root, "/");
+        ApplyFolderByNameMapping(
+            RuntimeRiivolution::Mapping{RuntimeRiivolution::Mapping::Kind::FolderByName, "",
+                                        overlay.root, /*recursive=*/true, /*create=*/false});
         return;
     }
 

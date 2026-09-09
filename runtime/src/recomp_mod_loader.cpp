@@ -7,6 +7,7 @@
 #include <mutex>
 #include <optional>
 #include <sstream>
+#include <stdexcept>
 #include <filesystem>
 
 #include "memory.h"
@@ -22,6 +23,21 @@ struct ExecutableRange {
     uint32_t end = 0;
     std::string name;
 };
+
+struct ProfileInitializer {
+    std::string profile;
+    RecompMod::ProfileInitializerFn fn = nullptr;
+};
+
+std::vector<ProfileInitializer>& ProfileInitializers() {
+    static std::vector<ProfileInitializer> initializers;
+    return initializers;
+}
+
+std::string& ActiveProfile() {
+    static std::string profile;
+    return profile;
+}
 
 std::vector<RecompMod::InitializerFn>& MemoryInitializers() {
     static std::vector<RecompMod::InitializerFn> initializers;
@@ -210,6 +226,41 @@ std::atomic<bool> g_executableWriteGuardEnabled{false};
 std::atomic<uint8_t> g_executableWriteGuardPages[kExecutableWriteGuardPageCount]{};
 std::atomic<uint8_t> g_executableWriteGuardCoarsePages[kExecutableWriteGuardCoarsePageCount]{};
 std::atomic<uint8_t> g_executableWriteGuardMidPages[kExecutableWriteGuardMidPageCount]{};
+
+void RegisterProfileInitializer(std::string_view profile, ProfileInitializerFn fn) {
+    if (profile.empty() || !fn) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(ModMutex());
+    if (!ActiveProfile().empty()) {
+        throw std::runtime_error("mod profile initializer registered after activation");
+    }
+    ProfileInitializers().push_back({std::string(profile), fn});
+}
+
+void ActivateProfile(std::string_view profile) {
+    std::vector<ProfileInitializerFn> pending;
+    {
+        std::lock_guard<std::mutex> lock(ModMutex());
+        if (!ActiveProfile().empty()) {
+            if (ActiveProfile() != profile) {
+                throw std::runtime_error("cannot change the active mod profile after activation");
+            }
+            return;
+        }
+        ActiveProfile() = profile;
+        for (const auto& initializer : ProfileInitializers()) {
+            if (initializer.profile == profile) {
+                pending.push_back(initializer.fn);
+            }
+        }
+    }
+    for (auto* fn : pending) {
+        fn();
+    }
+    RT_LOG(RT_TAG_MOD) << "Activated profile '" << profile << "' with "
+                       << pending.size() << " deferred mod registration(s)" << std::endl;
+}
 
 void RegisterMemoryInitializer(InitializerFn fn) {
     if (!fn) {

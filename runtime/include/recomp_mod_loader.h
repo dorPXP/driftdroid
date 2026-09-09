@@ -12,6 +12,7 @@ struct CpuContext;
 namespace RecompMod {
 
 using InitializerFn = void (*)();
+using ProfileInitializerFn = void (*)();
 
 struct MemoryReservation {
     uint32_t start = 0;
@@ -66,6 +67,15 @@ void RegisterMemoryInitializer(InitializerFn fn);
 void RunMemoryInitializers();
 void RegisterPostRelInitializer(InitializerFn fn);
 void RunPostRelInitializers();
+
+// Generated mod products queue their registration behind a profile name so a combined-library
+// build (both products linked into one process, see build_combined_android_lib.py) can link
+// every profile's registration code without applying an inactive profile's memory patches,
+// reservations, or Riivolution settings - see ModDataPatchWriter.cs's
+// ActivateRetroRewindModDataPatches/QueueModDataPatches. Call ActivateProfile once, from
+// RuntimeProduct::SetActive (combined_product.cpp), before any guest code runs.
+void RegisterProfileInitializer(std::string_view profile, ProfileInitializerFn fn);
+void ActivateProfile(std::string_view profile);
 
 void RegisterDvdOverlayRoot(std::string root);
 const std::vector<std::string>& DvdOverlayRoots();

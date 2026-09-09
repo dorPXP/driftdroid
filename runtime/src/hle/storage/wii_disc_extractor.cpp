@@ -30,6 +30,7 @@
 #include <string>
 #include <vector>
 
+#include <sys/stat.h>
 #include <unistd.h>
 
 namespace fs = std::filesystem;
@@ -84,7 +85,14 @@ void PreadExact(int fd, uint64_t offset, void* buffer, size_t size, const char* 
     while (done < size) {
         const ssize_t n = pread(fd, out + done, size - done, static_cast<off_t>(offset + done));
         if (n <= 0) {
-            throw ExtractError(std::string("Unexpected end of file while reading ") + what + ".");
+            // Reports the actual file size next to the offset that failed - distinguishes a
+            // genuinely truncated/corrupt file from a split WBFS (.wbfs + .wbf1, unsupported -
+            // see WbfsSource) at a glance, without needing device logs.
+            struct stat st{};
+            const long long fileSize = (fstat(fd, &st) == 0) ? static_cast<long long>(st.st_size) : -1;
+            throw ExtractError(std::string("Unexpected end of file while reading ") + what +
+                                " (tried offset " + std::to_string(offset + done) +
+                                ", file is " + std::to_string(fileSize) + " bytes).");
         }
         done += static_cast<size_t>(n);
     }
@@ -115,20 +123,42 @@ public:
         }
         const uint8_t hdSecSzShift = header[8];
         const uint8_t wbfsSecSzShift = header[9];
+        // BUG FIX (2026-09-09): cross-checked against Dolphin's own real DiscIO/WbfsBlob.cpp
+        // (dolphin-emu/dolphin, WbfsFileReader::ReadHeader/constructor) after a hand-derived
+        // reimplementation got two things wrong for a real user's file, confirmed independently
+        // by multiple reports of the identical failure:
+        //
+        // 1. wbfs_sec_sz_s is an independent, absolute log2 exponent for the WBFS block size -
+        //    NOT additive with hd_sec_sz_s. The old formula (hdSectorSize << wbfsSecSzShift)
+        //    computed 512 << 21 = 1GB "sectors" for a file whose header correctly said
+        //    wbfs_sec_sz_s=21, when the real WBFS sector size is 1 << 21 = 2MB (Dolphin:
+        //    `m_wbfs_sector_size = 1ull << m_header.wbfs_sector_shift`) - a completely ordinary
+        //    real-world value. hd_sec_sz_s exists in the header only to express n_hd_sec (the
+        //    drive's total sector count) in the same units; it's unrelated to this computation.
         const uint64_t hdSectorSize = uint64_t(1) << hdSecSzShift;
-        wbfsSectorSize_ = hdSectorSize << wbfsSecSzShift;
-        if (wbfsSectorSize_ == 0 || wbfsSectorSize_ > (uint64_t(1) << 30)) {
+        wbfsSectorSize_ = uint64_t(1) << wbfsSecSzShift;
+        // Dolphin also rejects anything smaller than one real Wii sector (0x8000/32KB) as
+        // malformed, not just checking for an upper bound.
+        constexpr uint64_t kWiiSectorSize = 0x8000ull;
+        if (wbfsSectorSize_ < kWiiSectorSize || wbfsSectorSize_ > (uint64_t(1) << 30)) {
             throw ExtractError("This WBFS file has an implausible sector size.");
         }
 
-        // Disc slot 0 starts right after the header+bitmap, which together occupy exactly one
-        // WBFS sector; the wlba table itself starts right after that slot's disc-header copy.
-        const uint64_t discInfoOffset = wbfsSectorSize_;
+        // 2. The disc-info slot (disc-header copy + wlba table) starts right after exactly ONE
+        //    HD-sector (the WBFS header + free-block bitmap are sized to fit hd_sector_size, e.g.
+        //    512 bytes - not one WBFS-sector, which can be megabytes). The old code used
+        //    wbfsSectorSize_ as this base offset, which for a large WBFS sector size like 2MB
+        //    read the table from deep inside real game data instead of the actual table location -
+        //    Dolphin: `file.Seek(m_hd_sector_size + WII_DISC_HEADER_SIZE, ...)`.
+        const uint64_t discInfoOffset = hdSectorSize;
         const uint64_t wlbaTableOffset = discInfoOffset + 0x100;
 
         // The table is sized for the largest possible Wii disc regardless of the actual game, so
         // every real single-file .wbfs uses the same table length for a given sector size.
-        constexpr uint64_t kMaxWiiDiscSize = 0x118240000ull;
+        // Matches Dolphin's own WII_SECTOR_COUNT(143432*2) * WII_SECTOR_SIZE(0x8000) - the old
+        // constant here (0x118240000) was exactly half of this (a single-layer-only disc size),
+        // undersizing the table for the dual-layer-safe capacity every real WBFS tool assumes.
+        constexpr uint64_t kMaxWiiDiscSize = uint64_t(143432 * 2) * kWiiSectorSize;
         const uint64_t entryCount = (kMaxWiiDiscSize + wbfsSectorSize_ - 1) / wbfsSectorSize_;
 
         std::vector<uint8_t> raw(entryCount * 2);

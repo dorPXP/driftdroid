@@ -11,6 +11,7 @@
 #include <fstream>
 #include <string>
 #include <unistd.h>
+#include <vector>
 
 #include <SDL3/SDL_system.h>
 
@@ -162,6 +163,7 @@ Java_com_driftdroid_android_MainActivity_nativeRealRuntimeCheck(JNIEnv* env, job
 namespace {
 std::string g_androidDvdRoot;
 std::string g_androidRetroRewindRoot;
+std::vector<std::string> g_androidOverlayRoots;
 }  // namespace
 
 // Separate setter (rather than a 3rd nativeSetInstallPaths parameter) so the base-product build
@@ -173,6 +175,24 @@ Java_com_driftdroid_android_MainActivity_nativeSetRetroRewindRoot(JNIEnv* env, j
     const char* chars = env->GetStringUTFChars(retroRewindRoot, nullptr);
     g_androidRetroRewindRoot = chars;
     env->ReleaseStringUTFChars(retroRewindRoot, chars);
+}
+
+// Registers one user-imported texture pack directory (Riivolution-shaped: a riivolution/*.xml
+// plus its replacement files, or - as of the by-filename fallback in dvd.cpp's ScanOverlayRoot -
+// just a loose file with no XML at all) as an extra DVD overlay root - see ModManager.kt,
+// which calls this once per enabled pack, in a loop, before super.onCreate(). Same staging pattern
+// as g_androidRetroRewindRoot above, not a direct RuntimeConfigFile::Mutable() push: confirmed
+// on-device (matching &Get() pointers logged from both ends, ruling out a second config instance)
+// that a direct in-memory push here gets silently wiped moments later - SDL_main below reloads the
+// whole RuntimeUserConfig straight from Config.toml on disk (the "Force a reload from the file we
+// just wrote" block a few lines down, added earlier for dvd_root/retro_rewind_root) and overwrites
+// it, discarding anything that was only ever pushed in memory and never written to the file.
+extern "C" JNIEXPORT void JNICALL
+Java_com_driftdroid_android_MainActivity_nativeAddOverlayRoot(JNIEnv* env, jobject /* this */,
+                                                                  jstring overlayRoot) {
+    const char* chars = env->GetStringUTFChars(overlayRoot, nullptr);
+    g_androidOverlayRoots.emplace_back(chars);
+    env->ReleaseStringUTFChars(overlayRoot, chars);
 }
 
 // Only meaningful (and only linked) for the combined libGameCombined.so, where both profiles'
@@ -254,6 +274,30 @@ extern "C" int SDL_main(int argc, char** argv) {
     RuntimeConfigFile::WriteSetting("paths", "dvd_root", "\"" + g_androidDvdRoot + "\"");
     if (!g_androidRetroRewindRoot.empty()) {
         RuntimeConfigFile::WriteSetting("paths", "retro_rewind_root", "\"" + g_androidRetroRewindRoot + "\"");
+    }
+    // Always written (even empty, as "[]") rather than only when non-empty like
+    // retro_rewind_root above - this one really can need to shrink back to zero, e.g. the user
+    // disabled every texture pack since the last launch, and an empty write is what actually
+    // clears whatever a PREVIOUS launch persisted here (Kotlin re-sends the current enabled set
+    // in full every launch - see ModManager.enabledOverlayRoots - so this is always
+    // authoritative, never something to merge with the old file value).
+    {
+        std::string joined = "[";
+        for (const std::string& root : g_androidOverlayRoots) {
+            if (joined.size() > 1) {
+                joined += ", ";
+            }
+            std::string escaped;
+            for (char c : root) {
+                if (c == '\\' || c == '"') {
+                    escaped += '\\';
+                }
+                escaped += c;
+            }
+            joined += "\"" + escaped + "\"";
+        }
+        joined += "]";
+        RuntimeConfigFile::WriteSetting("paths", "overlay_roots", joined);
     }
 
     // RuntimeConfigFile::Get() memoizes into a function-local static on its first call, and

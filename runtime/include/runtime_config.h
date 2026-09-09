@@ -139,7 +139,12 @@ inline std::string RemoveComment(std::string_view line) {
 }
 
 inline bool IsSupportedResolutionMultiplier(float value) {
-    static constexpr std::array values{0.0f, 1.0f, 1.5f, 2.0f, 3.0f, 4.0f, 6.0f, 8.0f};
+    // 0.5/0.75 exist for hardware whose GPU clock gets capped low by the OS/OEM power policy
+    // (confirmed on-device: an efficient, well-batched frame - ~450 merged draw calls - still
+    // only hit ~32fps at a 315MHz-capped GPU clock, pointing at fill-rate/shader cost, not draw
+    // call overhead) - rendering below native resolution directly reduces that cost instead of
+    // fighting a clock ceiling the app has no API to override.
+    static constexpr std::array values{0.0f, 0.5f, 0.75f, 1.0f, 1.5f, 2.0f, 3.0f, 4.0f, 6.0f, 8.0f};
     return std::find(values.begin(), values.end(), value) != values.end();
 }
 

@@ -202,8 +202,9 @@ std::atomic_bool g_strapInputAccepted = false;
 std::atomic_uint64_t g_startupDismissFrame = UINT64_MAX;
 constexpr uint64_t kStrapTransitionCoverFrames = 60;
 
-constexpr std::array<ResolutionItem, 8> kResolutions = {{
-    {"Auto (window size)", 0.0f}, {"Native (1x)", 1.0f}, {"1.5x", 1.5f}, {"2x", 2.0f},
+constexpr std::array<ResolutionItem, 10> kResolutions = {{
+    {"Auto (window size)", 0.0f}, {"0.5x (low power)", 0.5f}, {"0.75x", 0.75f},
+    {"Native (1x)", 1.0f}, {"1.5x", 1.5f}, {"2x", 2.0f},
     {"3x", 3.0f}, {"4x", 4.0f}, {"6x", 6.0f}, {"8x", 8.0f},
 }};
 
@@ -753,8 +754,12 @@ void DrawShaderCompilationStatus() {
     }
 
     constexpr float kMargin = 10.0f;
+    // Left margin only for this overlay is much bigger than kMargin (used everywhere else for
+    // top/right-edge spacing) - tucked right into the corner it was easy to miss entirely
+    // (reported directly: "not very visible right now"), so it's pulled well clear of the edge.
+    constexpr float kLeftMargin = 140.0f;
     const float top = g_topBarVisible ? ImGui::GetFrameHeight() + kMargin : kMargin;
-    ImGui::SetNextWindowPos(ImVec2(kMargin, top), ImGuiCond_Always);
+    ImGui::SetNextWindowPos(ImVec2(kLeftMargin, top), ImGuiCond_Always);
     ImGui::SetNextWindowBgAlpha(0.55f);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(7.0f, 4.0f));
     constexpr ImGuiWindowFlags kFlags = ImGuiWindowFlags_AlwaysAutoResize |
@@ -985,6 +990,18 @@ void DrawAndroidSidebar() {
         case SidebarPage::Display:
             DrawResolutionSettings();
             DrawGraphicsSettings();
+            ImGui::Separator();
+            ImGui::Spacing();
+            // Texture pack import/management deliberately does NOT live here - it used to have a
+            // button on this page that opened Kotlin's ModManager dialog, but that dialog
+            // launches Android's system file picker as a separate Activity, which backgrounds this
+            // live game session's GPU surface. Confirmed directly on-device: doing that mid-race
+            // lost the WebGPU/Vulkan surface ("QueuePresent failed with VK_ERROR_SURFACE_LOST_KHR")
+            // and crashed. No such surface exists yet on the launcher screen (ModePickerActivity),
+            // so that's the only place it's safe - same reasoning as why Retro Rewind's own install
+            // flow only ever runs from there too.
+            ImGui::TextWrapped(
+                "Manage texture packs from the launcher screen (before starting a race).");
             break;
         case SidebarPage::Controller:
             DrawControllerSettings();
