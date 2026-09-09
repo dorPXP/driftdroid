@@ -38,17 +38,18 @@ import org.libsdl.app.SDLActivity
  * resurfacing the same class of bug, so this is the "do it the SDL way" version (P5 groundwork).
  *
  * Always started explicitly from ModePickerActivity (the real launcher - see AndroidManifest.xml)
- * with [EXTRA_PRODUCT] set: even though both products now live in one combined native library
- * (nativeSetActiveProduct() picks which one actually runs, not which .so gets loaded), the guest
- * engine state a running game builds up (translated memory, guest threads, HLE device state) has
- * no supported "reset and switch profiles" path - the Original/Retro Rewind choice must still be
- * resolved before SDLActivity's own lifecycle (which calls getLibraries()) even starts, and
- * restartIntoProduct() below still fully kills the process rather than trying to switch live.
+ * with [EXTRA_PRODUCT] set: neither the combined native library (libGameCombined.so - both
+ * products, see runtime/cmake/build_combined_android_lib.py, not yet safe to ship - see
+ * getLibraries()'s own doc comment) nor a running game has a supported way to reset and switch
+ * profiles live - the Original/Retro Rewind choice must be resolved before SDLActivity's own
+ * lifecycle (which calls getLibraries()) even starts, and restartIntoProduct() below still fully
+ * kills the process rather than trying to switch live.
  */
 class MainActivity : SDLActivity() {
 
     private external fun nativeSetInstallPaths(filesDir: String, dvdRoot: String)
     private external fun nativeSetRetroRewindRoot(retroRewindRoot: String)
+    private external fun nativeAddOverlayRoot(overlayRoot: String)
     private external fun nativeSetActiveProduct(retroRewind: Boolean)
     private external fun nativeToggleSettingsOverlay()
     private external fun nativeSetTouchControlsVisibleCache(visible: Boolean)
@@ -62,13 +63,30 @@ class MainActivity : SDLActivity() {
     private var audioFocusRequest: AudioFocusRequest? = null
 
     override fun getLibraries(): Array<String> {
-        // REVERTED (2026-09-05): the combined libGameCombined.so build (see
-        // runtime/cmake/build_combined_android_lib.py) crashes on load - its indirect-dispatch
-        // function registry (runtime/src/abi_bridge.cpp, RegisterStaticIndirectDispatchTable) is
-        // hard-coded to accept exactly one profile's table per process and aborts when both
-        // products' tables register. Fixing that registry to be profile-aware is real follow-up
-        // work, not done yet - see hermes/ notes. Back to separate libraries in the meantime.
-        return arrayOf("wii", "png16", if (resolvedProduct == PRODUCT_RETRO_REWIND) "RetroRewind" else "WiiCompiled")
+        // Original loads its OWN standalone libWiiCompiled.so, not the combined library - found
+        // 2026-09-09 that Original (and only Original, not Retro Rewind) had a real gameplay bug
+        // on the combined .so: steering wasn't blocked during the pre-race "3-2-1-GO" countdown,
+        // letting the kart move before GO. Confirmed directly on-device that switching Original
+        // alone back to its own untouched libWiiCompiled.so (never passes through the combined-lib
+        // merge/rename script) fixes it - so this is a leftover profile-selection defect in that
+        // merge specific to the "base" profile, not a genuine bug in Original's own translated
+        // logic (which runs correctly here, unmerged). The exact defect in the merge itself
+        // (some function that should differ per profile - most likely the race-countdown input
+        // gate - still being resolved wrong for "base" specifically) has NOT been root-caused yet;
+        // this split is the real fix for now, not a temporary diagnostic, until someone does that
+        // deeper dispatch-table archaeology. See [[wiicompiled-combined-lib-effort]] memory.
+        if (resolvedProduct == PRODUCT_BASE) {
+            return arrayOf("wii", "png16", "WiiCompiled")
+        }
+        // Retro Rewind still loads the combined library - confirmed working correctly there
+        // (see the memory above for the full multi-session fix history that made this safe:
+        // transitive sensitivity closure + source-level symbol aliasing in
+        // TranslatedBuildShardEmitter.cs, profile-tagged registry in abi_bridge.cpp, deferred mod
+        // registration in recomp_mod_loader.cpp). Still outstanding: the combined-lib CMake custom
+        // command doesn't track mkw_combined_product's object content for staleness - always
+        // `rm libGameCombined.so` before relinking after any C++ change, or ninja may silently
+        // reuse a stale link.
+        return arrayOf("wii", "png16", "GameCombined")
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -109,8 +127,30 @@ class MainActivity : SDLActivity() {
         if (resolvedProduct == PRODUCT_RETRO_REWIND) {
             nativeSetRetroRewindRoot(File(filesDir, RETRO_REWIND_STAGING_SUBDIR).absolutePath)
         }
+        for (root in ModManager.enabledOverlayRoots(this)) {
+            nativeAddOverlayRoot(root)
+        }
+        // A no-op on the separate-library builds (getLibraries() below) - only the combined
+        // library's RuntimeProduct provider (combined_product.cpp) does anything with this, and
+        // it must run before super.onCreate() starts SDL's thread towards main(), which is when
+        // TranslatedFunctionRegistry::Finalize() locks in which generated dispatch table is active.
+        nativeSetActiveProduct(resolvedProduct == PRODUCT_RETRO_REWIND)
 
         super.onCreate(savedInstanceState)
+
+        // Without this, Android is free to apply its default (often battery-biased) governor
+        // behavior to this process even while it's pegging the CPU/GPU every frame - this is a
+        // direct request for the OS to favor sustained throughput over battery/thermal headroom
+        // for as long as this window is visible. No-ops harmlessly on hardware that doesn't
+        // support it (see PowerManager.setSustainedPerformanceMode's own docs).
+        window.setSustainedPerformanceMode(true)
+
+        // Many phones default a new window to 60Hz even on 90/120Hz-capable displays unless the
+        // app explicitly opts into a higher refresh rate mode - without this, the in-game "Race
+        // frame interpolation" setting above 60 FPS has nothing to actually present onto and the
+        // display stays locked at 60 regardless (confirmed on-device: selecting 90 FPS there had
+        // no visible effect until this was added).
+        requestHighestRefreshRate()
 
         // The settings gear and touch controls are gameplay UI - showing them over the ROM
         // picker would let a player fiddle with in-game settings before there's a game to apply
@@ -124,10 +164,36 @@ class MainActivity : SDLActivity() {
     }
 
     private fun loadNativeLibraries(product: String) {
-        // See getLibraries() above - reverted off the combined library for now.
+        // See getLibraries() above.
         System.loadLibrary("wii")
         System.loadLibrary("png16")
-        System.loadLibrary(if (product == PRODUCT_RETRO_REWIND) "RetroRewind" else "WiiCompiled")
+        if (product == PRODUCT_BASE) {
+            System.loadLibrary("WiiCompiled")
+        } else {
+            System.loadLibrary("GameCombined")
+        }
+    }
+
+    /** Opts this window into the display's highest available refresh rate at the current
+     * resolution - Android does not do this by default, even on a 90/120Hz-capable screen. */
+    private fun requestHighestRefreshRate() {
+        val display =
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) display else windowManager.defaultDisplay
+        val currentMode = display?.mode ?: return
+        val fastestMode =
+            display.supportedModes
+                .filter {
+                    it.physicalWidth == currentMode.physicalWidth &&
+                        it.physicalHeight == currentMode.physicalHeight
+                }
+                .maxByOrNull { it.refreshRate }
+                ?: return
+        if (fastestMode.refreshRate <= currentMode.refreshRate) {
+            return
+        }
+        val attributes = window.attributes
+        attributes.preferredDisplayModeId = fastestMode.modeId
+        window.attributes = attributes
     }
 
     /** Kills this process and relaunches straight back into MainActivity with the new product -

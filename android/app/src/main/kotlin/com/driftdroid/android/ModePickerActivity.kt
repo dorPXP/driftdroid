@@ -4,15 +4,22 @@ import android.app.Activity
 import android.app.AlertDialog
 import android.content.Intent
 import android.graphics.Color
+import android.graphics.Typeface
+import android.graphics.drawable.Drawable
+import android.graphics.drawable.GradientDrawable
+import android.graphics.drawable.LayerDrawable
 import android.net.Uri
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.provider.OpenableColumns
 import android.view.Gravity
+import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
+import android.view.ViewOutlineProvider
 import android.widget.Button
+import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ProgressBar
 import android.widget.TextView
@@ -51,6 +58,7 @@ class ModePickerActivity : Activity() {
     private lateinit var progressBar: ProgressBar
     private lateinit var diagnosticsButton: Button
     private lateinit var serverSettingsButton: Button
+    private lateinit var modsButton: Button
     private lateinit var miiDataButton: Button
     private val mainHandler = Handler(Looper.getMainLooper())
 
@@ -61,7 +69,7 @@ class ModePickerActivity : Activity() {
 
     override fun onResume() {
         super.onResume()
-        refreshRetroButtonLabel()
+        refreshChannelButtons()
         // An install may still be running in RetroRewindInstallService from a previous instance
         // of this Activity (e.g. this one is a fresh recreation after Android reclaimed the old
         // one while backgrounded) - pick up its live progress instead of showing an idle screen
@@ -79,23 +87,127 @@ class ModePickerActivity : Activity() {
 
     private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
 
+
+    /** A rounded "channel" tile background, Wii Menu channel style. */
+    private fun channelDrawable(topColor: Int, bottomColor: Int, radius: Float): GradientDrawable =
+        GradientDrawable(
+            GradientDrawable.Orientation.TOP_BOTTOM,
+            intArrayOf(topColor, bottomColor),
+        ).also { it.cornerRadius = radius }
+
+    private fun styleChannelButton(
+        button: Button,
+        topColor: Int,
+        bottomColor: Int,
+        radius: Float = dp(18).toFloat(),
+    ) {
+        button.background = channelDrawable(topColor, bottomColor, radius)
+        button.setTextColor(Color.WHITE)
+        button.typeface = Typeface.DEFAULT_BOLD
+        button.isAllCaps = false
+        button.setShadowLayer(3f, 0f, 2f, Color.argb(140, 0, 0, 0))
+        button.stateListAnimator = null
+        button.elevation = dp(4).toFloat()
+        addPressBounce(button)
+    }
+
+    /**
+     * Custom channel art (a full banner image, already carrying its own logo/text) as a button's
+     * background, clipped to rounded corners via the view's outline rather than baked into the
+     * image itself - the source banners are plain rectangles at 1120x256 (= 280x64dp at 4x/xxxhdpi,
+     * matching buttonParams exactly, so the image stretches to fill with no cropping needed).
+     */
+    private fun styleImageButton(
+        button: Button,
+        drawableRes: Int,
+        locked: Boolean,
+        lockedLabel: String,
+        radius: Float = dp(18).toFloat(),
+    ) {
+        val art = androidx.core.content.ContextCompat.getDrawable(this, drawableRes)!!.mutate()
+        button.background =
+            if (locked) {
+                // A dark scrim over the banner art (rather than editing the art itself) both
+                // signals "locked" Wii-channel style and naturally dims the banner's own baked-in
+                // title text underneath the "Install..." label drawn on top, so the two don't
+                // compete for attention.
+                val scrim = GradientDrawable()
+                scrim.setColor(Color.argb(175, 0, 0, 0))
+                scrim.cornerRadius = radius
+                LayerDrawable(arrayOf(art, scrim))
+            } else {
+                art
+            }
+        button.text = if (locked) lockedLabel else ""
+        button.setTextColor(Color.WHITE)
+        button.typeface = Typeface.DEFAULT_BOLD
+        button.textSize = 16f
+        button.isAllCaps = false
+        button.setShadowLayer(3f, 0f, 2f, Color.argb(200, 0, 0, 0))
+        button.stateListAnimator = null
+        button.elevation = dp(4).toFloat()
+        button.clipToOutline = true
+        button.outlineProvider =
+            object : ViewOutlineProvider() {
+                override fun getOutline(view: View, outline: android.graphics.Outline) {
+                    outline.setRoundRect(0, 0, view.width, view.height, radius)
+                }
+            }
+        addPressBounce(button)
+    }
+
+    /**
+     * The little "press in, spring back" wiggle every Wii Menu channel does when tapped -
+     * squishes non-uniformly (width in more than height) rather than a plain uniform scale, and
+     * overshoots slightly past 1.0 on release before settling - the actual difference between
+     * "shrinks and grows back" (mechanical) and "liquid"/gel-like motion is in that asymmetry and
+     * overshoot, not just easing curve choice. Purely a touch-feedback animation (returns false so
+     * the real click listener still fires), not a gate on the click itself.
+     */
+    private fun addPressBounce(view: View) {
+        val overshoot = android.view.animation.OvershootInterpolator(3.5f)
+        view.setOnTouchListener { v, event ->
+            when (event.action) {
+                MotionEvent.ACTION_DOWN ->
+                    v.animate().scaleX(0.92f).scaleY(0.95f).setDuration(90)
+                        .setInterpolator(android.view.animation.DecelerateInterpolator()).start()
+                // Sound plays on an actual completed tap only, not ACTION_CANCEL (a drag that
+                // left the view, or the touch getting reassigned elsewhere) - both still spring
+                // the view back visually, but a canceled touch never counted as a "click" and
+                // shouldn't sound like one either.
+                MotionEvent.ACTION_UP -> {
+                    v.animate().scaleX(1f).scaleY(1f).setDuration(260).setInterpolator(overshoot).start()
+                    UiSounds.playClick(v.context)
+                }
+                MotionEvent.ACTION_CANCEL ->
+                    v.animate().scaleX(1f).scaleY(1f).setDuration(260).setInterpolator(overshoot).start()
+            }
+            false
+        }
+    }
+
     private fun buildUi() {
         root = LinearLayout(this)
         root.orientation = LinearLayout.VERTICAL
         root.gravity = Gravity.CENTER
-        root.setBackgroundColor(Color.rgb(18, 18, 22))
         val pad = dp(24)
         root.setPadding(pad, pad, pad, pad)
 
-        val title = TextView(this)
-        title.text = "DriftDroid"
-        title.setTextColor(Color.WHITE)
-        title.textSize = 22f
-        title.gravity = Gravity.CENTER
-        title.setPadding(0, 0, 0, dp(28))
+        val title = ImageView(this)
+        title.setImageResource(R.drawable.driftdroid_logo)
+        title.adjustViewBounds = true
+        val titleParams = LinearLayout.LayoutParams(dp(240), ViewGroup.LayoutParams.WRAP_CONTENT)
+        title.layoutParams = titleParams
+        title.setPadding(0, dp(8), 0, 0)
+
+        val subtitle = TextView(this)
+        subtitle.text = "Kart Channel"
+        subtitle.setTextColor(Color.argb(230, 0xDD, 0xDD, 0xDD))
+        subtitle.textSize = 14f
+        subtitle.gravity = Gravity.CENTER
+        subtitle.setPadding(0, dp(2), 0, dp(28))
 
         baseButton = Button(this)
-        baseButton.text = "Mario Kart Wii"
         baseButton.setOnClickListener { launchProduct(MainActivity.PRODUCT_BASE) }
 
         retroButton = Button(this)
@@ -107,22 +219,24 @@ class ModePickerActivity : Activity() {
             }
         }
 
-        val buttonParams = LinearLayout.LayoutParams(dp(260), ViewGroup.LayoutParams.WRAP_CONTENT)
-        buttonParams.topMargin = dp(12)
+        val buttonParams = LinearLayout.LayoutParams(dp(280), dp(64))
+        buttonParams.topMargin = dp(14)
 
         retroMenuButton = Button(this)
         retroMenuButton.text = "⋮" // vertical ellipsis ("3 dots")
+        retroMenuButton.textSize = 18f
         retroMenuButton.setOnClickListener { showRetroRewindMenuDialog() }
+        styleChannelButton(retroMenuButton, Color.rgb(0xF2, 0x5C, 0x4C), Color.rgb(0xD1, 0x2A, 0x1E), dp(14).toFloat())
 
         val retroRowParams =
-            LinearLayout.LayoutParams(dp(260), ViewGroup.LayoutParams.WRAP_CONTENT)
-        retroRowParams.topMargin = dp(12)
+            LinearLayout.LayoutParams(dp(280), dp(64))
+        retroRowParams.topMargin = dp(14)
         val retroRow = LinearLayout(this)
         retroRow.orientation = LinearLayout.HORIZONTAL
         val retroButtonParams =
-            LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+            LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f)
         val retroMenuButtonParams =
-            LinearLayout.LayoutParams(dp(48), ViewGroup.LayoutParams.WRAP_CONTENT)
+            LinearLayout.LayoutParams(dp(56), ViewGroup.LayoutParams.MATCH_PARENT)
         retroMenuButtonParams.marginStart = dp(8)
         retroRow.addView(retroButton, retroButtonParams)
         retroRow.addView(retroMenuButton, retroMenuButtonParams)
@@ -130,9 +244,11 @@ class ModePickerActivity : Activity() {
         progressBar = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal)
         progressBar.max = 1000
         progressBar.visibility = View.GONE
+        val progressParams = LinearLayout.LayoutParams(dp(280), ViewGroup.LayoutParams.WRAP_CONTENT)
+        progressParams.topMargin = dp(14)
 
         statusText = TextView(this)
-        statusText.setTextColor(Color.argb(200, 255, 255, 255))
+        statusText.setTextColor(Color.rgb(0xDD, 0xDD, 0xDD))
         statusText.textSize = 13f
         statusText.gravity = Gravity.CENTER
         statusText.setPadding(0, dp(16), 0, 0)
@@ -142,33 +258,80 @@ class ModePickerActivity : Activity() {
         diagnosticsButton.textSize = 11f
         diagnosticsButton.setOnClickListener { launchDiagnosticsExportPicker() }
         val diagnosticsButtonParams =
-            LinearLayout.LayoutParams(dp(260), ViewGroup.LayoutParams.WRAP_CONTENT)
-        diagnosticsButtonParams.topMargin = dp(20)
+            LinearLayout.LayoutParams(dp(260), dp(40))
+        diagnosticsButtonParams.topMargin = dp(24)
+        styleChannelButton(
+            diagnosticsButton,
+            Color.rgb(0x5A, 0x5A, 0x5A),
+            Color.rgb(0x3A, 0x3A, 0x3A),
+            dp(12).toFloat(),
+        )
+        diagnosticsButton.setTextColor(Color.rgb(0xDD, 0xDD, 0xDD))
+        diagnosticsButton.setShadowLayer(0f, 0f, 0f, 0)
 
         serverSettingsButton = Button(this)
         serverSettingsButton.text = "Experimental Server Settings..."
         serverSettingsButton.textSize = 11f
         serverSettingsButton.setOnClickListener { PrivateServerSettings.show(this) }
         val serverSettingsButtonParams =
-            LinearLayout.LayoutParams(dp(260), ViewGroup.LayoutParams.WRAP_CONTENT)
-        serverSettingsButtonParams.topMargin = dp(6)
+            LinearLayout.LayoutParams(dp(260), dp(40))
+        serverSettingsButtonParams.topMargin = dp(8)
+        styleChannelButton(
+            serverSettingsButton,
+            Color.rgb(0x5A, 0x5A, 0x5A),
+            Color.rgb(0x3A, 0x3A, 0x3A),
+            dp(12).toFloat(),
+        )
+        serverSettingsButton.setTextColor(Color.rgb(0xDD, 0xDD, 0xDD))
+        serverSettingsButton.setShadowLayer(0f, 0f, 0f, 0)
 
+        // Import/manage from here, not from the in-game settings sidebar - launching Android's
+        // file picker while a live game session's GPU surface is running lost the WebGPU/Vulkan
+        // surface on-device ("QueuePresent failed with VK_ERROR_SURFACE_LOST_KHR") and crashed
+        // the game. No such surface exists yet on this screen, so it's safe here - same reasoning
+        // as why Retro Rewind's own install flow only ever runs from this Activity.
+        modsButton = Button(this)
+        modsButton.text = "Mods..."
+        modsButton.textSize = 11f
+        modsButton.setOnClickListener { ModManager.showManagerDialog(this) }
+        val modsButtonParams =
+            LinearLayout.LayoutParams(dp(260), dp(40))
+        modsButtonParams.topMargin = dp(8)
+        styleChannelButton(
+            modsButton,
+            Color.rgb(0x5A, 0x5A, 0x5A),
+            Color.rgb(0x3A, 0x3A, 0x3A),
+            dp(12).toFloat(),
+        )
+        modsButton.setTextColor(Color.rgb(0xDD, 0xDD, 0xDD))
+        modsButton.setShadowLayer(0f, 0f, 0f, 0)
+
+        // A square channel-style tile, same idea as baseButton/retroButton but square (96dp,
+        // matching the eventual custom Mii icon art) rather than a wide banner - Mii Data isn't a
+        // product to launch, but it's frequent enough (importing/exporting Miis) to earn its own
+        // channel rather than living in the pale utility-button stack below.
         miiDataButton = Button(this)
-        miiDataButton.text = "Mii Data..."
-        miiDataButton.textSize = 11f
         miiDataButton.setOnClickListener { showMiiDataMenuDialog() }
-        val miiDataButtonParams =
-            LinearLayout.LayoutParams(dp(260), ViewGroup.LayoutParams.WRAP_CONTENT)
-        miiDataButtonParams.topMargin = dp(6)
+        val miiDataButtonParams = LinearLayout.LayoutParams(dp(96), dp(96))
+        miiDataButtonParams.topMargin = dp(14)
+        styleImageButton(
+            miiDataButton,
+            R.drawable.channel_mii_data,
+            locked = false,
+            lockedLabel = "",
+            radius = dp(20).toFloat(),
+        )
 
         root.addView(title)
+        root.addView(subtitle)
         root.addView(baseButton, buttonParams)
         root.addView(retroRow, retroRowParams)
-        root.addView(progressBar, buttonParams)
+        root.addView(miiDataButton, miiDataButtonParams)
+        root.addView(progressBar, progressParams)
         root.addView(statusText)
         root.addView(diagnosticsButton, diagnosticsButtonParams)
         root.addView(serverSettingsButton, serverSettingsButtonParams)
-        root.addView(miiDataButton, miiDataButtonParams)
+        root.addView(modsButton, modsButtonParams)
 
         // The picker has grown past what fits on-screen in landscape on some phones - confirmed
         // directly on-device: the two lowest buttons (server settings, Mii data) were laid out
@@ -177,21 +340,27 @@ class ModePickerActivity : Activity() {
         // reachable regardless of screen height/font scale, at the cost of no longer being
         // perfectly vertically centered when everything DOES fit - worth it for correctness.
         val scroll = android.widget.ScrollView(this)
-        scroll.setBackgroundColor(Color.rgb(18, 18, 22))
+        scroll.background = ScrollingCheckerboardDrawable(this)
         scroll.addView(
             root,
             ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT),
         )
         setContentView(scroll)
-        refreshRetroButtonLabel()
+        refreshChannelButtons()
     }
 
-    private fun refreshRetroButtonLabel() {
-        val installed = isRetroRewindInstalled()
-        retroButton.text = if (installed) "Retro Rewind" else "Install Retro Rewind..."
+    private fun refreshChannelButtons() {
+        val romInstalled = isRomImported()
+        styleImageButton(baseButton, R.drawable.channel_mkwii, locked = !romInstalled, lockedLabel = "Install with ISO/WBFS")
+
+        val retroInstalled = isRetroRewindInstalled()
+        styleImageButton(retroButton, R.drawable.channel_retro_rewind, locked = !retroInstalled, lockedLabel = "INSTALL")
         // Nothing to update or delete until a copy is actually installed.
-        retroMenuButton.visibility = if (installed) View.VISIBLE else View.GONE
+        retroMenuButton.visibility = if (retroInstalled) View.VISIBLE else View.GONE
     }
+
+    private fun isRomImported(): Boolean =
+        com.driftdroid.android.rom.RomImportOverlay.isRomAlreadyImported(File(filesDir, "WiiCompiled/DiscData"))
 
     private fun showRetroRewindMenuDialog() {
         AlertDialog.Builder(this)
@@ -211,8 +380,8 @@ class ModePickerActivity : Activity() {
             .setMessage("This removes the installed Retro Rewind files from the app. You'll need to import them again to play.")
             .setPositiveButton("Delete") { _, _ ->
                 retroRewindRoot().deleteRecursively()
-                refreshRetroButtonLabel()
-                statusText.setTextColor(Color.argb(200, 255, 255, 255))
+                refreshChannelButtons()
+                statusText.setTextColor(Color.rgb(0xDD, 0xDD, 0xDD))
                 statusText.text = "Retro Rewind deleted."
             }
             .setNegativeButton("Cancel", null)
@@ -319,6 +488,7 @@ class ModePickerActivity : Activity() {
             REQUEST_CODE_EXPORT_MII_DATA -> handleMiiExportDestinationPicked(data?.data)
             REQUEST_CODE_IMPORT_MII_DATA -> handleMiiImportSourcePicked(data?.data)
             REQUEST_CODE_IMPORT_SINGLE_MII -> handleSingleMiiSourcePicked(data?.data)
+            ModManager.REQUEST_CODE_PICK_ZIP -> ModManager.onZipPicked(this, data?.data)
         }
     }
 
@@ -424,19 +594,19 @@ class ModePickerActivity : Activity() {
                     val backup = File(dbFile.parentFile, "RFL_DB.dat.bak")
                     dbFile.copyTo(backup, overwrite = true)
                     dbFile.writeBytes(result.database)
-                    statusText.setTextColor(Color.rgb(120, 255, 150))
+                    statusText.setTextColor(Color.rgb(20, 140, 60))
                     statusText.text = "Mii added to slot ${result.slotIndex + 1} of 100."
                 }
             }
         } catch (e: Exception) {
-            statusText.setTextColor(Color.rgb(255, 110, 110))
+            statusText.setTextColor(Color.rgb(190, 30, 30))
             statusText.text = "Mii import failed: ${e.message ?: "unknown error"}"
         }
     }
 
     private fun launchMiiExportPicker() {
         if (!miiDatabaseFile().isFile) {
-            statusText.setTextColor(Color.rgb(255, 110, 110))
+            statusText.setTextColor(Color.rgb(190, 30, 30))
             statusText.text = "No Mii database yet - start Mario Kart Wii once first."
             return
         }
@@ -454,10 +624,10 @@ class ModePickerActivity : Activity() {
             contentResolver.openOutputStream(destination)?.use { output ->
                 miiDatabaseFile().inputStream().use { input -> input.copyTo(output) }
             } ?: throw IllegalStateException("couldn't open the chosen destination")
-            statusText.setTextColor(Color.rgb(120, 255, 150))
+            statusText.setTextColor(Color.rgb(20, 140, 60))
             statusText.text = "Mii data exported."
         } catch (e: Exception) {
-            statusText.setTextColor(Color.rgb(255, 110, 110))
+            statusText.setTextColor(Color.rgb(190, 30, 30))
             statusText.text = "Mii export failed: ${e.message ?: "unknown error"}"
         }
     }
@@ -499,11 +669,11 @@ class ModePickerActivity : Activity() {
             val backup = File(dest.parentFile, "RFL_DB.dat.bak")
             dest.copyTo(backup, overwrite = true)
             dest.writeBytes(picked)
-            statusText.setTextColor(Color.rgb(120, 255, 150))
+            statusText.setTextColor(Color.rgb(20, 140, 60))
             statusText.text = "Mii data replaced (previous copy saved as RFL_DB.dat.bak)."
             Unit
         } catch (e: Exception) {
-            statusText.setTextColor(Color.rgb(255, 110, 110))
+            statusText.setTextColor(Color.rgb(190, 30, 30))
             statusText.text = "Mii import failed: ${e.message ?: "unknown error"}"
         }
 
@@ -526,17 +696,17 @@ class ModePickerActivity : Activity() {
 
     private fun handleDiagnosticsDestinationPicked(destination: Uri?) {
         if (destination == null) return
-        statusText.setTextColor(Color.WHITE)
+        statusText.setTextColor(Color.rgb(0xDD, 0xDD, 0xDD))
         statusText.text = "Exporting diagnostics..."
         val thread =
             Thread {
                 val error = writeDiagnosticsZip(destination)
                 mainHandler.post {
                     if (error == null) {
-                        statusText.setTextColor(Color.rgb(120, 255, 150))
+                        statusText.setTextColor(Color.rgb(20, 140, 60))
                         statusText.text = "Diagnostics exported."
                     } else {
-                        statusText.setTextColor(Color.rgb(255, 110, 110))
+                        statusText.setTextColor(Color.rgb(190, 30, 30))
                         statusText.text = "Diagnostics export failed: $error"
                     }
                 }
@@ -607,7 +777,7 @@ class ModePickerActivity : Activity() {
         val picked = DocumentFile.fromTreeUri(this, treeUri) ?: return
         val resolved = resolveRetroRewind6(picked)
         if (resolved == null) {
-            statusText.setTextColor(Color.rgb(255, 110, 110))
+            statusText.setTextColor(Color.rgb(190, 30, 30))
             statusText.text =
                 "That folder doesn't contain RetroRewind6/Binaries/Code.pul - pick the folder " +
                     "you extracted Retro Rewind into (or the RetroRewind6 folder itself)."
@@ -622,7 +792,7 @@ class ModePickerActivity : Activity() {
         if (uri == null) return
         val name = queryDisplayName(uri) ?: uri.lastPathSegment ?: "selected file"
         if (!name.substringAfterLast('.', "").equals("zip", ignoreCase = true)) {
-            statusText.setTextColor(Color.rgb(255, 110, 110))
+            statusText.setTextColor(Color.rgb(190, 30, 30))
             statusText.text = "\"$name\" isn't a .zip file - pick the Retro Rewind archive you downloaded."
             return
         }
@@ -666,7 +836,7 @@ class ModePickerActivity : Activity() {
         // bar... which is weird" (it was there, just never moving, so it looked broken/absent).
         // The file-count text next to it already gives a live sense of movement.
         progressBar.isIndeterminate = true
-        statusText.setTextColor(Color.WHITE)
+        statusText.setTextColor(Color.rgb(0xDD, 0xDD, 0xDD))
         statusText.text = statusMessage
     }
 
@@ -676,15 +846,15 @@ class ModePickerActivity : Activity() {
         baseButton.isEnabled = true
         retroButton.isEnabled = true
         if (error == null) {
-            statusText.setTextColor(Color.rgb(120, 255, 150))
+            statusText.setTextColor(Color.rgb(20, 140, 60))
             statusText.text = "Retro Rewind installed ($filesCount files)."
-            refreshRetroButtonLabel()
+            refreshChannelButtons()
         } else {
             // Leave no half-copied install behind - isRetroRewindInstalled() only checks for
             // Code.pul, and a partial copy that happened to include it would then look
             // "installed" while actually missing tracks/assets.
             retroRewindRoot().deleteRecursively()
-            statusText.setTextColor(Color.rgb(255, 110, 110))
+            statusText.setTextColor(Color.rgb(190, 30, 30))
             statusText.text = "Install failed: $error"
         }
     }
@@ -750,5 +920,81 @@ class ModePickerActivity : Activity() {
         private const val REQUEST_CODE_EXPORT_MII_DATA = 0x52520003
         private const val REQUEST_CODE_IMPORT_MII_DATA = 0x52520004
         private const val REQUEST_CODE_IMPORT_SINGLE_MII = 0x52520005
+    }
+}
+
+/**
+ * A gray checkerboard wallpaper, tiled and drifting diagonally forever - replaces the earlier sky
+ * gradient background. A Drawable (not a View) so it can just be dropped in as `view.background`;
+ * animates itself via Drawable.scheduleSelf, which only works because setting a Drawable as a
+ * View's background makes that View its Drawable.Callback automatically (no manual wiring needed,
+ * and it stops scheduling redraws on its own once the View is gone/detached).
+ */
+private class ScrollingCheckerboardDrawable(context: android.content.Context) : Drawable() {
+    private val tilePx = (28 * context.resources.displayMetrics.density).toInt().coerceAtLeast(8)
+    private val paint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG)
+    private val shader: android.graphics.BitmapShader
+    private val localMatrix = android.graphics.Matrix()
+    private var offsetPx = 0f
+    private var lastFrameUptimeMs = android.os.SystemClock.uptimeMillis()
+    private var started = false
+
+    init {
+        val size = tilePx * 2
+        val bitmap = android.graphics.Bitmap.createBitmap(size, size, android.graphics.Bitmap.Config.ARGB_8888)
+        val canvas = android.graphics.Canvas(bitmap)
+        val light = android.graphics.Paint().apply { color = Color.rgb(0x3A, 0x3A, 0x3A) }
+        val dark = android.graphics.Paint().apply { color = Color.rgb(0x22, 0x22, 0x22) }
+        val t = tilePx.toFloat()
+        val s = size.toFloat()
+        canvas.drawRect(0f, 0f, t, t, light)
+        canvas.drawRect(t, 0f, s, t, dark)
+        canvas.drawRect(0f, t, t, s, dark)
+        canvas.drawRect(t, t, s, s, light)
+        shader = android.graphics.BitmapShader(
+            bitmap, android.graphics.Shader.TileMode.REPEAT, android.graphics.Shader.TileMode.REPEAT,
+        )
+        paint.shader = shader
+    }
+
+    private val tick =
+        object : Runnable {
+            override fun run() {
+                val now = android.os.SystemClock.uptimeMillis()
+                val deltaMs = (now - lastFrameUptimeMs).coerceIn(0, 100)
+                lastFrameUptimeMs = now
+                offsetPx += deltaMs * SPEED_PX_PER_MS
+                invalidateSelf()
+                scheduleSelf(this, now + FRAME_INTERVAL_MS)
+            }
+        }
+
+    override fun draw(canvas: android.graphics.Canvas) {
+        localMatrix.setTranslate(offsetPx, offsetPx * 0.6f)
+        shader.setLocalMatrix(localMatrix)
+        canvas.drawRect(bounds, paint)
+        // First draw() (right after the background is actually attached/visible) is what starts
+        // the animation loop, once - scheduling from init{} instead would need scheduleSelf's
+        // Callback (set by View.setBackground) that doesn't exist yet at construction time; after
+        // this, `tick` reschedules itself, so draw() must NOT also reschedule on every frame (that
+        // would stack a second, independent chain of ticks on top of tick's own, each triggering
+        // more invalidateSelf() calls than the last - confirmed this exact mistake in an earlier
+        // draft, caught before it shipped).
+        if (!started) {
+            started = true
+            lastFrameUptimeMs = android.os.SystemClock.uptimeMillis()
+            scheduleSelf(tick, lastFrameUptimeMs + FRAME_INTERVAL_MS)
+        }
+    }
+
+    override fun setAlpha(alpha: Int) {}
+
+    override fun setColorFilter(colorFilter: android.graphics.ColorFilter?) {}
+
+    override fun getOpacity(): Int = android.graphics.PixelFormat.OPAQUE
+
+    companion object {
+        private const val FRAME_INTERVAL_MS = 32L // ~30fps - plenty smooth for a slow drift
+        private const val SPEED_PX_PER_MS = 0.006f // slow: one tile crossed roughly every 9s
     }
 }

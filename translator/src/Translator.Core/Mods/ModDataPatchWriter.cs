@@ -176,8 +176,15 @@ public static class ModDataPatchWriter
         sb.AppendLine("    RegisterExecutableRanges();");
         sb.AppendLine("}");
         sb.AppendLine();
-        sb.AppendLine("struct RegisterModDataPatches {");
-        sb.AppendLine("    RegisterModDataPatches() {");
+        // Deferred behind an explicit profile activation (RecompMod::ActivateProfile, called
+        // from combined_product.cpp::SetActive) rather than a plain static-init-time constructor
+        // - a combined-library build links this translation unit unconditionally regardless of
+        // which product is actually running, so this must not apply Retro Rewind's memory
+        // reservation/data patches/ctors/Riivolution config unless Retro Rewind is the active
+        // profile (confirmed on-device: without this, Original's MEM1 arena shrank and its guest
+        // boot ran Retro Rewind's own mod-init code).
+        sb.AppendLine("void ActivateRetroRewindModDataPatches() {");
+        sb.AppendLine("    static const bool activated = [] {");
         sb.AppendLine("        RecompMod::RegisterMemoryReservation(kModuleGuestBase, kModuleReservedEnd, \"Kamek module\");");
         sb.AppendLine("        RecompMod::RegisterMemoryInitializer(&ApplyDataPatches);");
         if (emitCtorRunner)
@@ -201,10 +208,16 @@ public static class ModDataPatchWriter
             sb.AppendLine(
                 $"        RecompMod::RegisterRiivolutionOption(\"{EscapeCxxStringLiteral(option.Section)}\", \"{EscapeCxxStringLiteral(option.Option)}\", {option.Choice}u);");
         }
-        sb.AppendLine("    }");
+        sb.AppendLine("        return true;");
+        sb.AppendLine("    }();");
+        sb.AppendLine("    (void)activated;");
+        sb.AppendLine("}");
+        sb.AppendLine();
+        sb.AppendLine("struct QueueModDataPatches {");
+        sb.AppendLine("    QueueModDataPatches() { RecompMod::RegisterProfileInitializer(\"retro_rewind\", &ActivateRetroRewindModDataPatches); }");
         sb.AppendLine("};");
         sb.AppendLine();
-        sb.AppendLine("RegisterModDataPatches g_registerModDataPatches;");
+        sb.AppendLine("QueueModDataPatches g_queueModDataPatches;");
         sb.AppendLine();
         sb.AppendLine("} // namespace");
 

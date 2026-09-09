@@ -59,6 +59,12 @@ struct TranslatedFunctionInfo {
     void (*rawCpuInvoker)(CpuContext*) = nullptr;
     bool mustRemainDynamicallyDispatchable = true;
     FunctionKind kind = FunctionKind::BaseTranslated;
+    // Which product profile this registration belongs to ("base" or "retro_rewind") - a combined
+    // build links both products' registrations into one process unconditionally, so this is what
+    // lets the registry pick the correct compiled copy for the currently active profile, even for
+    // BaseTranslated-kind entries that are actually a product's own recompiled copy of otherwise-
+    // shared logic (see TranslatedFunctionRegistry::SelectProfile).
+    const char* profileName = nullptr;
 };
 
 struct RawDispatchRecord {
@@ -134,6 +140,7 @@ inline const RawDispatchRecord* FindStaticIndirectDispatchEntry(
 }
 
 void RegisterStaticIndirectDispatchTable(const StaticIndirectDispatchTable* table);
+
 inline std::atomic<const StaticIndirectDispatchTable*> g_publishedStaticIndirectDispatchTable{nullptr};
 
 class StaticIndirectDispatchTableRegistrar {
@@ -326,6 +333,14 @@ inline thread_local IndirectRawDispatchMemoEntry
 class TranslatedFunctionRegistry {
 public:
     static void Register(TranslatedFunctionInfo info);
+    // Combined-library builds link more than one product's registrations into the same process
+    // unconditionally at load time - this picks which profile's entries actually win address
+    // lookups (both the generated dispatch table and the merged AddressIndex()/FindByAddressPtr
+    // path). Call once, before Finalize() (RuntimeProduct::SetActive already does this - see
+    // combined_product.cpp). Throws if profileName isn't linked or the registry is already
+    // frozen. A no-op concern on single-profile builds, which never call this and only ever have
+    // one profile's entries to begin with.
+    static void SelectProfile(const char* profileName);
     static void Finalize();
     static inline bool IsLookupPublished() noexcept {
         return lookupPublished_.load(std::memory_order_acquire);
@@ -409,12 +424,16 @@ struct BulkTranslatedFunctionRecord {
     bool mustRemainDynamicallyDispatchable;
 };
 
-void RegisterBulkTranslatedFunctions(const BulkTranslatedFunctionRecord* records, size_t count);
+void RegisterBulkTranslatedFunctions(const char* profileName,
+                                     const BulkTranslatedFunctionRecord* records,
+                                     size_t count);
 
 class BulkTranslatedFunctionRegistrar {
 public:
-    BulkTranslatedFunctionRegistrar(const BulkTranslatedFunctionRecord* records, size_t count) {
-        RegisterBulkTranslatedFunctions(records, count);
+    BulkTranslatedFunctionRegistrar(const char* profileName,
+                                    const BulkTranslatedFunctionRecord* records,
+                                    size_t count) {
+        RegisterBulkTranslatedFunctions(profileName, records, count);
     }
 };
 

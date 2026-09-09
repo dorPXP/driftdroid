@@ -15,6 +15,7 @@
 #include <iostream>
 #include <array>
 #include <limits>
+#include <set>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -38,6 +39,8 @@
 #include <mmsystem.h>
 #include <dbghelp.h>
 #else
+#include <cerrno>
+#include <sched.h>
 #include <signal.h>
 #include <ucontext.h>
 #include <unistd.h>
@@ -1219,6 +1222,64 @@ void InstallPosixMemoryFaultHandler() {
     // handler costs nothing and avoids a silent gap if it ever isn't.
     sigaction(SIGBUS, &action, nullptr);
 }
+
+#if defined(ANDROID)
+// Bumping this thread's nice value (SDLActivity.java's THREAD_PRIORITY_URGENT_DISPLAY) is only a
+// scheduling hint - on a heterogeneous mobile SoC (e.g. a 1 prime + 3 performance + 4 efficiency
+// core layout) Android's scheduler can still migrate this thread, which runs the entire guest CPU
+// emulation and render-submission loop every frame, onto an efficiency core under load. Pinning
+// its CPU affinity to whichever cores report the highest max frequency makes that a hard
+// constraint instead of a hint. Deliberately conservative: does nothing on a single-tier (all
+// cores same max frequency) machine, and only excludes the single lowest frequency tier rather
+// than picking one "best" core, so there's always real parallelism headroom left for this thread
+// plus its audio/worker threads.
+void PinCallingThreadToFastestCores() {
+    std::vector<std::pair<int, long>> coreFreqs;
+    for (int cpu = 0; cpu < 32; ++cpu) {
+        char path[128];
+        std::snprintf(path, sizeof(path), "/sys/devices/system/cpu/cpu%d/cpufreq/cpuinfo_max_freq", cpu);
+        FILE* file = std::fopen(path, "r");
+        if (!file) {
+            continue;
+        }
+        long freq = 0;
+        const int scanned = std::fscanf(file, "%ld", &freq);
+        std::fclose(file);
+        if (scanned == 1 && freq > 0) {
+            coreFreqs.emplace_back(cpu, freq);
+        }
+    }
+
+    std::set<long> distinctFreqs;
+    for (const auto& [cpu, freq] : coreFreqs) {
+        distinctFreqs.insert(freq);
+    }
+    if (distinctFreqs.size() < 2) {
+        // Nothing to distinguish "fast" from "slow" cores (desktop-under-emulation, a homogeneous
+        // SoC, or /sys wasn't readable) - leave the default affinity alone rather than guess.
+        return;
+    }
+    const long slowestTier = *distinctFreqs.begin();
+
+    cpu_set_t mask;
+    CPU_ZERO(&mask);
+    for (const auto& [cpu, freq] : coreFreqs) {
+        if (freq > slowestTier) {
+            CPU_SET(cpu, &mask);
+        }
+    }
+    if (CPU_COUNT(&mask) == 0) {
+        return;
+    }
+    if (sched_setaffinity(0, sizeof(mask), &mask) != 0) {
+        // Some Android cgroup/cpuset configurations refuse a mask outside what's currently
+        // allowed (e.g. a backgrounded process's cpuset) - non-fatal, the thread just keeps
+        // whatever affinity it already had.
+        RT_LOG(RT_TAG_RUNTIME) << "PinCallingThreadToFastestCores: sched_setaffinity failed: "
+                                << std::strerror(errno) << std::endl;
+    }
+}
+#endif
 #endif
 
 void AbortSignalHandler(int signum) {
@@ -1336,6 +1397,9 @@ int RuntimeMain(int argc, char** argv) {
     WindowsTimerResolutionGuard timerResolutionGuard;
 #else
     InstallPosixMemoryFaultHandler();
+#if defined(ANDROID)
+    PinCallingThreadToFastestCores();
+#endif
 #endif
     InitializeProcessTranscript(argc, argv);
     std::signal(SIGABRT, AbortSignalHandler);

@@ -28,6 +28,13 @@ extern "C" void OSInitAlarm_RecompModLateInit_801a961c(CpuContext* ctx) {
 REGISTER_NATIVE_FUNCTION_AS(0x801A961C, OSInitAlarm_RecompModLateInit_801a961c, "OSInitAlarm_RecompModLateInit_801a961c");
 
 extern "C" void StaticRProlog_RecompModInit_8055531c(CpuContext* ctx) {
+    // This boot hook is the SAME translated function/address for both products (it's part of the
+    // base game's REL prolog that Retro Rewind builds on top of, not mod-specific code itself),
+    // so it runs unconditionally regardless of active profile - that's fine: in a combined
+    // library, Retro Rewind's own memory/post-REL initializers are queued behind an explicit
+    // profile activation (RecompMod::RegisterProfileInitializer/ActivateProfile, see
+    // recomp_mod_loader.cpp and combined_product.cpp::SetActive) rather than running at
+    // static-init time, so these vectors are simply empty here unless Retro Rewind is active.
     RecompMod::RunMemoryInitializers();
     func_8055531C(ctx);
     RecompMod::RunPostRelInitializers();

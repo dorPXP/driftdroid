@@ -72,11 +72,18 @@ def main() -> int:
             o for o in find_objs(wiicompiled_dir)
             if "base_product.cpp.o" not in o and "combined_product.cpp.o" not in o
         ]
+    # combined_product.cpp is its own dedicated CMake OBJECT target (mkw_combined_product, see
+    # PublicProducts.cmake) - NOT part of WiiCompiled.dir's own object tree. A stale path here
+    # (this one, pointing at WiiCompiled.dir, silently found and linked a leftover object from
+    # long before mkw_combined_product existed - dated well before any of the profile-selection
+    # code it's supposed to contain) fails silently: the file exists, just isn't the right one,
+    # so this script has no way to detect it beyond a human noticing the wrong code ran. Confirmed
+    # on-device: the process aborts here now if this ever again points at the wrong file.
     combined_product_obj = os.path.join(
-        build_dir, "CMakeFiles/WiiCompiled.dir/src/product/combined_product.cpp.o")
+        build_dir, "CMakeFiles/mkw_combined_product.dir/src/product/combined_product.cpp.o")
     if not os.path.isfile(combined_product_obj):
         print(f"error: {combined_product_obj} missing - is combined_product.cpp wired "
-              "into the WiiCompiled target's registration sources?", file=sys.stderr)
+              "into the mkw_combined_product target (PublicProducts.cmake)?", file=sys.stderr)
         return 1
 
     # Colliding symbol names: functions whose compiled body differs between profiles.

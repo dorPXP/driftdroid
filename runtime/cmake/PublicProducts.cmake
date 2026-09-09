@@ -30,6 +30,19 @@ function(mkw_apply_common_compile_options target)
 endfunction()
 
 function(mkw_apply_translated_compile_options target)
+    # -O2, NOT -O3 (2026-09-08): -O3 was tried twice to attack the confirmed CPU-bound bottleneck
+    # (the single emulation thread runs pegged at ~100% CPU during gameplay - see
+    # [[wiicompiled-performance-goal]] memory) and broke real gameplay correctness both times:
+    # first attempt (-O3 alone) caused idling-with-stick-input to slide the character unnaturally;
+    # second attempt added -fno-strict-aliasing -fwrapv (the standard mitigation for exactly this
+    # class of recompiler bug - CpuContext's guest register file is read/written through raw
+    # pointers of different types, which is the textbook strict-aliasing violation) and it STILL
+    # broke - the character could move while just revving the engine, no stick input needed. That
+    # second symptom means the bug isn't (only) strict-aliasing-related after all - something else
+    # about -O3's codegen is unsafe for this translated corpus. Do not re-attempt -O3 here without
+    # a real per-function bisection to find which specific translated function(s) need O2's more
+    # conservative codegen, rather than flipping the whole corpus and hoping a blanket flag fixes
+    # it. Explicitly deferred past the next update (UI-focused) - revisit later, not urgent.
     target_compile_options(${target} PRIVATE
         -O2 ${MKW_TRANSLATED_PPC_FP_OPTIONS} -fno-slp-vectorize -w -pipe)
 endfunction()

@@ -4,10 +4,14 @@
 #include <array>
 #include <atomic>
 #include <cstddef>
+#include <cstring>
 #include <iomanip>
 #include <iostream>
 #include <mutex>
 #include <sstream>
+#include <stdexcept>
+#include <string>
+#include <string_view>
 #include <unordered_map>
 #include <vector>
 #include "generated/RuntimeConfig.h"
@@ -61,6 +65,22 @@ std::vector<RawDispatchRecord>& DynamicRawDispatchEntries() {
 const StaticIndirectDispatchTable*& GeneratedIndirectDispatchTable() {
     static const StaticIndirectDispatchTable* table = nullptr;
     return table;
+}
+
+// Every distinct table ever registered (via StaticIndirectDispatchTableRegistrar's static-init
+// side effect) - a combined-library build links more than one product's table into the same
+// process, each registering unconditionally at load time before any profile can be selected.
+// GeneratedIndirectDispatchTable() above tracks which one is currently ACTIVE for dispatch;
+// this tracks everything that's been registered, so TranslatedFunctionRegistry::SelectProfile can
+// switch between them later.
+std::vector<const StaticIndirectDispatchTable*>& GeneratedIndirectDispatchTables() {
+    static std::vector<const StaticIndirectDispatchTable*> tables;
+    return tables;
+}
+
+std::string& SelectedProfileName() {
+    static std::string profile;
+    return profile;
 }
 
 std::unordered_map<uint32_t, std::vector<size_t>>& AddressEntries() {
@@ -123,6 +143,22 @@ uint32_t KindTieBreaker(FunctionKind kind) {
     return 0;
 }
 
+// A registration whose profileName doesn't match the currently selected profile is INELIGIBLE to
+// win AddressIndex() at all, regardless of priority - not just deprioritized. FindByAddressPtr
+// (used by InvokeIndirectCpu and other dispatch helpers - abi_bridge.h) resolves straight off
+// AddressIndex(), bypassing the per-profile generated dispatch table entirely, so without this a
+// combined build would silently execute the wrong profile's compiled body wherever two profiles
+// both happen to register something at the same address under the same FunctionKind (this isn't
+// limited to ModTranslated - a profile's own recompiled copy of otherwise-"shared" logic is
+// BaseTranslated too; see the closure/symbol-aliasing steps in TranslatedBuildShardEmitter.cs
+// that make sure those get distinct profileName-tagged registrations instead of silently
+// colliding). An entry with no profileName at all (single-profile builds, which never call
+// TranslatedFunctionRegistry::SelectProfile) is always eligible.
+bool IsWinnerEligible(const TranslatedFunctionInfo& info) {
+    return !info.profileName || SelectedProfileName().empty() ||
+           SelectedProfileName() == info.profileName;
+}
+
 bool IsBetterCandidate(const TranslatedFunctionInfo& candidate, const TranslatedFunctionInfo& current) {
     const uint32_t candidatePriority = EffectivePriority(candidate);
     const uint32_t currentPriority = EffectivePriority(current);
@@ -143,7 +179,9 @@ bool IsSameRegistration(const TranslatedFunctionInfo& a, const TranslatedFunctio
     return a.address == b.address &&
            a.kind == b.kind &&
            EffectivePriority(a) == EffectivePriority(b) &&
-           a.moduleId == b.moduleId;
+           a.moduleId == b.moduleId &&
+           std::string_view(a.profileName ? a.profileName : "") ==
+               std::string_view(b.profileName ? b.profileName : "");
 }
 
 void RebuildIndicesLocked() {
@@ -163,8 +201,13 @@ void RebuildIndicesLocked() {
     for (size_t i = 0; i < entries.size(); ++i) {
         const auto& entry = entries[i];
         addressEntries[entry.address].push_back(i);
+        // IsWinnerEligible must gate even the "first entry seen for this address" case, not just
+        // the IsBetterCandidate tie-break - otherwise a registration belonging to a profile that
+        // isn't currently selected would still win by simply being the only candidate, even
+        // though it must be treated as absent under the active profile.
         auto addressIt = addrIndex.find(entry.address);
-        if (addressIt == addrIndex.end() || IsBetterCandidate(entry, entries[addressIt->second])) {
+        if (IsWinnerEligible(entry) &&
+            (addressIt == addrIndex.end() || IsBetterCandidate(entry, entries[addressIt->second]))) {
             addrIndex[entry.address] = i;
         }
         if (entry.entryPoint) {
@@ -239,6 +282,9 @@ std::string ValidateGeneratedIndirectDispatchLocked() {
         }
     }
 
+    // AddressIndex() is already profile-scoped by this point (RebuildIndicesLocked only lets a
+    // registration win if its profileName matches the currently selected profile - see
+    // IsWinnerEligible), so every winner seen here already belongs to this table's own profile.
     for (const auto& [address, index] : AddressIndex()) {
         const auto& info = Registry()[index];
         if ((info.kind == FunctionKind::BaseTranslated || info.kind == FunctionKind::ModTranslated) &&
@@ -261,20 +307,49 @@ void RegisterStaticIndirectDispatchTable(const StaticIndirectDispatchTable* tabl
                               "A generated indirect-dispatch table was registered after the function registry was finalized.");
         std::abort();
     }
-    auto*& registered = GeneratedIndirectDispatchTable();
-    if (registered && registered != table) {
-        RT_LOG(RT_TAG_RUNTIME) << "ERROR: Multiple generated indirect dispatch profiles were linked" << std::endl;
+    if (!table || !table->profileName || table->profileName[0] == '\0') {
+        RT_LOG(RT_TAG_RUNTIME) << "ERROR: Generated indirect dispatch table has no profile" << std::endl;
         ShowRuntimeFatalPopup("translated dispatch initialization failed",
-                              "Multiple generated indirect-dispatch profiles were linked into the same product.");
+                              "A generated indirect-dispatch table was linked with no profile name.");
         std::abort();
     }
-    registered = table;
-    // Mirror into the header-visible atomic under the same lock, so the
-    // inlined miss path and this owning static can never disagree.
-    g_publishedStaticIndirectDispatchTable.store(table, std::memory_order_release);
+    auto& tables = GeneratedIndirectDispatchTables();
+    const auto duplicate = std::find_if(tables.begin(), tables.end(), [&](const auto* candidate) {
+        return std::string_view(candidate->profileName) == table->profileName;
+    });
+    if (duplicate != tables.end() && *duplicate != table) {
+        RT_LOG(RT_TAG_RUNTIME) << "ERROR: Duplicate generated indirect dispatch profile '"
+                               << table->profileName << "'" << std::endl;
+        ShowRuntimeFatalPopup("translated dispatch initialization failed",
+                              "Two different generated indirect-dispatch tables were linked under the same profile name.");
+        std::abort();
+    }
+    if (duplicate == tables.end()) {
+        tables.push_back(table);
+    }
+    // A combined-library build links more than one product's table into this process, each
+    // registering unconditionally at load time before any profile can be selected - so once a
+    // second distinct profile shows up, there's no safe default to auto-publish anymore.
+    // TranslatedFunctionRegistry::SelectProfile (called from RuntimeProduct::SetActive - see
+    // combined_product.cpp) must explicitly choose one before any guest code runs. A
+    // single-profile build (libWiiCompiled.so/libRetroRewind.so) never has a second table, so
+    // this keeps auto-publishing the only one there ever is, unchanged from before.
+    if (tables.size() == 1) {
+        GeneratedIndirectDispatchTable() = table;
+        SelectedProfileName() = table->profileName;
+        // Mirror into the header-visible atomic under the same lock, so the
+        // inlined miss path and this owning static can never disagree.
+        g_publishedStaticIndirectDispatchTable.store(table, std::memory_order_release);
+    } else {
+        GeneratedIndirectDispatchTable() = nullptr;
+        SelectedProfileName().clear();
+        g_publishedStaticIndirectDispatchTable.store(nullptr, std::memory_order_release);
+    }
 }
 
-void RegisterBulkTranslatedFunctions(const BulkTranslatedFunctionRecord* records, size_t count) {
+void RegisterBulkTranslatedFunctions(const char* profileName,
+                                     const BulkTranslatedFunctionRecord* records,
+                                     size_t count) {
     for (size_t i = 0; i < count; ++i) {
         const auto& record = records[i];
         TranslatedFunctionInfo info;
@@ -289,8 +364,41 @@ void RegisterBulkTranslatedFunctions(const BulkTranslatedFunctionRecord* records
         info.rawCpuInvoker = record.entry;
         info.mustRemainDynamicallyDispatchable = record.mustRemainDynamicallyDispatchable;
         info.kind = record.kind;
+        info.profileName = profileName;
         TranslatedFunctionRegistry::Register(std::move(info));
     }
+}
+
+void TranslatedFunctionRegistry::SelectProfile(const char* profileName) {
+    if (!profileName || profileName[0] == '\0') {
+        RT_LOG(RT_TAG_RUNTIME) << "ERROR: Indirect dispatch profile name is empty" << std::endl;
+        ShowRuntimeFatalPopup("translated dispatch initialization failed",
+                              "An empty profile name was passed to TranslatedFunctionRegistry::SelectProfile.");
+        std::abort();
+    }
+    std::lock_guard<std::mutex> lock(RegistryMutex());
+    if (RegistryFrozen().load(std::memory_order_acquire)) {
+        RT_LOG(RT_TAG_RUNTIME) << "ERROR: Indirect dispatch profile selected after finalization" << std::endl;
+        ShowRuntimeFatalPopup("translated dispatch initialization failed",
+                              "The active indirect-dispatch profile was selected after the function registry was finalized.");
+        std::abort();
+    }
+    const auto& tables = GeneratedIndirectDispatchTables();
+    const auto selected = std::find_if(tables.begin(), tables.end(), [&](const auto* table) {
+        return table && table->profileName && std::string_view(table->profileName) == profileName;
+    });
+    if (selected == tables.end()) {
+        RT_LOG(RT_TAG_RUNTIME) << "ERROR: No registered indirect dispatch table matches profile '"
+                                << profileName << "'" << std::endl;
+        ShowRuntimeFatalPopup("translated dispatch initialization failed",
+                              "No linked generated indirect-dispatch table matches the requested active profile.");
+        std::abort();
+    }
+    SelectedProfileName() = profileName;
+    GeneratedIndirectDispatchTable() = *selected;
+    g_publishedStaticIndirectDispatchTable.store(*selected, std::memory_order_release);
+    RebuildIndicesLocked();
+    RT_LOG(RT_TAG_RUNTIME) << "Selected translated function profile '" << profileName << "'" << std::endl;
 }
 
 void TranslatedFunctionRegistry::Register(TranslatedFunctionInfo info) {

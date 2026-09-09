@@ -2155,7 +2155,13 @@ class SDLMain implements Runnable {
         // Runs SDLActivity.main()
 
         try {
-            android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_DISPLAY);
+            // Bumped from THREAD_PRIORITY_DISPLAY: this thread runs the whole guest engine (CPU
+            // emulation + render submission), not just UI drawing, and on heterogeneous mobile
+            // SoCs (e.g. Snapdragon 865's 1+3+4 prime/perf/efficiency core layout) Android's EAS
+            // scheduler leans on thread priority/nice value to decide which cores a thread gets
+            // scheduled on - the higher URGENT_DISPLAY nice value gives the scheduler a stronger
+            // signal to keep this thread on a prime/perf core instead of an efficiency one.
+            android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_URGENT_DISPLAY);
         } catch (Exception e) {
             Log.v("SDL", "modify thread properties failed " + e.toString());
         }
