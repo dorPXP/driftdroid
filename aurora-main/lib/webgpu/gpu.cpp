@@ -77,6 +77,9 @@ static std::array<char, 256> g_deviceLostMessage{};
 // Errors raised before initialize() completes must not be fatal: the backend fallback loop retries
 // the next backend, and a broken ICD can raise uncaptured errors mid-probe.
 static std::atomic_bool g_initialized{false};
+static std::atomic_bool g_deviceLostRecoverable{false};
+static std::atomic_bool g_deviceRecoveryAttempted{false};
+static AuroraBackend g_lastInitializedBackend = BACKEND_AUTO;
 
 namespace {
 
@@ -549,6 +552,8 @@ bool initialize(AuroraBackend auroraBackend) {
   g_device = {};
   g_deviceLostReason.store(wgpu::DeviceLostReason::Unknown, std::memory_order_relaxed);
   g_deviceLost.store(false, std::memory_order_release);
+  g_deviceLostRecoverable.store(false, std::memory_order_release);
+  g_lastInitializedBackend = auroraBackend;
   g_adapter = {};
   g_backendType = wgpu::BackendType::Undefined;
   {
@@ -729,6 +734,14 @@ bool initialize(AuroraBackend auroraBackend) {
                                              }
                                              g_deviceLostMessage[copied] = '\0';
                                              g_deviceLostReason.store(reason, std::memory_order_relaxed);
+                                             // A lost/invalidated Vulkan surface can be transient (a
+                                             // boot-time race between Android attaching the native window
+                                             // and Dawn configuring against it - GitHub issue #2, Mali-G57
+                                             // + Android 16). Flag it so the caller gets one chance to
+                                             // recover before this is treated as fatal.
+                                             if (text.find("SURFACE_LOST") != std::string_view::npos) {
+                                               g_deviceLostRecoverable.store(true, std::memory_order_release);
+                                             }
                                              g_deviceLost.store(true, std::memory_order_release);
                                            });
     const auto future =
@@ -821,6 +834,25 @@ void fail_if_device_lost() noexcept {
   // rest wait for termination instead of submitting more work to a lost device.
   static std::mutex fatalMutex;
   const std::lock_guard lock(fatalMutex);
+
+  if (!g_deviceLost.load(std::memory_order_acquire)) {
+    // Another thread already recovered (or reported) this loss while this one waited on fatalMutex.
+    return;
+  }
+
+  if (g_deviceLostRecoverable.load(std::memory_order_acquire) &&
+      !g_deviceRecoveryAttempted.exchange(true, std::memory_order_acq_rel)) {
+    Log.warn("WebGPU device lost to a transient-looking cause (lost surface); attempting one-time recovery");
+    if (initialize(g_lastInitializedBackend)) {
+      Log.info("WebGPU device recovered");
+      return;
+    }
+    Log.error("WebGPU device recovery attempt failed; treating the original loss as fatal");
+    // initialize() clears g_deviceLost as soon as it starts even though this attempt ultimately
+    // failed, so the fatal report below still needs it set.
+    g_deviceLost.store(true, std::memory_order_release);
+  }
+
   const auto reason = g_deviceLostReason.load(std::memory_order_relaxed);
   const char* const detail = g_deviceLostMessage.data();
   if (detail[0] != '\0') {

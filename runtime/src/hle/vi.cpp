@@ -22,6 +22,8 @@
 
 #include <aurora/aurora.h>
 
+#include <tracy/Tracy.hpp>
+
 #if defined(_WIN32)
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -499,6 +501,9 @@ uint64_t s_lastPresentAnchorNanos = 0;
 // Sleeps to the same VI retrace boundary VIWaitForRetrace targets, servicing alarms every 1 ms so audio
 // DMA and timers keep running, then delivers that retrace so guest logic starts exactly on the grid.
 void PaceToRetraceBoundary(Clock::time_point deadline) {
+    // Deliberate vsync-pacing idle, not a stall - kept as its own zone so a Tracy capture doesn't
+    // mistake intentional waiting-for-retrace time for genuine work/contention.
+    ZoneScopedN("PaceToRetraceBoundary");
     constexpr auto kServiceSlice = 1ms;
     for (;;) {
         const auto now = Clock::now();
@@ -527,6 +532,7 @@ void PaceToRetraceBoundary(Clock::time_point deadline) {
 // producer to the VI retrace boundary, and pre-warms the next frame. Paced from GXCopyDisp; unpaced for
 // the retrace-context black/boot present path in AdvanceRetrace.
 void VI_HLE_PresentFrame(bool presentedXfb, bool paceToRetrace) {
+    ZoneScopedN("VI_HLE_PresentFrame");
     if (s_presentSequenceActive.exchange(true, std::memory_order_acq_rel)) {
         return;
     }

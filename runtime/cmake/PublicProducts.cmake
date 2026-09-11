@@ -88,7 +88,7 @@ target_compile_definitions(mkw_runtime_common PRIVATE
     SDL_MAIN_HANDLED
     _DISABLE_STRING_ANNOTATION _DISABLE_VECTOR_ANNOTATION)
 target_link_libraries(mkw_runtime_common PRIVATE
-    aurora::gx aurora::pad aurora::si aurora::vi aurora::mtx)
+    aurora::gx aurora::pad aurora::si aurora::vi aurora::mtx TracyClient)
 target_link_libraries(mkw_runtime_common PRIVATE mkw::pugixml mkw::toml11 mkw::cryptopp mkw::mbedtls)
 if(WIN32)
     target_link_libraries(mkw_runtime_common PRIVATE shell32 windowsapp)
@@ -207,6 +207,11 @@ function(mkw_configure_product target)
 
     target_link_libraries(${target} PRIVATE
         aurora::gx aurora::pad aurora::si aurora::vi aurora::mtx)
+    # mkw_runtime_common is an OBJECT library (see the longer explanation on the WIN32/libco
+    # branch below): its own target_link_libraries(... TracyClient) doesn't propagate to a
+    # consumer that only pulls in its .o files via $<TARGET_OBJECTS:>, so the Tracy zone/plot
+    # calls compiled into those objects need TracyClient linked here directly too.
+    target_link_libraries(${target} PRIVATE TracyClient)
     if(EXISTS "${MKW_AURORA_DIR}/cmake/AuroraCopyRuntimeDLLs.cmake")
         include("${MKW_AURORA_DIR}/cmake/AuroraCopyRuntimeDLLs.cmake")
         aurora_copy_runtime_dlls(${target})

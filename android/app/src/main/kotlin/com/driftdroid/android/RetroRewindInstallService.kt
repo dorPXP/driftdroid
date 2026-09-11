@@ -74,6 +74,14 @@ class RetroRewindInstallService : Service() {
         val sourceUri = intent.getParcelableUriExtra(EXTRA_SOURCE_URI) ?: return "missing source"
         val source = DocumentFile.fromSingleUri(this, sourceUri) ?: return "couldn't open the selected folder"
         RetroRewindInstallStatus.start("Copying Retro Rewind files")
+
+        // Checked before copying ~2GB, not after: source is already the resolved RetroRewind6
+        // folder (ModePickerActivity.resolveRetroRewind6 picked it), so Binaries/Code.pul is
+        // directly underneath it.
+        val codePul = source.findFile("Binaries")?.findFile("Code.pul")
+            ?: return "the selected folder doesn't contain RetroRewind6/Binaries/Code.pul"
+        checkRetroRewindVersion(sha256OfDocument(codePul))?.let { return it }
+
         val destRoot = retroRewindRoot()
 
         val requiredBytes = sumTreeSize(source)
@@ -293,6 +301,10 @@ class RetroRewindInstallService : Service() {
             } ?: return "couldn't open the archive"
 
             val resolved = resolveRetroRewind6(scratchDir) ?: return "the archive doesn't contain RetroRewind6/Binaries/Code.pul"
+            // Checked before touching the existing install: on a version mismatch this returns
+            // without ever deleting/replacing destRoot, so a previously-working install is left
+            // alone instead of being wiped out by a bad import.
+            checkRetroRewindVersion(sha256OfFile(File(resolved, "Binaries/Code.pul")))?.let { return it }
             val destRoot = retroRewindRoot()
             destRoot.deleteRecursively()
             destRoot.parentFile?.mkdirs()
@@ -313,6 +325,60 @@ class RetroRewindInstallService : Service() {
             }
         }
         return candidates.firstOrNull { File(it, "Binaries/Code.pul").isFile }
+    }
+
+    /**
+     * Our Retro Rewind support is a static, ahead-of-time recompilation of one exact release's
+     * Binaries/Code.pul (see RetroRewindRelease.CODE_PUL_SHA256's doc comment) - a manually
+     * imported zip/folder from any other release (older, or a newer hotfix like the 6.12.8 one
+     * that broke a reported install) genuinely differs at the byte level and desyncs from that
+     * recompiled logic at runtime instead of failing cleanly. Reject it here, before it ever
+     * replaces a working install, rather than let the app crash/hang later during gameplay.
+     */
+    private fun checkRetroRewindVersion(codePulSha256: String?): String? {
+        if (codePulSha256 == null) {
+            return "couldn't read Binaries/Code.pul to verify its version"
+        }
+        if (!codePulSha256.equals(RetroRewindRelease.CODE_PUL_SHA256, ignoreCase = true)) {
+            return "this Retro Rewind release isn't supported yet (this app currently only supports " +
+                "Retro Rewind ${RetroRewindRelease.VERSION}) - installing a different or newer release " +
+                "(including hotfixes) will crash or misbehave until the app is updated to support it"
+        }
+        return null
+    }
+
+    private fun sha256OfFile(file: File): String? =
+        try {
+            val digest = java.security.MessageDigest.getInstance("SHA-256")
+            file.inputStream().use { input ->
+                val buffer = ByteArray(1 shl 16)
+                while (true) {
+                    val read = input.read(buffer)
+                    if (read < 0) break
+                    digest.update(buffer, 0, read)
+                }
+            }
+            digest.digest().joinToString("") { "%02x".format(it) }
+        } catch (_: Exception) {
+            null
+        }
+
+    private fun sha256OfDocument(doc: DocumentFile): String? {
+        return try {
+            val digest = java.security.MessageDigest.getInstance("SHA-256")
+            val stream = contentResolver.openInputStream(doc.uri) ?: return null
+            stream.use { input ->
+                val buffer = ByteArray(1 shl 16)
+                while (true) {
+                    val read = input.read(buffer)
+                    if (read < 0) break
+                    digest.update(buffer, 0, read)
+                }
+            }
+            digest.digest().joinToString("") { "%02x".format(it) }
+        } catch (_: Exception) {
+            null
+        }
     }
 
     // --- Notification plumbing ---

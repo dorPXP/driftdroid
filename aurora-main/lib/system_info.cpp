@@ -40,6 +40,13 @@ extern "C" NTSYSAPI NTSTATUS NTAPI RtlGetVersion(PRTL_OSVERSIONINFOEXW lpVersion
 #include <fstream>
 #include <filesystem>
 #include <sys/sysinfo.h>
+#include <sched.h>
+#include <cerrno>
+#include <cstdio>
+#include <cstring>
+#include <set>
+#include <utility>
+#include <vector>
 #endif
 
 
@@ -347,6 +354,54 @@ std::string GetOSVersion() {
 void LogMisc() {
 
 }
+
+// Pins the calling thread to one frequency tier of an asymmetric (big.LITTLE) SoC. Deliberately
+// conservative like runtime's PinCallingThreadToFastestCores(), which this mirrors: does nothing
+// on a single-tier machine (desktop, homogeneous SoC, or unreadable /sys), and only distinguishes
+// the single slowest tier from everything faster rather than picking one "best" core.
+void pin_calling_thread_to_core_tier(CoreTier tier) noexcept {
+  std::vector<std::pair<int, long>> coreFreqs;
+  for (int cpu = 0; cpu < 32; ++cpu) {
+    char path[128];
+    std::snprintf(path, sizeof(path), "/sys/devices/system/cpu/cpu%d/cpufreq/cpuinfo_max_freq", cpu);
+    FILE* file = std::fopen(path, "r");
+    if (!file) {
+      continue;
+    }
+    long freq = 0;
+    const int scanned = std::fscanf(file, "%ld", &freq);
+    std::fclose(file);
+    if (scanned == 1 && freq > 0) {
+      coreFreqs.emplace_back(cpu, freq);
+    }
+  }
+
+  std::set<long> distinctFreqs;
+  for (const auto& [cpu, freq] : coreFreqs) {
+    distinctFreqs.insert(freq);
+  }
+  if (distinctFreqs.size() < 2) {
+    return;
+  }
+  const long slowestTier = *distinctFreqs.begin();
+
+  cpu_set_t mask;
+  CPU_ZERO(&mask);
+  for (const auto& [cpu, freq] : coreFreqs) {
+    const bool inSlowestTier = freq == slowestTier;
+    if (tier == CoreTier::Fast ? !inSlowestTier : inSlowestTier) {
+      CPU_SET(cpu, &mask);
+    }
+  }
+  if (CPU_COUNT(&mask) == 0) {
+    return;
+  }
+  if (sched_setaffinity(0, sizeof(mask), &mask) != 0) {
+    // Some Android cgroup/cpuset configurations refuse a mask outside what's currently allowed
+    // (e.g. a backgrounded process's cpuset) - non-fatal, the thread just keeps its affinity.
+    Log.warn("pin_calling_thread_to_core_tier: sched_setaffinity failed: {}", std::strerror(errno));
+  }
+}
 #else
 std::string GetCpuModel() {
   return Unknown;
@@ -363,6 +418,11 @@ std::string GetOSVersion() {
 void LogMisc() {
 
 }
+#endif
+
+#if !defined(linux)
+// No asymmetric (big.LITTLE) scheduling concern on these platforms - nothing to pin.
+void pin_calling_thread_to_core_tier(CoreTier) noexcept {}
 #endif
 
 } // namespace aurora
