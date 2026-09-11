@@ -286,6 +286,12 @@ bool run_frame_worker_cycle(gfx::SealedFrame& sealedFrame) noexcept;
 #endif
 
 void frame_worker_main() noexcept {
+  // Encode/submit/present are latency-critical, same as the presenter thread - keep this thread
+  // off the same cores a CPU-bound background burst (e.g. pipeline compilation) can pile onto.
+  if (!SDL_SetCurrentThreadPriority(SDL_THREAD_PRIORITY_HIGH)) {
+    Log.warn("Could not raise the frame worker thread priority: {}", SDL_GetError());
+  }
+  pin_calling_thread_to_core_tier(CoreTier::Fast);
   {
     std::lock_guard lock(g_frameWorker.mutex);
     g_frameWorker.threadId = std::this_thread::get_id();
@@ -1058,6 +1064,7 @@ void presenter_main() noexcept {
   if (!SDL_SetCurrentThreadPriority(SDL_THREAD_PRIORITY_HIGH)) {
     Log.warn("Could not raise the asynchronous presenter thread priority: {}", SDL_GetError());
   }
+  pin_calling_thread_to_core_tier(CoreTier::Fast);
   for (;;) {
     PresentationJob job;
     {

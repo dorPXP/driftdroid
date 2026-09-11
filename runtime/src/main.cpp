@@ -64,6 +64,8 @@
 #include <dolphin/gx/GXAurora.h>
 #include <dolphin/vi.h>
 
+#include <tracy/Tracy.hpp>
+
 // Defined in `runtime/src/hle/vi.cpp` (used by GX/VI HLE).
 extern std::atomic_bool g_auroraFrameActive;
 extern "C" int g_gxFrameCount;
@@ -79,6 +81,7 @@ void ServiceGuestTimingDuringAuroraFrameWait() {
     // Aurora can block inside FIFO drains before control returns to GX HLE, for as long as a
     // whole display period. Keep VI retraces, alarms and audio moving at wall-clock cadence here
     // while still suppressing guest rescheduling and recursive Aurora work.
+    ZoneScoped;
     VI_HLE_ProcessRetracesDeferred(8);
     OS_HLE_ProcessAlarmsDeferred(8);
     Audio_HLE_PollDeferred();

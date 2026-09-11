@@ -5,7 +5,10 @@
 
 #include <dolphin/gx/GXAurora.h>
 
+#include <tracy/Tracy.hpp>
+
 #include <algorithm>
+#include <chrono>
 #include <map>
 #include <mutex>
 #include <vector>
@@ -112,6 +115,22 @@ PPC_NATIVE_OVERRIDE_VOID(8016fc24, GX__SetDispCopyGamma_8016fc24, (uint32_t g), 
 // ============================================================================
 
 extern "C" void GX__CopyDisp_8016fc38(uint32_t da, uint32_t c) {
+    ZoneScopedN("GXCopyDisp/PresentFrame");
+    // Wall-clock gap since the previous GXCopyDisp - most of this is spent in interleaved PPC
+    // emulation and GX command submission made directly by translated game code before this
+    // function is re-entered, none of which this ZoneScopedN covers. Comparing this plotted
+    // period against the zone's own duration in a Tracy capture gives a real "present time vs.
+    // everything-else time" split without needing to bracket that diffuse in-between code.
+    {
+        static auto lastFrameTime = std::chrono::steady_clock::time_point{};
+        const auto now = std::chrono::steady_clock::now();
+        if (lastFrameTime.time_since_epoch().count() != 0) {
+            const auto periodMs =
+                std::chrono::duration<double, std::milli>(now - lastFrameTime).count();
+            TracyPlot("Frame period (ms)", periodMs);
+        }
+        lastFrameTime = now;
+    }
     EnsureAuroraFrameActive();
     // GX copies are FIFO-ordered on hardware. Drain submitted draws before
     // resolving the EFB so high-level copies see the same contents.

@@ -947,6 +947,11 @@ static std::atomic_bool g_prewarmActive{false};
 static std::chrono::steady_clock::time_point g_prewarmStart{};
 static uint32_t g_prewarmCount = 0;
 
+// Set once, the first time a frame is actively being recorded. Before this point (boot-time bulk
+// prewarm from the cached recipe DB) there is no live presentation to protect, so compile workers
+// are free to use every core; after this point we pin them off the fast/presenter cores.
+static std::atomic_bool g_presentationStarted{false};
+
 static void note_pipeline_queue_drained() {
   if (!g_prewarmActive.exchange(false, std::memory_order_acq_rel)) {
     return;
@@ -988,6 +993,12 @@ static void pipeline_worker() {
 #ifdef TRACY_ENABLE
   tracy::SetThreadName("Pipeline compilation thread");
 #endif
+  // Boot-time bulk prewarm (loading cached pipeline recipes before the first frame is ever
+  // presented) has no live presentation to contend with, so let it use every core. Only once
+  // g_presentationStarted flips do we pin off the fast/presenter cores (see
+  // pin_calling_thread_to_core_tier), so the compile burst can't starve presentation during
+  // scene load on a weak asymmetric SoC.
+  bool pinnedToSlowTier = false;
 
   while (true) {
     PendingPipeline pending;
@@ -1010,6 +1021,10 @@ static void pipeline_worker() {
       if (background) {
         ++g_activeBackgroundPipelineWorkers;
       }
+    }
+    if (!pinnedToSlowTier && g_presentationStarted.load(std::memory_order_acquire)) {
+      pin_calling_thread_to_core_tier(CoreTier::Slow);
+      pinnedToSlowTier = true;
     }
     compile_pending_pipeline(std::move(pending));
     if (background) {
@@ -1217,6 +1232,9 @@ void shutdown_pipeline_cache() {
 
 void begin_pipeline_frame() {
   g_pipelineFrameActive = true;
+  if (!g_presentationStarted.load(std::memory_order_acquire)) {
+    g_presentationStarted.store(true, std::memory_order_release);
+  }
   if (!g_hasPipelineThread) {
     g_pipelinesPerFrame = 0;
   }

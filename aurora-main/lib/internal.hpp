@@ -134,6 +134,13 @@ std::chrono::nanoseconds wait_for_frame_worker_sealed() noexcept;
 bool wait_for_frame_worker_for(std::chrono::microseconds timeout) noexcept;
 std::recursive_mutex& renderer_gpu_mutex() noexcept;
 
+// Pins the calling thread to one frequency tier of an asymmetric (big.LITTLE) SoC - Fast excludes
+// only the single slowest tier (mirrors runtime's PinCallingThreadToFastestCores), Slow is exactly
+// that excluded tier. No-op on a single-tier machine (desktop, homogeneous SoC, unreadable /sys)
+// or any non-Linux platform.
+enum class CoreTier { Fast, Slow };
+void pin_calling_thread_to_core_tier(CoreTier tier) noexcept;
+
 template <typename T>
 class ArrayRef {
 public:
