@@ -189,6 +189,13 @@ inline std::optional<std::filesystem::path> ExecutableDirectory() {
     // short-circuit to nullopt on Android, which is the intended behavior: "portable installs"
     // are a desktop-only concept).
     return std::nullopt;
+#elif defined(__SWITCH__)
+    // Same rationale as Android: there is no "next to the executable" concept for Switch homebrew
+    // (hbloader always launches the .nro from a fixed sdmc:/ path, and "portable install" -
+    // finding a marker file walking up from that location - is a desktop-only concept that
+    // doesn't map onto Horizon OS's single sdmc:/switch/<app>/ layout). Also no /proc equivalent
+    // to read the running executable's own path from even if this mattered.
+    return std::nullopt;
 #else
     // /proc/self/exe is a Linux-specific magic symlink to the running executable; readlink()
     // does not NUL-terminate and silently truncates if the buffer is too small, so this grows
@@ -255,6 +262,14 @@ inline std::filesystem::path ApplicationDataDirectory() {
     if (const std::string& filesDir = AndroidFilesDir(); !filesDir.empty()) {
         return std::filesystem::path(filesDir) / kApplicationDirectoryName;
     }
+#elif defined(__SWITCH__)
+    // Horizon OS has no environment variables and no per-user profile directories in the
+    // XDG/FOLDERID sense - homebrew conventionally keeps its data on the SD card under
+    // sdmc:/switch/<app>/, alongside every other homebrew app's own subdirectory (mirrors how
+    // hbmenu itself organizes .nro apps). Fixed, not derived from anything at runtime, the same
+    // way Android's AndroidFilesDir() is a fixed per-app sandbox path rather than something to
+    // search for.
+    return std::filesystem::path("sdmc:/switch") / kApplicationDirectoryName;
 #else
     // XDG Base Directory spec equivalent of FOLDERID_LocalAppData: $XDG_DATA_HOME if set and
     // non-empty, otherwise its default of $HOME/.local/share.
@@ -713,6 +728,16 @@ inline bool SetAttenuateMusicWhenMediaPlays(bool value) {
 
 inline bool WidescreenEnabled(bool fallback = false) {
     return Get().widescreen.value_or(fallback);
+}
+
+// Deliberately does NOT update Mutable().widescreen for live effect the way the other Set*
+// functions above do - SCGetAspectRatio_HLE (hle/sc.cpp) is a boot-time-only syscall the guest
+// game reads once during its own startup to choose 4:3 vs 16:9 HUD/menu layout math; changing it
+// mid-session wouldn't retroactively fix anything already laid out, so this only persists to
+// Config.toml for the NEXT full app launch to pick up. The settings UI must tell the user a
+// restart is required (see settings_overlay.cpp's aspect ratio control).
+inline bool SetWidescreen(bool value) {
+    return WriteSetting("video", "widescreen", value ? "true" : "false");
 }
 
 inline bool WindowPosition(int32_t& x, int32_t& y) {

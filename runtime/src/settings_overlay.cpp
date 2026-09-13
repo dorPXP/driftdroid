@@ -103,6 +103,7 @@ int g_displayMode = ParseDisplayModeConfig(RuntimeConfigFile::DisplayMode("borde
 bool g_skipUnreadyPipelines = RuntimeConfigFile::SkipUnreadyPipelines(true);
 bool g_disableCopyFilter = RuntimeConfigFile::DisableCopyFilter(true);
 bool g_showFps = RuntimeConfigFile::ShowFps(true);
+bool g_widescreen = RuntimeConfigFile::WidescreenEnabled(true);
 uint32_t g_disabledPostProcessingPaths = RuntimeConfigFile::DisabledPostProcessingPaths(0);
 std::array<int32_t, PAD_MAX_CONTROLLERS> g_configuredControllerIndices = [] {
     std::array<int32_t, PAD_MAX_CONTROLLERS> indices{};
@@ -332,6 +333,16 @@ void DrawControllerSettings() {
     // (TouchControlsOverlay.setControllerConnected) but the player wants it back anyway.
     if (ImGui::Checkbox("Touch controls", &g_androidTouchControlsVisibleCache)) {
         AndroidSetTouchOverlayVisible(g_androidTouchControlsVisibleCache);
+    }
+    // Requested feature (GitHub issue #4): holding an item behind you for protection while also
+    // drifting/tricking is hard on touch controls since both need a thumb free. Double-tapping
+    // the on-screen A button locks it "held" so that thumb frees up; double-tapping again
+    // releases it. Off by default - opt-in, same reasoning as everything else in this section
+    // being a per-device UI preference rather than a game setting. Actual detection/hold logic
+    // lives in TouchButtonView.kt; this is just the settings-menu entry point plus a live mirror
+    // of its current state (seeded via nativeSetDoubleTapAutoHoldCache).
+    if (ImGui::Checkbox("Double-tap A to auto-hold acceleration", &g_androidDoubleTapAutoHoldCache)) {
+        AndroidSetDoubleTapAutoHold(g_androidDoubleTapAutoHoldCache);
     }
     ImGui::Separator();
 #endif
@@ -614,6 +625,25 @@ void DrawResolutionSettings() {
         }
         ImGui::EndCombo();
     }
+    ImGui::Separator();
+
+    // Requested directly after a real device report (Retroid Pocket Nova, a 4:3-screened Android
+    // handheld): the game was always told it's on a 16:9 TV (SCGetAspectRatio_HLE, hle/sc.cpp,
+    // defaults to widescreen=true) regardless of the device's actual screen shape, so its OWN
+    // HUD/menu layout math (not just output scaling) used 16:9-safe-area coordinates - on a
+    // genuinely 4:3 screen those elements land toward the screen's center instead of the corners.
+    // A picker here lets the player match this to their real screen instead of only auto-detecting
+    // it (which would need to run before this menu can even show settings, and some 4:3-ish
+    // devices - e.g. anything with on-screen nav bars eating into the aspect ratio - are
+    // ambiguous enough that a manual override is worth having regardless).
+    constexpr std::array<const char*, 2> kAspectRatioModes{"Widescreen (16:9)", "4:3 (original Wii)"};
+    int aspectRatioIndex = g_widescreen ? 0 : 1;
+    if (ImGui::Combo("Aspect Ratio", &aspectRatioIndex, kAspectRatioModes.data(),
+                      static_cast<int>(kAspectRatioModes.size()))) {
+        g_widescreen = aspectRatioIndex == 0;
+        RuntimeConfigFile::SetWidescreen(g_widescreen);
+    }
+    ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.25f, 1.0f), "Restart the app for this to take effect.");
     ImGui::Separator();
 }
 
@@ -1186,6 +1216,13 @@ void InitializeRuntimeSettings() noexcept {
     g_disableCopyFilter = RuntimeConfigFile::DisableCopyFilter(true);
     g_showFps = RuntimeConfigFile::ShowFps(true);
     g_disabledPostProcessingPaths = RuntimeConfigFile::DisabledPostProcessingPaths(0);
+    // Same staleness class as everything else in this block, plus one more wrinkle: on a
+    // brand-new install with no [video] widescreen key yet, android_jni_bridge.cpp's SDL_main
+    // only just wrote the device's auto-detected default moments ago (right before the config
+    // reload that made this whole re-read necessary) - without this line the very first launch's
+    // settings sidebar would show "Widescreen (16:9)" regardless of the real screen shape, even
+    // though the auto-detected value was already correctly in effect for actual gameplay.
+    g_widescreen = RuntimeConfigFile::WidescreenEnabled(true);
 #endif
     controller_mapping_wizard::LoadPersistedMappings();
     ApplyConfiguredMappings();

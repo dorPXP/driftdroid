@@ -24,6 +24,7 @@
 #include "settings_overlay.h"
 
 bool g_androidTouchControlsVisibleCache = true;
+bool g_androidDoubleTapAutoHoldCache = false;
 
 namespace {
 
@@ -79,6 +80,13 @@ extern "C" void AndroidSetTouchOverlayVisible(bool visible) {
     CallVoidMethodOnActivity("onNativeSetTouchOverlayVisible", visible);
 }
 
+// Called from the ImGui "Double-tap A to auto-hold acceleration" settings checkbox
+// (settings_overlay.cpp).
+extern "C" void AndroidSetDoubleTapAutoHold(bool enabled) {
+    g_androidDoubleTapAutoHoldCache = enabled;
+    CallVoidMethodOnActivity("onNativeSetDoubleTapAutoHold", enabled);
+}
+
 // Called from SetTopBarVisible (settings_overlay.cpp) whenever the settings sidebar's own
 // visibility changes.
 extern "C" void AndroidNotifySettingsVisibilityChanged(bool visible) {
@@ -102,6 +110,14 @@ extern "C" JNIEXPORT void JNICALL
 Java_com_driftdroid_android_MainActivity_nativeSetTouchControlsVisibleCache(JNIEnv*, jobject /* this */,
                                                                                 jboolean visible) {
     g_androidTouchControlsVisibleCache = (visible == JNI_TRUE);
+}
+
+// Same seeding purpose as nativeSetTouchControlsVisibleCache above, for the double-tap-auto-hold
+// preference.
+extern "C" JNIEXPORT void JNICALL
+Java_com_driftdroid_android_MainActivity_nativeSetDoubleTapAutoHoldCache(JNIEnv*, jobject /* this */,
+                                                                             jboolean enabled) {
+    g_androidDoubleTapAutoHoldCache = (enabled == JNI_TRUE);
 }
 
 // Called from MainActivity's AudioManager.OnAudioFocusChangeListener - Android's real equivalent
@@ -164,6 +180,7 @@ namespace {
 std::string g_androidDvdRoot;
 std::string g_androidRetroRewindRoot;
 std::vector<std::string> g_androidOverlayRoots;
+bool g_androidDetectedWidescreen = true;
 }  // namespace
 
 // Separate setter (rather than a 3rd nativeSetInstallPaths parameter) so the base-product build
@@ -193,6 +210,15 @@ Java_com_driftdroid_android_MainActivity_nativeAddOverlayRoot(JNIEnv* env, jobje
     const char* chars = env->GetStringUTFChars(overlayRoot, nullptr);
     g_androidOverlayRoots.emplace_back(chars);
     env->ReleaseStringUTFChars(overlayRoot, chars);
+}
+
+// Staged from the device's real physical screen aspect ratio (MainActivity.kt); only ever
+// consulted in SDL_main below as a first-run default, and only if the user has never explicitly
+// picked an aspect ratio via the settings sidebar (Config.toml has no [video] widescreen key yet).
+extern "C" JNIEXPORT void JNICALL
+Java_com_driftdroid_android_MainActivity_nativeSetDetectedWidescreen(JNIEnv*, jobject /* this */,
+                                                                         jboolean widescreen) {
+    g_androidDetectedWidescreen = (widescreen == JNI_TRUE);
 }
 
 // Only meaningful (and only linked) for the combined libGameCombined.so, where both profiles'
@@ -298,6 +324,16 @@ extern "C" int SDL_main(int argc, char** argv) {
         }
         joined += "]";
         RuntimeConfigFile::WriteSetting("paths", "overlay_roots", joined);
+    }
+    // Only a FIRST-RUN default: if a previous session (or this same one, via the settings
+    // sidebar's "Aspect Ratio" picker) already wrote an explicit [video] widescreen value, this
+    // must never override it - Get() here reflects whatever was on disk when this library was
+    // loaded (see the comment on the reload block right below), which already includes anything
+    // an earlier session wrote. Real device report: without this, every device defaulted to
+    // widescreen=true regardless of actually having a 4:3 screen (Retroid Pocket Nova), so the
+    // game's own HUD/menu layout math (SCGetAspectRatio_HLE, hle/sc.cpp) always assumed 16:9.
+    if (!RuntimeConfigFile::Get().widescreen.has_value()) {
+        RuntimeConfigFile::WriteSetting("video", "widescreen", g_androidDetectedWidescreen ? "true" : "false");
     }
 
     // RuntimeConfigFile::Get() memoizes into a function-local static on its first call, and

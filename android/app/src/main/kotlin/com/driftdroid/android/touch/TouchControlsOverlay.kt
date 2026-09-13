@@ -89,6 +89,26 @@ class TouchControlsOverlay private constructor(private val activity: Activity, p
         )
         applyMasterVisibility()
 
+        // Fixes a real, reproducible bug: controls restored slightly ABOVE their saved position
+        // on every launch. Root cause - SDL asynchronously switches this window to fullscreen
+        // (SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN, once the emulator core sets up video output) some
+        // time AFTER onCreate/attach() runs, growing `container` to include what was status-bar
+        // space. The layout editor is normally used during actual gameplay (i.e. already
+        // fullscreen), so saved x/y fractions are relative to the LARGER, post-fullscreen size -
+        // but the one-shot `container.post {}` measurement below that restores them on next
+        // launch fires before that switch happens, against the SMALLER, pre-fullscreen size,
+        // and nothing ever corrected for the container growing out from under it afterward.
+        // Re-applying every control's saved fraction whenever the container's real size actually
+        // changes (not just once at startup) means the final resting position always matches
+        // whatever size the container ends up at, regardless of when that resize lands.
+        container.addOnLayoutChangeListener { _, left, top, right, bottom, oldLeft, oldTop, oldRight, oldBottom ->
+            val widthChanged = (right - left) != (oldRight - oldLeft)
+            val heightChanged = (bottom - top) != (oldBottom - oldTop)
+            if (widthChanged || heightChanged) {
+                reapplyPositions()
+            }
+        }
+
         buildToolbar()
 
         // Build the controls after the container has a real size - fractions need it to convert
@@ -152,7 +172,13 @@ class TouchControlsOverlay private constructor(private val activity: Activity, p
             } else {
                 val fillColor = prefs.getInt(key(spec.id, "fillColor"), spec.color)
                 val outlineColor = prefs.getInt(key(spec.id, "outlineColor"), spec.outlineColor)
-                TouchButtonView(container.context, spec.label, spec.sdlButton, fillColor, spec.pill, Color.WHITE, outlineColor)
+                TouchButtonView(container.context, spec.label, spec.sdlButton, fillColor, spec.pill, Color.WHITE, outlineColor).apply {
+                    // Only the A (accelerate) button ever supports this - GitHub issue #4's whole
+                    // point was freeing up the thumb that's holding A down, not any other button.
+                    if (spec.id == "a") {
+                        doubleTapAutoHoldEnabled = prefs.getBoolean(KEY_DOUBLE_TAP_AUTO_HOLD, false)
+                    }
+                }
             }
 
         val params = FrameLayout.LayoutParams(widthPx, heightPx)
@@ -176,7 +202,12 @@ class TouchControlsOverlay private constructor(private val activity: Activity, p
 
         val onEditEnd: (Boolean) -> Unit = { moved ->
             if (moved) {
-                saveTransform(spec.id, view, containerWidth, containerHeight)
+                // Deliberately NOT the containerWidth/containerHeight captured above - those are
+                // a snapshot from whenever this control was first created (possibly before the
+                // window's later fullscreen switch), and saving against a stale size is exactly
+                // what caused the restore-position bug this replaced. Editing happens live, so
+                // the container's actual current size is always the right denominator here.
+                saveTransform(spec.id, view)
             } else {
                 // A plain tap (no drag/pinch) while editing opens the per-control editor instead
                 // of instantly toggling visibility - requested directly: "tapping on a button
@@ -326,8 +357,6 @@ class TouchControlsOverlay private constructor(private val activity: Activity, p
             val opacity = opacitySeekBar.progress.coerceAtLeast(10) / 100f
             view.visibility = if (enabled) View.VISIBLE else View.GONE
             view.alpha = if (enabled) opacity else 0.35f
-            val containerWidth = container.width.takeIf { it > 0 } ?: container.resources.displayMetrics.widthPixels
-            val containerHeight = container.height.takeIf { it > 0 } ?: container.resources.displayMetrics.heightPixels
             val editor =
                 prefs
                     .edit()
@@ -347,7 +376,7 @@ class TouchControlsOverlay private constructor(private val activity: Activity, p
                 else -> {}
             }
             editor.apply()
-            saveTransform(spec.id, view, containerWidth, containerHeight)
+            saveTransform(spec.id, view)
             // Edit mode keeps disabled controls visible-but-dimmed so they stay reachable -
             // matches the pre-dialog behavior.
             if (!enabled) {
@@ -449,7 +478,9 @@ class TouchControlsOverlay private constructor(private val activity: Activity, p
         }
     }
 
-    private fun saveTransform(id: String, view: View, containerWidth: Int, containerHeight: Int) {
+    private fun saveTransform(id: String, view: View) {
+        val containerWidth = container.width.takeIf { it > 0 } ?: container.resources.displayMetrics.widthPixels
+        val containerHeight = container.height.takeIf { it > 0 } ?: container.resources.displayMetrics.heightPixels
         val centerX = view.x + view.width / 2f
         val centerY = view.y + view.height / 2f
         prefs
@@ -460,6 +491,24 @@ class TouchControlsOverlay private constructor(private val activity: Activity, p
             .apply()
     }
 
+    /** Re-applies every control's saved (or, if never saved, default) x/y fraction against the
+     * container's CURRENT size - called whenever that size actually changes (see the
+     * OnLayoutChangeListener in attach()), not just once at startup, so a later fullscreen resize
+     * can't leave positions permanently off, including for a first-time install that hasn't saved
+     * anything yet. Does not touch scale/enabled/opacity/colors, only position. */
+    private fun reapplyPositions() {
+        val containerWidth = container.width.takeIf { it > 0 } ?: return
+        val containerHeight = container.height.takeIf { it > 0 } ?: return
+        val specsById = SPECS.associateBy { it.id }
+        for ((id, view) in views) {
+            val spec = specsById[id] ?: continue
+            val xFraction = prefs.getFloat(key(id, "x"), spec.defaultXFraction)
+            val yFraction = prefs.getFloat(key(id, "y"), spec.defaultYFraction)
+            view.x = xFraction * containerWidth - view.width / 2f
+            view.y = yFraction * containerHeight - view.height / 2f
+        }
+    }
+
     fun isUserVisible(): Boolean = userVisible
 
     /** From the in-game settings menu's "Touch controls" checkbox (settings_overlay.cpp, via
@@ -468,6 +517,17 @@ class TouchControlsOverlay private constructor(private val activity: Activity, p
         userVisible = visible
         prefs.edit().putBoolean(KEY_MASTER_VISIBLE, visible).apply()
         applyMasterVisibility()
+    }
+
+    fun isDoubleTapAutoHoldEnabled(): Boolean = prefs.getBoolean(KEY_DOUBLE_TAP_AUTO_HOLD, false)
+
+    /** From the in-game settings menu's "Double-tap A to auto-hold acceleration" checkbox
+     * (settings_overlay.cpp, via MainActivity.onNativeSetDoubleTapAutoHold). Turning it off while
+     * already locked also releases the hold immediately, rather than leaving A stuck down with no
+     * way to release it until the player re-enables the feature just to double-tap it off. */
+    fun setDoubleTapAutoHoldEnabled(enabled: Boolean) {
+        prefs.edit().putBoolean(KEY_DOUBLE_TAP_AUTO_HOLD, enabled).apply()
+        (views["a"] as? TouchButtonView)?.doubleTapAutoHoldEnabled = enabled
     }
 
     /** From MainActivity.onNativeGamepadConnectionChanged - a real controller connecting/
@@ -780,6 +840,7 @@ class TouchControlsOverlay private constructor(private val activity: Activity, p
         private const val PREFS_NAME = "touch_controls"
         private const val LIBRARY_PREFS_NAME = "touch_controls_library"
         private const val KEY_MASTER_VISIBLE = "master_visible"
+        private const val KEY_DOUBLE_TAP_AUTO_HOLD = "double_tap_auto_hold"
         private const val JOYSTICK_CONTROL_ID = "joystick"
         private const val KEY_LIBRARY_NAMES = "layout_names"
 
