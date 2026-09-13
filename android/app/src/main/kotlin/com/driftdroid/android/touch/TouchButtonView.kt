@@ -41,6 +41,26 @@ class TouchButtonView(
 
     private var pressed = false
 
+    // GitHub issue #4: double-tap locks this button "held" so the thumb pressing it can move to
+    // something else (steering/tricking) while an item stays protectively held behind the kart.
+    // Only ever set true for the "A" spec (TouchControlsOverlay.addControl) - this property
+    // exists on every button generically, but the feature is scoped to just A by construction.
+    var doubleTapAutoHoldEnabled: Boolean = false
+        set(value) {
+            field = value
+            if (!value && autoHoldLocked) {
+                // Disabling the feature while locked must release the hold immediately - leaving
+                // A stuck sending "down" forever with no way to release it (since double-tap
+                // itself is now disabled) would be strictly worse than doing nothing.
+                autoHoldLocked = false
+                pressed = false
+                sendInputState(false)
+                invalidate()
+            }
+        }
+    private var autoHoldLocked = false
+    private var lastReleaseTimeMs = 0L
+
     private fun withAlpha(color: Int, alpha: Int) =
         Color.argb(alpha, Color.red(color), Color.green(color), Color.blue(color))
 
@@ -120,14 +140,42 @@ class TouchButtonView(
 
         when (event.actionMasked) {
             MotionEvent.ACTION_DOWN -> {
+                if (autoHoldLocked) {
+                    // Deliberately asymmetric: entering the hold takes a double-tap, but ANY
+                    // single tap while locked releases it and passes straight through as a real
+                    // press - not a separate "double-tap to release" gesture. This is what makes
+                    // the feature safe to leave on: whenever the game actually needs a genuine A
+                    // press (resuming from pause, continuing past the results screen, a freshly
+                    // timed rocket start next race), the player's ordinary tap IS that press -
+                    // there's no stale held state left over to get in the way of it.
+                    autoHoldLocked = false
+                    pressed = true
+                    sendInputState(true)
+                    invalidate()
+                    return true
+                }
+                if (doubleTapAutoHoldEnabled &&
+                    event.eventTime - lastReleaseTimeMs <= DOUBLE_TAP_WINDOW_MS
+                ) {
+                    autoHoldLocked = true
+                    pressed = true
+                    sendInputState(true)
+                    lastReleaseTimeMs = 0L
+                    invalidate()
+                    return true
+                }
                 pressed = true
                 sendInputState(true)
                 invalidate()
             }
             MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                if (autoHoldLocked) {
+                    return true
+                }
                 pressed = false
                 sendInputState(false)
                 invalidate()
+                lastReleaseTimeMs = event.eventTime
             }
         }
         return true
@@ -138,6 +186,7 @@ class TouchButtonView(
     }
 
     companion object {
+        private const val DOUBLE_TAP_WINDOW_MS = 300L
         val DEFAULT_FILL_COLOR = Color.argb(110, 255, 255, 255)
         val DEFAULT_OUTLINE_COLOR = Color.argb(200, 255, 255, 255)
     }

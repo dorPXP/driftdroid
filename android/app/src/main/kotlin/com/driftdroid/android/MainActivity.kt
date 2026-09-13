@@ -50,9 +50,11 @@ class MainActivity : SDLActivity() {
     private external fun nativeSetInstallPaths(filesDir: String, dvdRoot: String)
     private external fun nativeSetRetroRewindRoot(retroRewindRoot: String)
     private external fun nativeAddOverlayRoot(overlayRoot: String)
+    private external fun nativeSetDetectedWidescreen(widescreen: Boolean)
     private external fun nativeSetActiveProduct(retroRewind: Boolean)
     private external fun nativeToggleSettingsOverlay()
     private external fun nativeSetTouchControlsVisibleCache(visible: Boolean)
+    private external fun nativeSetDoubleTapAutoHoldCache(enabled: Boolean)
     private external fun nativeReportExternalMediaPlaying(playing: Boolean)
 
     private var touchControls: TouchControlsOverlay? = null
@@ -130,6 +132,18 @@ class MainActivity : SDLActivity() {
         for (root in ModManager.enabledOverlayRoots(this)) {
             nativeAddOverlayRoot(root)
         }
+        // Only ever used as a FIRST-RUN default (native side only writes it when no explicit
+        // [video] widescreen key exists in Config.toml yet, i.e. the user has never touched the
+        // settings sidebar's "Aspect Ratio" picker) - reported directly: on a real 4:3-screened
+        // device (Retroid Pocket Nova), the game was always defaulting to 16:9 regardless of the
+        // actual screen shape, mis-positioning HUD/menu elements toward the center instead of the
+        // corners. `resources.displayMetrics` reflects the real physical screen here since this
+        // Activity is locked to sensorLandscape (AndroidManifest.xml).
+        val metrics = resources.displayMetrics
+        val landscapeAspect = maxOf(metrics.widthPixels, metrics.heightPixels).toFloat() /
+            minOf(metrics.widthPixels, metrics.heightPixels).toFloat()
+        // Halfway between a true 4:3 (1.333) and true 16:9 (1.778) screen.
+        nativeSetDetectedWidescreen(landscapeAspect >= 1.55f)
         // A no-op on the separate-library builds (getLibraries() below) - only the combined
         // library's RuntimeProduct provider (combined_product.cpp) does anything with this, and
         // it must run before super.onCreate() starts SDL's thread towards main(), which is when
@@ -246,6 +260,7 @@ class MainActivity : SDLActivity() {
         val gearButton = addSettingsButton()
         touchControls = TouchControlsOverlay.attach(this, mLayout)
         nativeSetTouchControlsVisibleCache(touchControls?.isUserVisible() ?: true)
+        nativeSetDoubleTapAutoHoldCache(touchControls?.isDoubleTapAutoHoldEnabled() ?: false)
         touchControls?.onEditModeChanged = { editing -> gearButton.alpha = if (editing) 1f else 0.55f }
         // No floating button (pulled per direct request: "remove steering with motion the button
         // pls for now") - Motion Steering now lives in the settings sidebar's Controller page
@@ -513,6 +528,13 @@ class MainActivity : SDLActivity() {
      * settings_overlay.cpp, via AndroidSetTouchOverlayVisible). May arrive off the UI thread. */
     fun onNativeSetTouchOverlayVisible(visible: Boolean) {
         runOnUiThread { touchControls?.setUserVisible(visible) }
+    }
+
+    /** Called from native (the settings sidebar's "Double-tap A to auto-hold acceleration"
+     * checkbox, settings_overlay.cpp, via AndroidSetDoubleTapAutoHold). May arrive off the UI
+     * thread. */
+    fun onNativeSetDoubleTapAutoHold(enabled: Boolean) {
+        runOnUiThread { touchControls?.setDoubleTapAutoHoldEnabled(enabled) }
     }
 
     /** Called from native (the settings sidebar's "Edit Touch Layout" button, settings_overlay.cpp
