@@ -43,8 +43,10 @@ void AuroraSetViewportPolicy(AuroraViewportPolicy policy) {
   if (changed) {
     // Finish commands using the old framebuffer mapping before changing it.
     aurora::gx::fifo::drain();
+    // Only write on a real change: this is called every frame, and the frame worker reads the
+    // policy when it seals a frame (depth_peek::capture_frame_mapping).
+    g_gxState.viewportPolicy = policy;
   }
-  g_gxState.viewportPolicy = policy;
   aurora::window::set_frame_buffer_aspect_fit(policy == AURORA_VIEWPORT_FIT);
   aurora::window::set_present_surface_fill(policy == AURORA_VIEWPORT_STRETCH);
   if (changed) {
