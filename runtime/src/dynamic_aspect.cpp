@@ -2,6 +2,7 @@
 #include "memory.h"
 
 #include <algorithm>
+#include <atomic>
 #include "aurora_events.h"
 #include "hle/gx/gx_dynamic_aspect.h"
 
@@ -31,6 +32,12 @@ constexpr uint32_t kEggScreenAspectHandler = 0x8023E53Cu;
 constexpr uint32_t kMkwUpdateAllScreens = 0x805653D0u;
 constexpr uint32_t kMkwGfxDrawList = 0x809C1830u;
 constexpr uint32_t kSystemManagerInstance = 0x80386000u;
+// SystemManager::Init (0x8000AC50) stores SCGetAspectRatio's answer here (0 = 4:3, 1 = 16:9);
+// menu and HUD layout code reads it from this field rather than asking SC again.
+constexpr uint32_t kSystemManagerAspectRatioOffset = 0x58u;
+
+// -1 = nothing pending, otherwise the requested widescreen flag.
+std::atomic<int> g_pendingAspectMode{-1};
 
 // The draw list is an nw4r::ut::List: +0x00 head, +0x04 tail, +0x08 u16 count,
 // +0x0A u16 link offset, with next = *(node + linkOffset + 4) (List_GetNext,
@@ -164,6 +171,34 @@ void AssertMkwOffscreenScreenBypass() {
     }
     lastSweptFrame = g_gxFrameCount;
     AssertOffscreenScreenBypass();
+}
+
+void RequestMkwAspectMode(bool widescreen) {
+    g_pendingAspectMode.store(widescreen ? 1 : 0, std::memory_order_release);
+}
+
+// The game only asks for its aspect ratio during boot, so a live switch replays each place that
+// answer landed. Must run on the game thread at a frame boundary (BeginAuroraFrame), the same
+// point ApplyEggScreenRecords already calls back into guest code from.
+void ApplyPendingMkwAspectMode(uint32_t surfaceWidth, uint32_t surfaceHeight) {
+    const int requested = g_pendingAspectMode.exchange(-1, std::memory_order_acq_rel);
+    if (requested < 0 || (requested == 1) == g_widescreenConfigured) {
+        return;
+    }
+    const bool widescreen = requested == 1;
+
+    const uint32_t systemManager = Memory::Read32(kSystemManagerInstance);
+    if (systemManager != 0) {
+        Memory::Write32(systemManager + kSystemManagerAspectRatioOffset, widescreen ? 1u : 0u);
+    }
+    // EGG::Screen::SetTVModeDefault re-asks SCGetAspectRatio (now answering the new mode, see
+    // RuntimeConfigFile::SetWidescreen) and moves the root screen onto the matching TV mode.
+    if (Memory::Read32(kEggActiveScreenPtr) != 0) {
+        CpuContext callbackCpu = GetPersistentCpuContext();
+        InvokeIndirectCpu(kEggScreenAspectHandler, &callbackCpu);
+    }
+    // Rewrites the canvas records, viewport policy and VI lock, then refreshes every live screen.
+    ConfigureMkwDynamicAspect(widescreen, surfaceWidth, surfaceHeight);
 }
 
 void UpdateMkwDynamicAspectSurface(uint32_t surfaceWidth, uint32_t surfaceHeight) {

@@ -18,6 +18,9 @@
 extern "C" bool g_dynamicAspectRatioEnabled;
 void ConfigureMkwDynamicAspect(bool widescreen, uint32_t surfaceWidth, uint32_t surfaceHeight);
 void UpdateMkwDynamicAspectSurface(uint32_t surfaceWidth, uint32_t surfaceHeight);
+// Queues a live 16:9 <-> 4:3 switch; applied on the game thread at the next frame boundary.
+void RequestMkwAspectMode(bool widescreen);
+void ApplyPendingMkwAspectMode(uint32_t surfaceWidth, uint32_t surfaceHeight);
 // Arms the "keep EGG::Frustum's projection scale" flag on every screen that
 // renders to a fixed-size offscreen target. Cheap and idempotent; called from
 // the GX viewport path so it beats bakes that never cross a frame boundary.
@@ -125,6 +128,7 @@ inline void ApplyPendingMkwDynamicAspectSurface() {
     uint32_t surfaceWidth = 0;
     uint32_t surfaceHeight = 0;
     AuroraGetSurfaceSize(&surfaceWidth, &surfaceHeight);
+    ApplyPendingMkwAspectMode(surfaceWidth, surfaceHeight);
     UpdateMkwDynamicAspectSurface(surfaceWidth, surfaceHeight);
 }
 

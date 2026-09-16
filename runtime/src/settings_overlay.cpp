@@ -42,6 +42,8 @@
 #include <aurora/gfx.h>
 
 extern "C" int g_gxFrameCount;
+// dynamic_aspect.cpp
+void RequestMkwAspectMode(bool widescreen);
 
 // Defined in runtime/src/hle/audio/ax_mix.cpp. That header is private to the HLE
 // directory and is not on this target's include path.
@@ -642,8 +644,8 @@ void DrawResolutionSettings() {
                       static_cast<int>(kAspectRatioModes.size()))) {
         g_widescreen = aspectRatioIndex == 0;
         RuntimeConfigFile::SetWidescreen(g_widescreen);
+        RequestMkwAspectMode(g_widescreen);
     }
-    ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.25f, 1.0f), "Restart the app for this to take effect.");
     ImGui::Separator();
 }
 

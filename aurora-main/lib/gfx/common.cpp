@@ -234,6 +234,7 @@ static void recycle_render_passes(std::vector<RenderPass>& passes) noexcept {
 }
 
 struct SealedFrameData {
+  depth_peek::FrameMapping depthMapping;
   std::vector<RenderPass> passes;
 };
 
@@ -1206,7 +1207,7 @@ static void render_pass_impl(const wgpu::RenderPassEncoder& pass, const std::vec
                              int32_t interpolatedFrame);
 
 static void render_impl(std::vector<RenderPass>& renderPasses, wgpu::CommandEncoder& cmd, int32_t interpolatedFrame,
-                        bool finalize) {
+                        bool finalize, const depth_peek::FrameMapping& depthMapping) {
   ZoneScoped;
   // Palette conversions, MSAA resolves and EFB copies depend on sealed frame state, not on the
   // interpolation weight, so encode them on the native render and let replay slots sample them.
@@ -1260,7 +1261,8 @@ static void render_impl(std::vector<RenderPass>& renderPasses, wgpu::CommandEnco
     pass.End();
 
     if (finalize && i == renderPasses.size() - 1) {
-      depth_peek::encode_frame_snapshot(cmd, passInfo.copySourceDepthView, passInfo.targetSize, passInfo.msaaSamples);
+      depth_peek::encode_frame_snapshot(cmd, passInfo.copySourceDepthView, passInfo.targetSize, passInfo.msaaSamples,
+                                        depthMapping);
     }
 
     if (passInfo.resolveTarget) {
@@ -1349,6 +1351,7 @@ static void render_impl(std::vector<RenderPass>& renderPasses, wgpu::CommandEnco
 
 void seal_frame(SealedFrame& out) noexcept {
   ZoneScoped;
+  out.data().depthMapping = depth_peek::capture_frame_mapping();
   // The encode that could still have been holding these has completed: the
   // producer joins the worker's DONE phase before it seals another frame.
   g_retiredBindGroups.clear();
@@ -1361,11 +1364,11 @@ void seal_frame(SealedFrame& out) noexcept {
 }
 
 void render(SealedFrame& frame, wgpu::CommandEncoder& cmd, int32_t interpolatedFrame, bool finalize) {
-  render_impl(frame.data().passes, cmd, interpolatedFrame, finalize);
+  render_impl(frame.data().passes, cmd, interpolatedFrame, finalize, frame.data().depthMapping);
 }
 
 void render(wgpu::CommandEncoder& cmd, int32_t interpolatedFrame, bool finalize) {
-  render_impl(g_renderPasses, cmd, interpolatedFrame, finalize);
+  render_impl(g_renderPasses, cmd, interpolatedFrame, finalize, depth_peek::capture_frame_mapping());
   if (finalize) {
     g_currentRenderPass = UINT32_MAX;
     expire_bind_group_cache();

@@ -730,13 +730,11 @@ inline bool WidescreenEnabled(bool fallback = false) {
     return Get().widescreen.value_or(fallback);
 }
 
-// Deliberately does NOT update Mutable().widescreen for live effect the way the other Set*
-// functions above do - SCGetAspectRatio_HLE (hle/sc.cpp) is a boot-time-only syscall the guest
-// game reads once during its own startup to choose 4:3 vs 16:9 HUD/menu layout math; changing it
-// mid-session wouldn't retroactively fix anything already laid out, so this only persists to
-// Config.toml for the NEXT full app launch to pick up. The settings UI must tell the user a
-// restart is required (see settings_overlay.cpp's aspect ratio control).
+// Updates the live value too: SCGetAspectRatio_HLE (hle/sc.cpp) answers from it, and
+// ApplyPendingMkwAspectMode (dynamic_aspect.cpp) re-runs the game's own aspect setup against it,
+// so a change from the settings sidebar takes effect without restarting.
 inline bool SetWidescreen(bool value) {
+    Mutable().widescreen = value;
     return WriteSetting("video", "widescreen", value ? "true" : "false");
 }
 
