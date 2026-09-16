@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Buffers.Binary;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -1863,6 +1863,7 @@ int RunTranslateModCore(string[] argsTail, string? outputDirectoryOverride)
             overlayBuild,
             continuationPlan,
             retroWfcResolvedExecutableHooks,
+            patchPlan,
             kamekFunctionStarts,
             moduleLinkBase,
             selected.CodeSize,
@@ -2203,6 +2204,7 @@ int EmitModCpp(
     OverlayBuildResult overlayBuild,
     ContinuationPlan continuationPlan,
     IReadOnlyCollection<RetroWfcExecutableHookPlan>? retroWfcExecutableHooks,
+    KamekPatchPlan patchPlan,
     IReadOnlyList<ModFunctionStart> kamekFunctionStarts,
     uint moduleLinkBase,
     uint moduleLinkedCodeSize,
@@ -2244,14 +2246,53 @@ int EmitModCpp(
         .ToHashSet();
     var queuedContinuationAddresses = continuationPlan.Entries.Select(e => e.Address).ToHashSet();
     var discoveredContinuationQueue = new Queue<ContinuationEntry>();
-    var linkedHookLrBasesByTarget = retroWfcExecutableHooks is null
-        ? new Dictionary<uint, uint[]>()
-        : retroWfcExecutableHooks
-            .Where(h => h.TargetAddress.HasValue && RetroWfcHookSetsLinkRegister(h))
-            .GroupBy(h => h.TargetAddress!.Value)
-            .ToDictionary(
-                g => g.Key,
-                g => g.Select(h => h.ContinuationAddress).Distinct().ToArray());
+    var hookLrBases = new List<(uint TargetAddress, uint ContinuationAddress)>();
+    if (retroWfcExecutableHooks is not null)
+    {
+        hookLrBases.AddRange(
+            retroWfcExecutableHooks
+                .Where(h => h.TargetAddress.HasValue && RetroWfcHookSetsLinkRegister(h))
+                .Select(h => (h.TargetAddress!.Value, h.ContinuationAddress)));
+    }
+    var hookLrAnalysis = new Dictionary<uint, LrContinuationAnalysis>();
+    var hookDiscoveryCache = new Dictionary<uint, IReadOnlyList<PpcInstruction>>();
+    IReadOnlyList<PpcInstruction> DiscoverHookBody(uint target)
+    {
+        if (!hookDiscoveryCache.TryGetValue(target, out var instructions))
+        {
+            instructions = modTranslator.Discover(target,
+                new TranslationOptions(KnownFunctionEntryPoints: knownFunctionEntryPoints)).Instructions;
+            hookDiscoveryCache.Add(target, instructions);
+        }
+        return instructions;
+    }
+
+    LrContinuationAnalysis AnalyzeHook(uint target)
+    {
+        if (!hookLrAnalysis.TryGetValue(target, out var analysis))
+        {
+            analysis = LrContinuationAnalysis.Analyze(target, DiscoverHookBody);
+            hookLrAnalysis.Add(target, analysis);
+        }
+        return analysis;
+    }
+
+    foreach (var patch in patchPlan.ExecutablePatches.Where(p => p.CommandId == KamekCommandId.BranchLink && p.Arguments.Count > 0))
+    {
+        var target = KamekAddress.Resolve(patch.Arguments[0], patchPlan.ModuleGuestBase);
+        if (!AnalyzeHook(target).MaySkipReturn)
+        {
+            continue;
+        }
+
+        hookLrBases.Add((target, checked(patch.CommandAddress + 4u)));
+    }
+
+    var linkedHookLrBasesByTarget = hookLrBases
+        .GroupBy(h => h.TargetAddress)
+        .ToDictionary(
+            g => g.Key,
+            g => g.Select(h => h.ContinuationAddress).Distinct().ToArray());
     var lrContinuationCallTargets = linkedHookLrBasesByTarget.Keys.ToHashSet();
     var linkedCallFallthroughLrOverrides = retroWfcExecutableHooks is null
         ? new Dictionary<uint, uint>()
@@ -2346,49 +2387,41 @@ int EmitModCpp(
         }
     }
 
-    void RecordDiscoveredLrRelativeBaseContinuations(
-        FunctionTranslationResult result,
-        IReadOnlyList<uint> lrBases,
-        string reason)
+    void RecordHookContinuations(uint hookTarget, IReadOnlyList<uint> lrBases)
     {
-        if (lrBases.Count == 0)
+        var analysis = AnalyzeHook(hookTarget);
+        foreach (var lrBase in lrBases)
         {
-            return;
-        }
-
-        foreach (var offset in DiscoverLrRelativeIndirectJumpOffsets(result).Distinct())
-        {
-            foreach (var lrBase in lrBases)
+            var targets = analysis.Offsets.Select(offset => unchecked(lrBase + (uint)offset));
+            if (analysis.WasTruncated && baseFunctions.FindContaining(lrBase - 4u) is { } caller)
             {
-                var target = unchecked(lrBase + (uint)offset);
+                // Unknown offsets can resume at any aligned instruction in this caller.
+                targets = targets.Concat(Enumerable.Range(0, checked((int)((caller.End - caller.Start) / 4)))
+                    .Select(index => caller.Start + (uint)index * 4u));
+            }
+            foreach (var target in targets.Distinct())
+            {
                 var section = baseManifest.Sections.FirstOrDefault(s => target >= s.GuestStart && target < s.GuestEnd);
-                if (section is null || !section.Executable)
-                {
+                if (section is null || !section.Executable || (target & 3u) != 0)
                     continue;
-                }
-
                 var containing = baseFunctions.FindContaining(target);
-                if (containing is null || containing.Start == target)
-                {
+                if (containing is null || containing.Start == target || !queuedContinuationAddresses.Add(target))
                     continue;
-                }
-
-                if (!queuedContinuationAddresses.Add(target))
-                {
-                    continue;
-                }
 
                 discoveredContinuationQueue.Enqueue(new ContinuationEntry(
                     target,
                     containing.Start,
                     containing.End,
                     section.Name,
-                    result.EntryPoint,
+                    hookTarget,
                     KamekCommandId.Branch,
-                    $"{reason}; LR-relative jump offset {offset:+#;-#;0}"));
+                    $"LR-relative hook target 0x{hookTarget:X8}"));
             }
         }
     }
+
+    foreach (var (target, lrBases) in linkedHookLrBasesByTarget)
+        RecordHookContinuations(target, lrBases);
 
     ModTranslationWork CreateContinuationWork(ContinuationEntry continuation)
     {
@@ -2555,16 +2588,7 @@ int EmitModCpp(
         }
 
         CommitWave(attempts, (result, work) =>
-        {
-            RecordDiscoveredBaseContinuations(result, $"base continuation discovered from module 0x{work.Address:X8}");
-            if (linkedHookLrBasesByTarget.TryGetValue(work.Address, out var lrBases))
-            {
-                RecordDiscoveredLrRelativeBaseContinuations(
-                    result,
-                    lrBases,
-                    $"base continuation discovered from LR-relative hook target 0x{work.Address:X8}");
-            }
-        });
+            RecordDiscoveredBaseContinuations(result, $"base continuation discovered from module 0x{work.Address:X8}"));
     }
 
     DrainDiscoveredContinuations();
@@ -2720,124 +2744,6 @@ IEnumerable<uint> DirectModuleTargets(FunctionTranslationResult result, uint mod
             }
         }
     }
-}
-
-IEnumerable<int> DiscoverLrRelativeIndirectJumpOffsets(FunctionTranslationResult result)
-{
-    var lrOffsets = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
-    int? ctrOffset = null;
-
-    foreach (var instruction in result.Instructions)
-    {
-        var mnemonic = instruction.Mnemonic.ToLowerInvariant();
-        if (mnemonic == "mflr" && TryGetInstructionReg(instruction, 0, out var lrDest))
-        {
-            lrOffsets[lrDest] = 0;
-            continue;
-        }
-
-        if ((mnemonic == "mr" || mnemonic == "or") &&
-            TryGetInstructionReg(instruction, 0, out var moveDest) &&
-            TryGetInstructionReg(instruction, 1, out var moveSource) &&
-            (mnemonic == "mr" ||
-             (instruction.Operands.Count >= 3 &&
-              instruction.Operands[2] is PpcRegisterOperand moveSource2 &&
-              string.Equals(NormalizeInstructionReg(moveSource2.Name), moveSource, StringComparison.OrdinalIgnoreCase))))
-        {
-            if (lrOffsets.TryGetValue(moveSource, out var sourceOffset))
-            {
-                lrOffsets[moveDest] = sourceOffset;
-            }
-            else
-            {
-                lrOffsets.Remove(moveDest);
-            }
-            continue;
-        }
-
-        if (mnemonic == "addi" &&
-            TryGetInstructionReg(instruction, 0, out var addDest) &&
-            TryGetInstructionReg(instruction, 1, out var addBase) &&
-            TryGetInstructionImm(instruction, 2, out var imm))
-        {
-            if (lrOffsets.TryGetValue(addBase, out var baseOffset))
-            {
-                lrOffsets[addDest] = checked(baseOffset + imm);
-            }
-            else
-            {
-                lrOffsets.Remove(addDest);
-            }
-            continue;
-        }
-
-        if (mnemonic == "mtctr" && TryGetInstructionReg(instruction, 0, out var ctrSource))
-        {
-            ctrOffset = lrOffsets.TryGetValue(ctrSource, out var sourceOffset) ? sourceOffset : null;
-            continue;
-        }
-
-        if (mnemonic == "bctr")
-        {
-            if (ctrOffset.HasValue)
-            {
-                yield return ctrOffset.Value;
-            }
-            ctrOffset = null;
-            continue;
-        }
-
-        if (TryInstructionWritesDest(instruction, out var dest))
-        {
-            lrOffsets.Remove(dest);
-        }
-    }
-
-    static bool TryGetInstructionReg(PpcInstruction instruction, int index, out string register)
-    {
-        if (instruction.Operands.Count > index && instruction.Operands[index] is PpcRegisterOperand operand)
-        {
-            register = NormalizeInstructionReg(operand.Name);
-            return true;
-        }
-
-        register = string.Empty;
-        return false;
-    }
-
-    static bool TryGetInstructionImm(PpcInstruction instruction, int index, out int immediate)
-    {
-        if (instruction.Operands.Count > index && instruction.Operands[index] is PpcImmediateOperand operand)
-        {
-            immediate = operand.Value;
-            return true;
-        }
-
-        immediate = 0;
-        return false;
-    }
-
-    static bool TryInstructionWritesDest(PpcInstruction instruction, out string destination)
-    {
-        destination = string.Empty;
-        if (instruction.Operands.Count == 0 || instruction.Operands[0] is not PpcRegisterOperand operand)
-        {
-            return false;
-        }
-
-        var mnemonic = instruction.Mnemonic.ToLowerInvariant();
-        if (mnemonic.StartsWith("st", StringComparison.Ordinal) ||
-            mnemonic.StartsWith("b", StringComparison.Ordinal) ||
-            mnemonic.StartsWith("cmp", StringComparison.Ordinal))
-        {
-            return false;
-        }
-
-        destination = NormalizeInstructionReg(operand.Name);
-        return true;
-    }
-
-    static string NormalizeInstructionReg(string register) => register.ToLowerInvariant();
 }
 
 static bool RetroWfcHookSetsLinkRegister(RetroWfcExecutableHookPlan hook) =>

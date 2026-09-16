@@ -1,4 +1,6 @@
 using System.Buffers.Binary;
+using System.Linq;
+using Translator.Core.Disassembly;
 using Translator.Core.Mods;
 using Translator.Core.Mods.Mkwii;
 using Translator.Core.Parsing.Kamek;
@@ -126,6 +128,54 @@ public class ContinuationPlannerTests
         Assert.Equal(0x800F1BC8u, entry.ContainingFunctionEnd);
         Assert.Equal(0x800F164Cu, entry.SourceCommandAddress);
         Assert.Contains("Retro WFC executable hook continuation", entry.Reason);
+    }
+
+    [Fact]
+    public void DiscoverLrRelativeIndirectJumpOffsets_DiscoversSkipReturnOffset()
+    {
+        var instructions = new[]
+        {
+            PpcDecoder.Decode(0x8180D8E8, 0x7FE802A6u), // mflr r31
+            PpcDecoder.Decode(0x8180D8EC, 0x3BFF0014u), // addi r31, r31, 20
+            PpcDecoder.Decode(0x8180D8F0, 0x7FE803A6u), // mtlr r31
+            PpcDecoder.Decode(0x8180D8F4, 0x4E800020u), // blr
+        };
+
+        var offsets = ContinuationPlanner.DiscoverLrRelativeIndirectJumpOffsets(instructions).ToArray();
+        var offset = Assert.Single(offsets);
+        Assert.Equal(20, offset);
+    }
+
+    [Fact]
+    public void DiscoverLrRelativeIndirectJumpOffsets_IgnoresStandardLrRestore()
+    {
+        var instructions = new[]
+        {
+            PpcDecoder.Decode(0x8180D8E8, 0x7FE802A6u), // mflr r31
+            PpcDecoder.Decode(0x8180D8EC, 0x93E10008u), // stw r31, 8(r1)
+            PpcDecoder.Decode(0x8180D8F0, 0x83E10008u), // lwz r31, 8(r1)
+            PpcDecoder.Decode(0x8180D8F4, 0x7FE803A6u), // mtlr r31
+            PpcDecoder.Decode(0x8180D8F8, 0x4E800020u), // blr
+        };
+
+        var offsets = ContinuationPlanner.DiscoverLrRelativeIndirectJumpOffsets(instructions);
+        Assert.Empty(offsets);
+    }
+
+    [Fact]
+    public void DiscoverLrRelativeIndirectJumpOffsets_SupportsBctrOffset()
+    {
+        var instructions = new[]
+        {
+            PpcDecoder.Decode(0x8180D8E8, 0x7FE802A6u), // mflr r31
+            PpcDecoder.Decode(0x8180D8EC, 0x397F0008u), // addi r11, r31, 8
+            PpcDecoder.Decode(0x8180D8F0, 0x7D6903A6u), // mtctr r11
+            PpcDecoder.Decode(0x8180D8F4, 0x4E800420u), // bctr
+        };
+
+        var offsets = ContinuationPlanner.DiscoverLrRelativeIndirectJumpOffsets(instructions).ToArray();
+        var offset = Assert.Single(offsets);
+        Assert.Equal(8, offset);
     }
 
     private static KamekChunk EmptyChunk() =>
