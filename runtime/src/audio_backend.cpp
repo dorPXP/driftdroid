@@ -7,6 +7,7 @@
 #include <cstdlib>
 #include <iostream>
 
+#include <SDL3/SDL_hints.h>
 #include <SDL3/SDL_init.h>
 
 AudioBackend& AudioBackend::Instance() {
@@ -51,6 +52,11 @@ bool AudioBackend::EnsureInitializedLocked(uint32_t sampleRate, uint32_t channel
         return false;
     }
 
+#if defined(__ANDROID__)
+    // Tags our AAudio stream USAGE_GAME so ExternalMediaDetector.kt can tell other apps' music
+    // (USAGE_MEDIA) apart from the game's own output.
+    SDL_SetHint(SDL_HINT_AUDIO_DEVICE_STREAM_ROLE, "Game");
+#endif
     SDL_AudioSpec spec{};
     spec.format = SDL_AUDIO_S16LE;
     spec.channels = static_cast<int>(channels);

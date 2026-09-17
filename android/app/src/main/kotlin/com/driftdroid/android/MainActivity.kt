@@ -7,14 +7,9 @@ import android.content.Context
 import android.content.Intent
 import android.content.SharedPreferences
 import android.graphics.Color
-import android.media.AudioAttributes
-import android.media.AudioFocusRequest
-import android.media.AudioManager
 import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.Bundle
-import android.os.Handler
-import android.os.Looper
 import android.os.Process
 import android.view.ViewGroup
 import android.widget.Button
@@ -62,7 +57,8 @@ class MainActivity : SDLActivity() {
     private var multicastLock: WifiManager.MulticastLock? = null
     private var resolvedProduct: String = PRODUCT_BASE
     private var motionSteering: MotionSteering? = null
-    private var audioFocusRequest: AudioFocusRequest? = null
+    // Never requests audio focus: any focus request pauses the player's own music app.
+    private val externalMediaDetector by lazy { ExternalMediaDetector(this) { nativeReportExternalMediaPlaying(it) } }
 
     override fun getLibraries(): Array<String> {
         // Original loads its OWN standalone libWiiCompiled.so, not the combined library - found
@@ -270,146 +266,18 @@ class MainActivity : SDLActivity() {
             touchControls?.setMotionSteeringActive(true)
             motionSteering?.start()
         }
-        requestAudioFocus()
-    }
-
-    /**
-     * Android's real equivalent of the PC version's "mute game music while external media is
-     * playing" (music_attenuation.cpp - Windows-only there via WinRT media sessions). Requesting
-     * normal AUDIOFOCUS_GAIN means a well-behaved music app (Spotify, YouTube Music, etc.)
-     * requesting its own focus when the player starts playback triggers our loss callback, and we
-     * get AUDIOFOCUS_GAIN back when they stop - the standard Android mechanism for this, not a
-     * custom polling loop. Only reports up to native; native decides whether to actually attenuate
-     * (gated by the existing "Mute game music while external media is playing" setting).
-     */
-    private var audioFocusListener: AudioManager.OnAudioFocusChangeListener? = null
-    private var duckedForExternalMedia = false
-
-    /**
-     * A plain (non-transient) AUDIOFOCUS_LOSS - what a real music app (Spotify, YouTube Music,
-     * etc.) triggers, since those request permanent focus for a whole listening session, not a
-     * short transient one - is NOT guaranteed to ever hand focus back to us automatically. That
-     * guarantee only applies to AUDIOFOCUS_LOSS_TRANSIENT/_CAN_DUCK, where the framework itself
-     * re-delivers AUDIOFOCUS_GAIN once the transient interruption ends.
-     *
-     * A first attempt at working around that (periodically re-requesting AUDIOFOCUS_GAIN on a
-     * timer while ducked) was wrong and actively harmful: requesting non-transient GAIN is an
-     * EXCLUSIVE request - succeeding at it forcibly steals focus away from whoever currently holds
-     * it. Confirmed directly ("when i turn on my music it mutes... the check you added mutes the
-     * external music") - the background timer was repeatedly stealing focus back from the
-     * player's own music app every few seconds while they were actively listening to it, muting
-     * THEM instead of helping.
-     *
-     * Fix: only ever attempt a reclaim once, at a natural, low-frequency, user-driven point - this
-     * app returning to the foreground (onResume) - never on a running background timer. This
-     * doesn't guarantee instant recovery the moment the other app stops, but it never fights
-     * anyone for focus while they're actively using it either, which matters more.
-     */
-    private fun requestAudioFocus() {
-        val audioManager = getSystemService(Context.AUDIO_SERVICE) as? AudioManager ?: return
-
-        val listener =
-            AudioManager.OnAudioFocusChangeListener { focusChange ->
-                when (focusChange) {
-                    AudioManager.AUDIOFOCUS_LOSS,
-                    AudioManager.AUDIOFOCUS_LOSS_TRANSIENT,
-                    AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK,
-                    -> {
-                        duckedForExternalMedia = true
-                        nativeReportExternalMediaPlaying(true)
-                    }
-                    AudioManager.AUDIOFOCUS_GAIN -> {
-                        duckedForExternalMedia = false
-                        nativeReportExternalMediaPlaying(false)
-                    }
-                }
-            }
-        audioFocusListener = listener
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val attributes =
-                AudioAttributes.Builder()
-                    .setUsage(AudioAttributes.USAGE_GAME)
-                    .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
-                    .build()
-            val request =
-                AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
-                    .setAudioAttributes(attributes)
-                    .setOnAudioFocusChangeListener(listener)
-                    .build()
-            audioFocusRequest = request
-            audioManager.requestAudioFocus(request)
-        } else {
-            @Suppress("DEPRECATION")
-            audioManager.requestAudioFocus(listener, AudioManager.STREAM_MUSIC, AudioManager.AUDIOFOCUS_GAIN)
-        }
-    }
-
-    /**
-     * A single reclaim attempt on onResume alone turned out not to be enough: it only helps if the
-     * player actually leaves and comes back to this app. Staying in-app the whole time while
-     * toggling external music on/off - a completely normal thing to do - never generates a resume
-     * event at all, so ducked audio just stayed muted indefinitely. Confirmed directly ("music
-     * ducking is still not working well, its not unmuting").
-     *
-     * There is no way to check "is something else playing" on this platform without either (a)
-     * briefly re-requesting focus - which can interrupt the other app if it's still going, since a
-     * successful non-transient AUDIOFOCUS_GAIN request is exclusive - or (b) a passive check like
-     * isMusicActive(), which this game's own continuously-running audio output would contaminate
-     * regardless of whether anything external is playing. Given that, this polls for reclaim
-     * periodically (not just once), but only while the app is actually resumed/foreground (never
-     * while backgrounded) and at a much slower interval than the original, fully-broken attempt
-     * (8s here vs. the original 3s) to keep how often it can possibly interrupt another app as low
-     * as practical while still being reasonably responsive.
-     */
-    private var audioFocusPollHandler: Handler? = null
-    private var audioFocusPollRunnable: Runnable? = null
-
-    private fun tryReclaimAudioFocusIfDucked() {
-        if (!duckedForExternalMedia) return
-        val audioManager = getSystemService(Context.AUDIO_SERVICE) as? AudioManager ?: return
-        val result =
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                audioFocusRequest?.let { audioManager.requestAudioFocus(it) } ?: AudioManager.AUDIOFOCUS_REQUEST_FAILED
-            } else {
-                val listener = audioFocusListener ?: return
-                audioManager.requestAudioFocus(listener, AudioManager.STREAM_MUSIC, AudioManager.AUDIOFOCUS_GAIN)
-            }
-        if (result == AudioManager.AUDIOFOCUS_REQUEST_GRANTED) {
-            duckedForExternalMedia = false
-            nativeReportExternalMediaPlaying(false)
-        }
-    }
-
-    private fun startAudioFocusPolling() {
-        if (audioFocusPollHandler == null) audioFocusPollHandler = Handler(Looper.getMainLooper())
-        if (audioFocusPollRunnable != null) return
-        val runnable =
-            object : Runnable {
-                override fun run() {
-                    tryReclaimAudioFocusIfDucked()
-                    audioFocusPollHandler?.postDelayed(this, AUDIO_FOCUS_POLL_INTERVAL_MS)
-                }
-            }
-        audioFocusPollRunnable = runnable
-        audioFocusPollHandler?.postDelayed(runnable, AUDIO_FOCUS_POLL_INTERVAL_MS)
-    }
-
-    private fun stopAudioFocusPolling() {
-        audioFocusPollRunnable?.let { audioFocusPollHandler?.removeCallbacks(it) }
-        audioFocusPollRunnable = null
     }
 
     override fun onPause() {
         super.onPause()
         if (motionSteering?.enabled == true) motionSteering?.stop()
-        stopAudioFocusPolling()
+        externalMediaDetector.stop()
     }
 
     override fun onResume() {
         super.onResume()
         if (motionSteering?.enabled == true) motionSteering?.start()
-        tryReclaimAudioFocusIfDucked()
-        startAudioFocusPolling()
+        externalMediaDetector.start()
     }
 
     /** Called from native (settings_overlay.cpp's "Motion Steering" sidebar button, via
@@ -637,8 +505,6 @@ class MainActivity : SDLActivity() {
         // whatever exact spot ends up working best on this specific device.
         private const val GEAR_DEFAULT_X_FRACTION = 0.55f
         private const val GEAR_DEFAULT_Y_FRACTION = 0.08f
-
-        private const val AUDIO_FOCUS_POLL_INTERVAL_MS = 8000L
     }
 
     // Desktop opens the (already fully built) in-game settings overlay with F10 - there is no
