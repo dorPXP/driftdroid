@@ -385,6 +385,23 @@ bool AdvanceDueRetraces(CpuContext* ctx, int maxToProcess, bool serviceAurora)
 {
     bool advancedAny = false;
 
+    if (g_guestPausedForBackground.load(std::memory_order_acquire)) {
+        {
+            // Hold the clock at "now" so resuming neither replays missed retraces nor jumps the
+            // game forward.
+            std::lock_guard<std::mutex> lock(g_viMutex);
+            if (g_vi.initialized) {
+                g_vi.lastRetrace = Clock::now();
+            }
+        }
+        if (serviceAurora) {
+            // Suspending retraces also suspends the usual event pump inside AdvanceRetrace, and
+            // the resume event only arrives through it.
+            UpdateAuroraAndProcessEvents();
+        }
+        return false;
+    }
+
     for (int catchUpCount = 0; catchUpCount < maxToProcess; ++catchUpCount) {
         Clock::time_point target;
         auto now = Clock::now();
@@ -486,6 +503,13 @@ void VI_HLE_ProcessRetracesDeferred(int maxToProcess) {
 }
 
 void VI_HLE_WaitForNextRetracePoll() {
+    if (g_guestPausedForBackground.load(std::memory_order_acquire)) {
+        // Backgrounded: nothing to pace against, so idle in short slices while still pumping
+        // window events, which is what eventually clears this.
+        UpdateAuroraAndProcessEvents();
+        std::this_thread::sleep_for(std::chrono::milliseconds(16));
+        return;
+    }
     Clock::time_point retraceDeadline;
     {
         std::lock_guard<std::mutex> lock(g_viMutex);

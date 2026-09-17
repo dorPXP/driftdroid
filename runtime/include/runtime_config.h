@@ -42,6 +42,9 @@ struct RuntimeUserConfig {
     std::optional<bool> disableCopyFilter;
     std::optional<bool> constantMatrixIndexing;
     std::optional<bool> threadedGx;
+    std::optional<bool> thermalAutoQuality;
+    std::optional<bool> showShaderCompilation;
+    std::optional<bool> hideSettingsButton;
     std::optional<bool> textureReplacements;
     std::optional<bool> textureDumps;
     std::optional<bool> showFps;
@@ -153,7 +156,11 @@ inline bool IsSupportedResolutionMultiplier(float value) {
 // Must stay in step with the backend table in main.cpp, which is what actually
 // maps these to AuroraBackend.
 inline bool IsSupportedGraphicsApi(std::string_view value) {
+#if defined(__ANDROID__)
+    static constexpr std::array<std::string_view, 3> values{"auto", "vulkan", "opengles"};
+#else
     static constexpr std::array<std::string_view, 3> values{"auto", "d3d12", "vulkan"};
+#endif
     return std::find(values.begin(), values.end(), value) != values.end();
 }
 
@@ -446,6 +453,9 @@ inline RuntimeUserConfig ParseConfigDocument(const toml::value& document) {
     config.disableCopyFilter = FindConfigValue<bool>(document, "video", "disable_copy_filter");
     config.constantMatrixIndexing = FindConfigValue<bool>(document, "video", "constant_matrix_indexing");
     config.threadedGx = FindConfigValue<bool>(document, "video", "threaded_gx");
+    config.thermalAutoQuality = FindConfigValue<bool>(document, "video", "thermal_auto_quality");
+    config.showShaderCompilation = FindConfigValue<bool>(document, "video", "show_shader_compilation");
+    config.hideSettingsButton = FindConfigValue<bool>(document, "video", "hide_settings_button");
     config.showFps = FindConfigValue<bool>(document, "video", "show_fps");
     config.textureReplacements = FindConfigValue<bool>(document, "video", "texture_replacements");
     config.textureDumps = FindConfigValue<bool>(document, "video", "texture_dumps");
@@ -650,6 +660,11 @@ inline bool SetSkipUnreadyPipelines(bool value) {
     return WriteSetting("video", "skip_unready_pipelines", value ? "true" : "false");
 }
 
+inline bool SetThermalAutoQuality(bool value) {
+    Mutable().thermalAutoQuality = value;
+    return WriteSetting("video", "thermal_auto_quality", value ? "true" : "false");
+}
+
 inline bool SetThreadedGx(bool value) {
     Mutable().threadedGx = value;
     return WriteSetting("video", "threaded_gx", value ? "true" : "false");
@@ -663,6 +678,16 @@ inline bool SetConstantMatrixIndexing(bool value) {
 inline bool SetDisableCopyFilter(bool value) {
     Mutable().disableCopyFilter = value;
     return WriteSetting("video", "disable_copy_filter", value ? "true" : "false");
+}
+
+inline bool SetHideSettingsButton(bool value) {
+    Mutable().hideSettingsButton = value;
+    return WriteSetting("video", "hide_settings_button", value ? "true" : "false");
+}
+
+inline bool SetShowShaderCompilation(bool value) {
+    Mutable().showShaderCompilation = value;
+    return WriteSetting("video", "show_shader_compilation", value ? "true" : "false");
 }
 
 inline bool SetShowFps(bool value) {
@@ -814,6 +839,10 @@ inline bool SkipUnreadyPipelines(bool fallback = true) {
     return Get().skipUnreadyPipelines.value_or(fallback);
 }
 
+inline bool ThermalAutoQuality(bool fallback = true) {
+    return Get().thermalAutoQuality.value_or(fallback);
+}
+
 inline bool ThreadedGx(bool fallback = false) {
     return Get().threadedGx.value_or(fallback);
 }
@@ -824,6 +853,14 @@ inline bool ConstantMatrixIndexing(bool fallback = false) {
 
 inline bool DisableCopyFilter(bool fallback = true) {
     return Get().disableCopyFilter.value_or(fallback);
+}
+
+inline bool HideSettingsButton(bool fallback = false) {
+    return Get().hideSettingsButton.value_or(fallback);
+}
+
+inline bool ShowShaderCompilation(bool fallback = true) {
+    return Get().showShaderCompilation.value_or(fallback);
 }
 
 inline bool ShowFps(bool fallback = true) {

@@ -27,6 +27,12 @@ void ApplyPendingMkwAspectMode(uint32_t surfaceWidth, uint32_t surfaceHeight);
 void AssertMkwOffscreenScreenBypass();
 inline std::atomic_bool g_mkwDynamicAspectSurfacePending{false};
 
+// Set while the app is in the background (screen off, app switched away). Guest time follows VI
+// retraces, so the retrace service stops delivering them and the game stands still instead of
+// playing on without the player - confirmed needed on device: a race carried on through a screen
+// sleep and the player came back in last place.
+inline std::atomic_bool g_guestPausedForBackground{false};
+
 namespace WindowPlacementPersistence {
 inline bool sizeDirty = false;
 inline bool positionDirty = false;
@@ -98,6 +104,12 @@ inline void ProcessAuroraEvents(const AuroraEvent* events) {
             break;
         case AURORA_DISPLAY_SCALE_CHANGED:
             surfaceChanged = true;
+            break;
+        case AURORA_PAUSED:
+            g_guestPausedForBackground.store(true, std::memory_order_release);
+            break;
+        case AURORA_UNPAUSED:
+            g_guestPausedForBackground.store(false, std::memory_order_release);
             break;
         case AURORA_EXIT:
             ExitForAuroraWindowClose();

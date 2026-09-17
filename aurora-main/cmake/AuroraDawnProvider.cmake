@@ -28,6 +28,26 @@ function(_aurora_dawn_set_platform_backends)
     set(DAWN_ENABLE_DESKTOP_GL OFF CACHE INTERNAL "")
     set(DAWN_ENABLE_OPENGLES OFF CACHE INTERNAL "")
     set(DAWN_ENABLE_NULL ON CACHE INTERNAL "")
+  elseif (ANDROID)
+    # No case existed for Android before this, so it fell into the "Linux / other" branch below
+    # and inherited DAWN_ENABLE_NULL ON - a desktop CI/testing default that has no business in an
+    # end-user mobile build. Confirmed as the real root cause of a device crash (GitHub issue #3,
+    # PowerVR B-Series GPU): when that device's Vulkan adapter request failed (a driver problem
+    # this codebase can't fix), Aurora's backend fallback loop (aurora-main/lib/aurora.cpp,
+    # PreferredBackendOrder) happily tried Null next since it was compiled in, "succeeded" at
+    # creating a no-op CPU backend, and only crashed later with a confusing low-level WebGPU
+    # surface-configuration error instead of ever surfacing "Vulkan isn't available" clearly.
+    # With DAWN_ENABLE_NULL OFF here, Null is never in PreferredBackendOrder on Android at all, so
+    # a real Vulkan failure fails cleanly instead of masquerading as a worse failure downstream.
+    set(DAWN_ENABLE_D3D12 OFF CACHE INTERNAL "")
+    set(DAWN_ENABLE_D3D11 OFF CACHE INTERNAL "")
+    set(DAWN_ENABLE_VULKAN ON CACHE INTERNAL "")
+    set(DAWN_ENABLE_METAL OFF CACHE INTERNAL "")
+    set(DAWN_ENABLE_DESKTOP_GL OFF CACHE INTERNAL "")
+    # The real fallback for the devices in issue #3: a phone whose Vulkan driver is missing or
+    # broken can still run GLES. The prebuilt Dawn for Android already contains this backend.
+    set(DAWN_ENABLE_OPENGLES ON CACHE INTERNAL "")
+    set(DAWN_ENABLE_NULL OFF CACHE INTERNAL "")
   else () # Linux / other
     set(DAWN_ENABLE_D3D12 OFF CACHE INTERNAL "")
     set(DAWN_ENABLE_D3D11 OFF CACHE INTERNAL "")

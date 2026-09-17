@@ -630,6 +630,11 @@ constexpr std::array PreferredBackendOrder{
 // #ifdef DAWN_ENABLE_BACKEND_OPENGLES
 //     BACKEND_OPENGLES,
 // #endif
+#if defined(__ANDROID__) && defined(DAWN_ENABLE_BACKEND_OPENGLES)
+    // Only reached when the Vulkan adapter request fails: phones whose Vulkan driver is missing or
+    // broken (GitHub issue #3 and friends) would otherwise have nothing left to try.
+    BACKEND_OPENGLES,
+#endif
 #ifdef DAWN_ENABLE_BACKEND_NULL
     BACKEND_NULL,
 #endif
@@ -1950,6 +1955,7 @@ const AuroraBackend* aurora_get_available_backends(size_t* count) {
 void aurora_set_log_level(AuroraLogLevel level) { aurora::g_config.logLevel = level; }
 void aurora_set_pause_on_focus_lost(bool value) { aurora::g_config.pauseOnFocusLost = value; }
 void aurora_set_disable_copy_filter(bool disabled) { aurora::g_config.disableCopyFilter = disabled; }
+void aurora_set_thermal_render_factor(float factor) { aurora::window::set_thermal_render_factor(factor); }
 bool aurora_get_disable_copy_filter() { return aurora::g_config.disableCopyFilter; }
 void aurora_set_background_input(bool value) {
   aurora::g_config.allowJoystickBackgroundEvents = value;

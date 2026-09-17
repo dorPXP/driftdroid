@@ -1467,6 +1467,17 @@ int RuntimeMain(int argc, char** argv) {
             const char* configName;
             AuroraBackend backend;
         };
+#if defined(__SWITCH__)
+        static constexpr std::array<GraphicsBackendEntry, 3> kGraphicsBackends{{
+            {"auto", BACKEND_AUTO}, {"opengles", BACKEND_OPENGLES}, {"deko3d", BACKEND_DEKO3D},
+        }};
+#elif defined(__ANDROID__)
+        // "auto" tries Vulkan first and falls back to OpenGL ES; "opengles" forces the fallback
+        // for a device whose Vulkan driver reports support but misbehaves.
+        static constexpr std::array<GraphicsBackendEntry, 3> kGraphicsBackends{{
+            {"auto", BACKEND_AUTO}, {"vulkan", BACKEND_VULKAN}, {"opengles", BACKEND_OPENGLES},
+        }};
+#else
         static constexpr std::array<GraphicsBackendEntry, 3> kGraphicsBackends{{
             {"auto", BACKEND_AUTO}, {"d3d12", BACKEND_D3D12}, {"vulkan", BACKEND_VULKAN},
         }};
@@ -1489,6 +1500,28 @@ int RuntimeMain(int argc, char** argv) {
         const AuroraBackend requestedBackend = auroraConfig.desiredBackend;
 
         const AuroraInfo auroraInfo = aurora_initialize(0, nullptr, &auroraConfig);
+#if defined(ANDROID)
+        // Defense-in-depth for a real device crash (GitHub issue #3, PowerVR B-Series GPU): Null
+        // is Dawn's no-op CPU testing backend, never meant to actually render anything - Android
+        // no longer compiles it in at all (AuroraDawnProvider.cmake's DAWN_ENABLE_NULL is now OFF
+        // there), so landing here at runtime would mean something upstream of this check still
+        // let it through. Failing clearly HERE, before any real rendering is attempted, beats
+        // what used to happen: proceeding into gfx::initialize() and crashing later with a
+        // confusing low-level "Usages requested... not supported by the adapter" WebGPU error
+        // that never told the user their actual problem (their device has no working Vulkan
+        // driver) at all.
+        if (auroraInfo.backend == BACKEND_NULL) {
+            ShowRuntimeFatalPopup(
+                "graphics initialization failed",
+                "This device's graphics drivers could not start either renderer.\n\n"
+                "Vulkan was unavailable, and the OpenGL ES fallback did not start either. You can "
+                "pick a renderer by hand under Graphics on the app's start screen, but this is a "
+                "device/driver limitation rather than something the app can work around.");
+            MarkFatalErrorReported();
+            SetRuntimeExitCode(EXIT_FAILURE);
+            std::exit(EXIT_FAILURE);
+        }
+#endif
         if (requestedBackend != BACKEND_AUTO && auroraInfo.backend != requestedBackend) {
             RT_LOG(RT_TAG_RUNTIME) << "graphics_api=\"" << backend
                       << "\" is not available on this system; aurora fell back to \""

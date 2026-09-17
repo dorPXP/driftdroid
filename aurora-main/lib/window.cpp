@@ -45,6 +45,7 @@ Module Log("aurora::window");
 SDL_Window* g_window;
 SDL_Renderer* g_renderer;
 float g_frameBufferScale = 0.f;
+float g_thermalRenderFactor = 1.f;
 bool g_frameBufferAspectFit = true;
 bool g_presentSurfaceFill = false;
 int g_presentAspectWidth = 0;
@@ -421,7 +422,9 @@ bool create_window(AuroraBackend backend) {
     flags |= SDL_WINDOW_METAL;
     break;
 #endif
-#ifdef DAWN_ENABLE_BACKEND_OPENGL
+#if defined(DAWN_ENABLE_BACKEND_OPENGL) && !defined(__ANDROID__)
+  // Not on Android: Dawn creates its own EGL display and context against the ANativeWindow, and
+  // SDL_WINDOW_OPENGL would have SDL make a competing one.
   case BACKEND_OPENGL:
   case BACKEND_OPENGLES:
     flags |= SDL_WINDOW_OPENGL;
@@ -578,6 +581,13 @@ AuroraWindowSize get_window_size() {
                                      static_cast<float>(fb_w) / static_cast<float>(fb_h));
     fb_w = scaledW;
     fb_h = scaledH;
+  }
+
+  if (g_thermalRenderFactor < 1.f) {
+    // Applied last so it scales whatever the user's resolution setting produced, including "Auto".
+    // gpu.cpp clamps the result to the game's own framebuffer size, so this cannot go below it.
+    fb_w = std::max(1, static_cast<int>(std::lround(static_cast<float>(fb_w) * g_thermalRenderFactor)));
+    fb_h = std::max(1, static_cast<int>(std::lround(static_cast<float>(fb_h) * g_thermalRenderFactor)));
   }
 
   const float scale = SDL_GetWindowDisplayScale(g_window);
@@ -783,6 +793,15 @@ void set_frame_buffer_scale(float scale) {
     return;
   }
   g_frameBufferScale = scale;
+  request_frame_buffer_resize();
+}
+
+void set_thermal_render_factor(float factor) {
+  factor = std::clamp(factor, 0.25f, 1.f);
+  if (g_thermalRenderFactor == factor) {
+    return;
+  }
+  g_thermalRenderFactor = factor;
   request_frame_buffer_resize();
 }
 
