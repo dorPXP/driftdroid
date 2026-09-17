@@ -11,6 +11,7 @@ import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.Bundle
 import android.os.Process
+import android.view.View
 import android.view.ViewGroup
 import android.widget.Button
 import android.widget.LinearLayout
@@ -48,9 +49,27 @@ class MainActivity : SDLActivity() {
     private external fun nativeSetDetectedWidescreen(widescreen: Boolean)
     private external fun nativeSetActiveProduct(retroRewind: Boolean)
     private external fun nativeToggleSettingsOverlay()
+
+    /** The gear can be hidden (GitHub issue #5); Back then opens the settings sidebar instead. */
+    private var settingsButton: Button? = null
+    private var nativeSettingsButtonHidden = false
+
+    /** Called from native (settings_overlay.cpp's "Hide the settings button" checkbox). */
+    fun onNativeSetSettingsButtonHidden(hidden: Boolean) {
+        nativeSettingsButtonHidden = hidden
+        runOnUiThread { settingsButton?.visibility = if (hidden) View.GONE else View.VISIBLE }
+    }
+
+    @Deprecated("Back handling for the settings sidebar; the modern callback needs API 33.")
+    override fun onBackPressed() {
+        // With the gear hidden there is no other way in, and it is a natural "menu" gesture even
+        // when it is visible.
+        nativeToggleSettingsOverlay()
+    }
     private external fun nativeSetTouchControlsVisibleCache(visible: Boolean)
     private external fun nativeSetDoubleTapAutoHoldCache(enabled: Boolean)
     private external fun nativeReportExternalMediaPlaying(playing: Boolean)
+    private external fun nativeReportThermalHeadroom(headroom: Float)
 
     private var touchControls: TouchControlsOverlay? = null
     private var romImportOverlay: RomImportOverlay? = null
@@ -59,6 +78,7 @@ class MainActivity : SDLActivity() {
     private var motionSteering: MotionSteering? = null
     // Never requests audio focus: any focus request pauses the player's own music app.
     private val externalMediaDetector by lazy { ExternalMediaDetector(this) { nativeReportExternalMediaPlaying(it) } }
+    private val thermalMonitor by lazy { ThermalMonitor(this) { nativeReportThermalHeadroom(it) } }
 
     override fun getLibraries(): Array<String> {
         // Original loads its OWN standalone libWiiCompiled.so, not the combined library - found
@@ -160,7 +180,7 @@ class MainActivity : SDLActivity() {
         // frame interpolation" setting above 60 FPS has nothing to actually present onto and the
         // display stays locked at 60 regardless (confirmed on-device: selecting 90 FPS there had
         // no visible effect until this was added).
-        requestHighestRefreshRate()
+        requestRefreshRateFor(configuredTargetFps())
 
         // The settings gear and touch controls are gameplay UI - showing them over the ROM
         // picker would let a player fiddle with in-game settings before there's a game to apply
@@ -184,26 +204,52 @@ class MainActivity : SDLActivity() {
         }
     }
 
-    /** Opts this window into the display's highest available refresh rate at the current
-     * resolution - Android does not do this by default, even on a 90/120Hz-capable screen. */
-    private fun requestHighestRefreshRate() {
+    /** Picks the display mode that matches what the game actually produces - Android does not do
+     * this by default, even on a 90/120Hz-capable screen. Deliberately not the fastest mode: the
+     * game renders 60fps unless frame interpolation is on, and holding a 120Hz panel at 120Hz
+     * keeps the whole display pipeline running twice as fast for frames that are then discarded,
+     * which is heat for nothing on a device that throttles. */
+    private fun requestRefreshRateFor(targetFps: Int) {
         val display =
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) display else windowManager.defaultDisplay
         val currentMode = display?.mode ?: return
-        val fastestMode =
-            display.supportedModes
-                .filter {
-                    it.physicalWidth == currentMode.physicalWidth &&
-                        it.physicalHeight == currentMode.physicalHeight
-                }
-                .maxByOrNull { it.refreshRate }
+        val sameSizeModes =
+            display.supportedModes.filter {
+                it.physicalWidth == currentMode.physicalWidth &&
+                    it.physicalHeight == currentMode.physicalHeight
+            }
+        if (sameSizeModes.isEmpty()) {
+            return
+        }
+        // The slowest mode that still covers the target, so 60fps content gets a 60Hz panel;
+        // fall back to the fastest when nothing reaches the target (e.g. 120fps on a 60Hz screen).
+        val mode =
+            sameSizeModes.filter { it.refreshRate >= targetFps - REFRESH_RATE_EPSILON }
+                .minByOrNull { it.refreshRate }
+                ?: sameSizeModes.maxByOrNull { it.refreshRate }
                 ?: return
-        if (fastestMode.refreshRate <= currentMode.refreshRate) {
+        if (mode.modeId == currentMode.modeId) {
             return
         }
         val attributes = window.attributes
-        attributes.preferredDisplayModeId = fastestMode.modeId
+        attributes.preferredDisplayModeId = mode.modeId
         window.attributes = attributes
+    }
+
+    /** Reads video.frame_interpolation_fps straight out of Config.toml, which the runtime owns.
+     * 0 (the default) means "no interpolation", i.e. the game's own 60fps. */
+    private fun configuredTargetFps(): Int {
+        val config = File(File(filesDir, "WiiCompiled"), "Config.toml")
+        val configured =
+            runCatching {
+                config.takeIf { it.isFile }
+                    ?.readLines()
+                    ?.firstOrNull { it.trimStart().startsWith("frame_interpolation_fps") }
+                    ?.substringAfter('=')
+                    ?.trim()
+                    ?.toIntOrNull()
+            }.getOrNull() ?: 0
+        return if (configured > 0) configured else 60
     }
 
     /** Kills this process and relaunches straight back into MainActivity with the new product -
@@ -254,6 +300,8 @@ class MainActivity : SDLActivity() {
 
     private fun showGameUi() {
         val gearButton = addSettingsButton()
+        settingsButton = gearButton
+        gearButton.visibility = if (nativeSettingsButtonHidden) View.GONE else View.VISIBLE
         touchControls = TouchControlsOverlay.attach(this, mLayout)
         nativeSetTouchControlsVisibleCache(touchControls?.isUserVisible() ?: true)
         nativeSetDoubleTapAutoHoldCache(touchControls?.isDoubleTapAutoHoldEnabled() ?: false)
@@ -272,12 +320,14 @@ class MainActivity : SDLActivity() {
         super.onPause()
         if (motionSteering?.enabled == true) motionSteering?.stop()
         externalMediaDetector.stop()
+        thermalMonitor.stop()
     }
 
     override fun onResume() {
         super.onResume()
         if (motionSteering?.enabled == true) motionSteering?.start()
         externalMediaDetector.start()
+        thermalMonitor.start()
     }
 
     /** Called from native (settings_overlay.cpp's "Motion Steering" sidebar button, via
@@ -505,6 +555,9 @@ class MainActivity : SDLActivity() {
         // whatever exact spot ends up working best on this specific device.
         private const val GEAR_DEFAULT_X_FRACTION = 0.55f
         private const val GEAR_DEFAULT_Y_FRACTION = 0.08f
+
+        // Reported refresh rates are floats like 59.94 or 120.00021.
+        private const val REFRESH_RATE_EPSILON = 1.0f
     }
 
     // Desktop opens the (already fully built) in-game settings overlay with F10 - there is no

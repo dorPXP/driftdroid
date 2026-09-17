@@ -37,6 +37,11 @@
 #include <windows.h>
 #endif
 
+#if defined(__ANDROID__) && defined(DAWN_ENABLE_BACKEND_OPENGLES)
+#include <EGL/egl.h>
+#include <dawn/native/OpenGLBackend.h>
+#endif
+
 namespace aurora::gx {
 void clear_display_copy_cache() noexcept;
 } // namespace aurora::gx
@@ -567,11 +572,27 @@ bool initialize(AuroraBackend auroraBackend) {
     }
   }
   {
+#if defined(__ANDROID__) && defined(DAWN_ENABLE_BACKEND_OPENGLES)
+    // Dawn's GL backend only offers Compatibility-level adapters, and wants the EGL entry point
+    // handed to it rather than dlopening libEGL itself.
+    dawn::native::opengl::RequestAdapterOptionsGetGLProc glProcOptions;
+    glProcOptions.getProc = reinterpret_cast<dawn::native::opengl::EGLGetProcProc>(&eglGetProcAddress);
+    glProcOptions.display = nullptr;  // Dawn opens EGL_DEFAULT_DISPLAY itself
+    const bool glBackend = backend == wgpu::BackendType::OpenGLES;
+    const wgpu::RequestAdapterOptions options{
+        .nextInChain = glBackend ? &glProcOptions : nullptr,
+        .featureLevel = glBackend ? wgpu::FeatureLevel::Compatibility : wgpu::FeatureLevel::Core,
+        .powerPreference = wgpu::PowerPreference::HighPerformance,
+        .backendType = backend,
+        .compatibleSurface = g_surface,
+    };
+#else
     const wgpu::RequestAdapterOptions options{
         .powerPreference = wgpu::PowerPreference::HighPerformance,
         .backendType = backend,
         .compatibleSurface = g_surface,
     };
+#endif
     const auto future = g_instance.RequestAdapter(
         &options, wgpu::CallbackMode::WaitAnyOnly,
         [](wgpu::RequestAdapterStatus status, wgpu::Adapter adapter, wgpu::StringView message) {

@@ -19,6 +19,7 @@
 #include "android_touch_overlay_bridge.h"
 #include "hle/storage/wii_disc_extractor.h"
 #include "music_attenuation.h"
+#include "thermal_quality.h"
 #include "runtime_config.h"
 #include "runtime_product.h"
 #include "settings_overlay.h"
@@ -66,6 +67,11 @@ void CallVoidMethodOnActivity(const char* methodName) {
 }
 
 }  // namespace
+
+// settings_overlay.cpp's "Hide the settings button" checkbox.
+extern "C" void AndroidSetSettingsButtonHidden(bool hidden) {
+    CallVoidMethodOnActivity("onNativeSetSettingsButtonHidden", hidden);
+}
 
 // Called from aurora-main/lib/window.cpp's SDL_EVENT_GAMEPAD_ADDED/REMOVED handling - the touch
 // overlay auto-hides while a real controller is connected (TouchControlsOverlay.kt combines this
@@ -129,6 +135,13 @@ extern "C" JNIEXPORT void JNICALL
 Java_com_driftdroid_android_MainActivity_nativeReportExternalMediaPlaying(JNIEnv*, jobject /* this */,
                                                                              jboolean playing) {
     MusicAttenuation::ReportExternalMediaPlaying(playing == JNI_TRUE);
+}
+
+// Thermal headroom poll from ThermalMonitor.kt; the runtime decides what to do with it.
+extern "C" JNIEXPORT void JNICALL
+Java_com_driftdroid_android_MainActivity_nativeReportThermalHeadroom(JNIEnv*, jobject /* this */,
+                                                                        jfloat headroom) {
+    ThermalQuality::ReportHeadroom(static_cast<float>(headroom));
 }
 
 extern "C" int MkwHostCpuBaselineInit();

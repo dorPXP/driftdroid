@@ -80,7 +80,8 @@ uint32_t aurora_get_queued_pipeline_count();
 
 // Controls whether display copies bypass the Wii's vertical copy filter.
 void aurora_set_disable_copy_filter(bool disabled);
-bool aurora_get_disable_copy_filter();
+// Thermal quality scaling: multiplies the render resolution on top of the user's setting (1.0 = off).
+void aurora_set_thermal_render_factor(float factor);bool aurora_get_disable_copy_filter();
 
 // Guest-RAM write tracking. `generation` changes whenever guest RAM covering a host range was
 // written (or returns AURORA_GUEST_WRITE_UNTRACKED); `notify` reports writes aurora made itself.

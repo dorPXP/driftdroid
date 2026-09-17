@@ -57,6 +57,7 @@ class ModePickerActivity : Activity() {
     private lateinit var statusText: TextView
     private lateinit var progressBar: ProgressBar
     private lateinit var diagnosticsButton: Button
+    private lateinit var graphicsButton: Button
     private lateinit var serverSettingsButton: Button
     private lateinit var modsButton: Button
     private lateinit var miiDataButton: Button
@@ -285,6 +286,24 @@ class ModePickerActivity : Activity() {
         serverSettingsButton.setTextColor(Color.rgb(0xDD, 0xDD, 0xDD))
         serverSettingsButton.setShadowLayer(0f, 0f, 0f, 0)
 
+        // Renderer choice lives here because a device with no working Vulkan driver crashes before
+        // the in-game settings exist (GitHub issue #3).
+        graphicsButton = Button(this)
+        graphicsButton.text = "Graphics..."
+        graphicsButton.textSize = 11f
+        graphicsButton.setOnClickListener { GraphicsSettings.show(this) }
+        val graphicsButtonParams =
+            LinearLayout.LayoutParams(dp(260), dp(40))
+        graphicsButtonParams.topMargin = dp(8)
+        styleChannelButton(
+            graphicsButton,
+            Color.rgb(0x5A, 0x5A, 0x5A),
+            Color.rgb(0x3A, 0x3A, 0x3A),
+            dp(12).toFloat(),
+        )
+        graphicsButton.setTextColor(Color.rgb(0xDD, 0xDD, 0xDD))
+        graphicsButton.setShadowLayer(0f, 0f, 0f, 0)
+
         // Import/manage from here, not from the in-game settings sidebar - launching Android's
         // file picker while a live game session's GPU surface is running lost the WebGPU/Vulkan
         // surface on-device ("QueuePresent failed with VK_ERROR_SURFACE_LOST_KHR") and crashed
@@ -330,6 +349,7 @@ class ModePickerActivity : Activity() {
         root.addView(progressBar, progressParams)
         root.addView(statusText)
         root.addView(diagnosticsButton, diagnosticsButtonParams)
+        root.addView(graphicsButton, graphicsButtonParams)
         root.addView(serverSettingsButton, serverSettingsButtonParams)
         root.addView(modsButton, modsButtonParams)
 

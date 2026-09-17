@@ -53,6 +53,12 @@ android {
     buildTypes {
         release {
             isMinifyEnabled = false
+            // Signed with the debug key so release-type builds can be installed and measured
+            // directly. Android only enables CheckJNI (and its per-call class/field validation,
+            // ~10% of the UI thread in a debug profile) for debuggable builds, so performance
+            // testing has to happen here, not on the debug variant. Replace this with a real
+            // release keystore when one exists - see the release notes in the README.
+            signingConfig = signingConfigs.getByName("debug")
         }
         debug {
             isJniDebuggable = true

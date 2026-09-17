@@ -55,7 +55,9 @@ void center_window();
 void sync_frame_buffer_size() noexcept;
 void request_frame_buffer_resize();
 void set_frame_buffer_scale(float scale);
-void set_frame_buffer_aspect_fit(bool fit);
+// Multiplies the render target size on top of the user's resolution setting, for thermal quality
+// scaling. 1.0 = untouched.
+void set_thermal_render_factor(float factor);void set_frame_buffer_aspect_fit(bool fit);
 void set_present_surface_fill(bool fill);
 void lock_present_aspect_ratio(int width, int height);
 void unlock_present_aspect_ratio();

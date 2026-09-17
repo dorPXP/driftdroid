@@ -44,7 +44,10 @@ function(mkw_apply_translated_compile_options target)
     # conservative codegen, rather than flipping the whole corpus and hoping a blanket flag fixes
     # it. Explicitly deferred past the next update (UI-focused) - revisit later, not urgent.
     target_compile_options(${target} PRIVATE
-        -O2 ${MKW_TRANSLATED_PPC_FP_OPTIONS} -fno-slp-vectorize -w -pipe)
+        -O2 ${MKW_TRANSLATED_PPC_FP_OPTIONS} -fno-slp-vectorize -w -pipe
+        # One section per function so the linker can place the hot ones together; see
+        # MKW_SYMBOL_ORDER_FILE below. Layout only - this changes no generated code.
+        -ffunction-sections -fdata-sections)
 endfunction()
 
 function(mkw_configure_object_target target)
@@ -255,6 +258,17 @@ function(mkw_configure_product target)
         # PLT. Nothing interposes on these symbols (Java finds its JNI entry points by name, which
         # this doesn't affect), and profiling showed ~5% of the game thread in @plt stubs.
         target_link_options(${target} PRIVATE -Wl,-Bsymbolic-functions)
+        # Optional hot/cold code layout: a plain list of symbol names, hottest first, produced from
+        # a profile (runtime/tools/gen_symbol_order.sh). The translated corpus is ~70MB of text laid
+        # out in arbitrary order, which thrashes the instruction TLB; ordering it costs nothing at
+        # runtime and changes no codegen.
+        if(MKW_SYMBOL_ORDER_FILE)
+            if(NOT EXISTS "${MKW_SYMBOL_ORDER_FILE}")
+                message(FATAL_ERROR "MKW_SYMBOL_ORDER_FILE does not exist: ${MKW_SYMBOL_ORDER_FILE}")
+            endif()
+            target_link_options(${target} PRIVATE
+                "-Wl,--symbol-ordering-file=${MKW_SYMBOL_ORDER_FILE}" -Wl,--no-warn-symbol-ordering)
+        endif()
     endif()
     if(WIN32)
         foreach(runtime_dll libc++.dll libunwind.dll)

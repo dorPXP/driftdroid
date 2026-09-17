@@ -17,6 +17,17 @@ extern bool g_androidTouchControlsVisibleCache;
 // Tells Kotlin to show/hide the touch overlay and persist the user's choice.
 extern "C" void AndroidSetTouchOverlayVisible(bool visible);
 
+// Same mirroring pattern as g_androidTouchControlsVisibleCache above, for the "double-tap A to
+// auto-hold acceleration" preference (TouchButtonView.kt owns the actual double-tap detection and
+// held state; this is only the settings checkbox's live-mirrored on/off preference).
+extern bool g_androidDoubleTapAutoHoldCache;
+
+// Tells Kotlin to enable/disable double-tap-to-hold on the on-screen A button and persist the
+// user's choice.
+extern "C" void AndroidSetDoubleTapAutoHold(bool enabled);
+// Hides the on-screen gear; the phone's Back button then opens the settings sidebar instead.
+extern "C" void AndroidSetSettingsButtonHidden(bool hidden);
+
 // Tells Kotlin to enter the touch layout editor (drag/resize/hide controls) - the settings
 // sidebar's Controller section replaces the old "hold the gear button for 5 seconds" gesture with
 // an explicit button that calls this.

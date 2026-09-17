@@ -16,6 +16,14 @@ bool submit_raw_draw(GXPrimitive prim, GXVtxFmt fmt, const uint8_t* vertices, ui
                      uint32_t vertexBytes);
 }
 
+// See abi_bridge.h: guest code is single-host-threaded on Switch and Android, so these per-call
+// caches need no thread_local (and its resolver call) there.
+#if defined(__SWITCH__) || defined(__ANDROID__)
+#define MKW_GUEST_THREAD_LOCAL
+#else
+#define MKW_GUEST_THREAD_LOCAL thread_local
+#endif
+
 namespace {
 
 // Opcode constants and the stream helpers this file shares with gx_fifo.cpp /
@@ -521,7 +529,7 @@ static uint64_t DlScanCacheKey(uint32_t listAddr, uint32_t nbytes, uint64_t layo
 }
 
 static DlScanCacheState& DlScanCache() {
-    static thread_local DlScanCacheState s_cache;
+    static MKW_GUEST_THREAD_LOCAL DlScanCacheState s_cache;
     return s_cache;
 }
 
@@ -877,11 +885,11 @@ struct DlIndexScanVisitor {
     static constexpr bool kHandlesDraw = true;
 
     static std::array<ScanLayoutCacheEntry, 8>& LayoutCache() {
-        static thread_local std::array<ScanLayoutCacheEntry, 8> cache;
+        static MKW_GUEST_THREAD_LOCAL std::array<ScanLayoutCacheEntry, 8> cache;
         return cache;
     }
     static uint32_t NextLayoutGeneration() {
-        static thread_local uint32_t counter = 0;
+        static MKW_GUEST_THREAD_LOCAL uint32_t counter = 0;
         return ++counter;
     }
 
@@ -1034,7 +1042,7 @@ static bool FlattenDisplayListForAurora(const uint8_t* data, uint32_t nbytes,
 }
 
 static std::vector<uint8_t>& FlattenDisplayListScratch() {
-    static thread_local std::vector<uint8_t> s_scratch;
+    static MKW_GUEST_THREAD_LOCAL std::vector<uint8_t> s_scratch;
     return s_scratch;
 }
 
@@ -1323,6 +1331,14 @@ extern "C" void GX__CallDisplayList_80172f64(uint32_t listAddr, uint32_t nbytes)
         std::array<uint32_t, GX_VA_MAX_ATTR> maxIdx{}; std::array<bool, GX_VA_MAX_ATTR> sawIdx{};
         std::array<uint32_t, GX_VA_MAX_ATTR> maxXfIdx{}; std::array<uint32_t, GX_VA_MAX_ATTR> maxXfBytes{};
         std::array<bool, GX_VA_MAX_ATTR> sawXfIdx{};
+        // A cache hit reads these straight out of the stored entry instead of copying ~380 bytes of
+        // arrays per call; only the scan path below fills the locals above. The entry stays alive
+        // for the rest of this call - nothing here inserts into or evicts from the scan cache.
+        const std::array<uint32_t, GX_VA_MAX_ATTR>* maxIdxRef = &maxIdx;
+        const std::array<bool, GX_VA_MAX_ATTR>* sawIdxRef = &sawIdx;
+        const std::array<uint32_t, GX_VA_MAX_ATTR>* maxXfIdxRef = &maxXfIdx;
+        const std::array<uint32_t, GX_VA_MAX_ATTR>* maxXfBytesRef = &maxXfBytes;
+        const std::array<bool, GX_VA_MAX_ATTR>* sawXfIdxRef = &sawXfIdx;
         GXVtxFmt dlVtxFmt = GX_MAX_VTXFMT; bool dlVtxFmtMixed = false;
         bool dlHasNestedDl = false;
         bool dlHasArrayStateWrites = false;
@@ -1339,11 +1355,11 @@ extern "C" void GX__CallDisplayList_80172f64(uint32_t listAddr, uint32_t nbytes)
         if (cached != nullptr) {
             const auto& entry = cached->result;
             scanOk = entry.scanOk;
-            maxIdx = entry.maxIdx;
-            sawIdx = entry.sawIdx;
-            maxXfIdx = entry.maxXfIdx;
-            maxXfBytes = entry.maxXfBytes;
-            sawXfIdx = entry.sawXfIdx;
+            maxIdxRef = &entry.maxIdx;
+            sawIdxRef = &entry.sawIdx;
+            maxXfIdxRef = &entry.maxXfIdx;
+            maxXfBytesRef = &entry.maxXfBytes;
+            sawXfIdxRef = &entry.sawXfIdx;
             dlVtxFmt = entry.dlVtxFmt;
             dlVtxFmtMixed = entry.dlVtxFmtMixed;
             dlHasNestedDl = entry.dlHasNestedDl;
@@ -1436,9 +1452,9 @@ extern "C" void GX__CallDisplayList_80172f64(uint32_t listAddr, uint32_t nbytes)
                 ApplyAuroraVtxDesc();
                 ApplyAuroraVtxAttrFmtForDisplayList(dlVtxFmt, dlVtxFmtMixed);
                 const bool flattenArraysOk =
-                    ApplyAuroraArraysForDisplayList(maxIdx, sawIdx, dlVtxFmt, dlVtxFmtMixed);
+                    ApplyAuroraArraysForDisplayList(*maxIdxRef, *sawIdxRef, dlVtxFmt, dlVtxFmtMixed);
                 const bool flattenXfOk =
-                    ApplyAuroraIndexedXFArraysForDisplayList(maxXfIdx, maxXfBytes, sawXfIdx);
+                    ApplyAuroraIndexedXFArraysForDisplayList(*maxXfIdxRef, *maxXfBytesRef, *sawXfIdxRef);
                 flattenApplyOk = flattenArraysOk && flattenXfOk;
             }
             if (flattenApplyOk) {
@@ -1457,8 +1473,8 @@ extern "C" void GX__CallDisplayList_80172f64(uint32_t listAddr, uint32_t nbytes)
             if (scanOk) {
                 ApplyAuroraVtxDesc();
                 ApplyAuroraVtxAttrFmtForDisplayList(dlVtxFmt, dlVtxFmtMixed);
-                arraysOk = ApplyAuroraArraysForDisplayList(maxIdx, sawIdx, dlVtxFmt, dlVtxFmtMixed);
-                xfOk = ApplyAuroraIndexedXFArraysForDisplayList(maxXfIdx, maxXfBytes, sawXfIdx);
+                arraysOk = ApplyAuroraArraysForDisplayList(*maxIdxRef, *sawIdxRef, dlVtxFmt, dlVtxFmtMixed);
+                xfOk = ApplyAuroraIndexedXFArraysForDisplayList(*maxXfIdxRef, *maxXfBytesRef, *sawXfIdxRef);
                 applyOk = arraysOk && xfOk;
             }
             if (applyOk) {

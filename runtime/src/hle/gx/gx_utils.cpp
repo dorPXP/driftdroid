@@ -33,6 +33,12 @@ void WriteGuestFloat(uint32_t addr, float value, const char* label) {
 
 void* GuestToHostPtr(uint32_t addr, size_t len) {
     if (addr == 0) return nullptr;
+    // Hot path for the GX HLE (~1.8% of the game thread in profiles): the page-table lookup is
+    // header-inline, so a hit avoids both the out-of-line Memory::GetPointer call and the
+    // exception frame the fallback needs.
+    if (uint8_t* fast = MemoryInline::GetPointerFast(addr, len == 0 ? 1 : len)) {
+        return fast;
+    }
     try { return Memory::GetPointer(addr, len); } catch (const Memory::AccessViolation& e) { LogMemoryError(RT_TAG_GX, "GX guest pointer", e); return nullptr; }
 }
 

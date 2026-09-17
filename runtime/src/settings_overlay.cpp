@@ -6,6 +6,7 @@
 #include "controller_mapping_wizard.h"
 #include "game_graphics_options.h"
 #include "music_attenuation.h"
+#include "thermal_quality.h"
 #include "runtime_config.h"
 #include "runtime_log.h"
 
@@ -114,7 +115,10 @@ bool g_skipUnreadyPipelines = RuntimeConfigFile::SkipUnreadyPipelines(true);
 bool g_disableCopyFilter = RuntimeConfigFile::DisableCopyFilter(true);
 bool g_constantMatrixIndexing = RuntimeConfigFile::ConstantMatrixIndexing(false);
 bool g_threadedGx = RuntimeConfigFile::ThreadedGx(false);
+bool g_thermalAutoQuality = RuntimeConfigFile::ThermalAutoQuality(true);
 bool g_showFps = RuntimeConfigFile::ShowFps(true);
+bool g_showShaderCompilation = RuntimeConfigFile::ShowShaderCompilation(true);
+bool g_hideSettingsButton = RuntimeConfigFile::HideSettingsButton(false);
 bool g_widescreen = RuntimeConfigFile::WidescreenEnabled(true);
 uint32_t g_disabledPostProcessingPaths = RuntimeConfigFile::DisabledPostProcessingPaths(0);
 std::array<int32_t, PAD_MAX_CONTROLLERS> g_configuredControllerIndices = [] {
@@ -736,6 +740,27 @@ void DrawGraphicsSettings() {
     }
     // KartPad issue #193: on some Adreno phones (Galaxy S24 Ultra) characters render as only their
     // eyes while karts are fine. Off by default - it is an unconfirmed workaround.
+#if defined(__ANDROID__)
+    // A phone that gets hot drops its clocks whatever the game does, so give up pixels before frames.
+    if (ImGui::Checkbox("Lower resolution when the phone gets hot", &g_thermalAutoQuality)) {
+        ThermalQuality::SetEnabled(g_thermalAutoQuality);
+        RuntimeConfigFile::SetThermalAutoQuality(g_thermalAutoQuality);
+    }
+    if (g_thermalAutoQuality) {
+        const float headroom = ThermalQuality::LastHeadroom();
+        const float factor = ThermalQuality::CurrentFactor();
+        if (headroom < 0.0f) {
+            ImGui::TextDisabled("This device does not report thermal readings.");
+        } else if (factor >= 1.0f) {
+            ImGui::TextDisabled("Running at full resolution (heat %.0f%% of the limit).",
+                                static_cast<double>(headroom) * 100.0);
+        } else {
+            ImGui::TextDisabled("Rendering at %.0f%% resolution (heat %.0f%% of the limit).",
+                                static_cast<double>(factor) * 100.0,
+                                static_cast<double>(headroom) * 100.0);
+        }
+    }
+#endif
     // Decodes graphics commands on their own thread, freeing roughly a fifth of the game thread in
     // profiles. Experimental: off by default until it has been played on more devices.
     if (ImGui::Checkbox("Multithreaded graphics (experimental)", &g_threadedGx)) {
@@ -753,6 +778,19 @@ void DrawGraphicsSettings() {
     if (ImGui::Checkbox("Show FPS", &g_showFps)) {
         RuntimeConfigFile::SetShowFps(g_showFps);
     }
+    // Requested in GitHub issue #5, alongside Show FPS.
+    if (ImGui::Checkbox("Show \"shaders compiling\" message", &g_showShaderCompilation)) {
+        RuntimeConfigFile::SetShowShaderCompilation(g_showShaderCompilation);
+    }
+#if defined(__ANDROID__)
+    if (ImGui::Checkbox("Hide the settings button", &g_hideSettingsButton)) {
+        RuntimeConfigFile::SetHideSettingsButton(g_hideSettingsButton);
+        AndroidSetSettingsButtonHidden(g_hideSettingsButton);
+    }
+    ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + 380.0f);
+    ImGui::TextDisabled("The phone's Back button always opens these settings.");
+    ImGui::PopTextWrapPos();
+#endif
     ImGui::Separator();
     ImGui::Text("Graphics API: %s", GraphicsApiDisplayName());
 }
@@ -797,6 +835,9 @@ void DrawFpsOverlay() {
 }
 
 void DrawShaderCompilationStatus() {
+    if (!g_showShaderCompilation) {
+        return;
+    }
     const uint32_t queuedPipelines = aurora_get_queued_pipeline_count();
     if (queuedPipelines == 0) {
         return;
@@ -1257,7 +1298,10 @@ void InitializeRuntimeSettings() noexcept {
     g_disableCopyFilter = RuntimeConfigFile::DisableCopyFilter(true);
     g_constantMatrixIndexing = RuntimeConfigFile::ConstantMatrixIndexing(false);
     g_threadedGx = RuntimeConfigFile::ThreadedGx(false);
+    g_thermalAutoQuality = RuntimeConfigFile::ThermalAutoQuality(true);
     g_showFps = RuntimeConfigFile::ShowFps(true);
+    g_showShaderCompilation = RuntimeConfigFile::ShowShaderCompilation(true);
+    g_hideSettingsButton = RuntimeConfigFile::HideSettingsButton(false);
     g_disabledPostProcessingPaths = RuntimeConfigFile::DisabledPostProcessingPaths(0);
     // Same staleness class as everything else in this block, plus one more wrinkle: on a
     // brand-new install with no [video] widescreen key yet, android_jni_bridge.cpp's SDL_main
@@ -1286,6 +1330,10 @@ void InitializeRuntimeSettings() noexcept {
     aurora_set_disable_copy_filter(g_disableCopyFilter);
     AuroraSetConstantMatrixIndexing(g_constantMatrixIndexing);
     AuroraSetThreadedGx(g_threadedGx);
+    ThermalQuality::SetEnabled(g_thermalAutoQuality);
+#if defined(__ANDROID__)
+    AndroidSetSettingsButtonHidden(g_hideSettingsButton);
+#endif
     aurora_set_skip_unready_pipelines(g_skipUnreadyPipelines);
     g_strapInputAccepted.store(false, std::memory_order_relaxed);
     g_startupDismissFrame.store(UINT64_MAX, std::memory_order_relaxed);

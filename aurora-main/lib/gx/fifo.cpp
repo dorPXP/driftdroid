@@ -88,6 +88,10 @@ struct Batch {
   bool bigEndian = true;
 };
 
+// Roughly a frame's worth of commands on this game; small enough that the worker still overlaps
+// with the game thread, large enough to amortise the handoff.
+constexpr uint32_t kAsyncFlushThresholdBytes = 32u * 1024u;
+
 std::atomic_bool sThreaded{false};
 // Set by the producer on submit, cleared by the worker once the inbox is empty and it is idle.
 std::atomic_bool sPending{false};
@@ -240,6 +244,13 @@ void drain() {
 void drain_async() {
   if (!sThreaded.load(std::memory_order_relaxed)) {
     drain_inline();
+    return;
+  }
+  // GXEnd calls this after every primitive. Handing over that often costs a lock round-trip and a
+  // futex wake per primitive on the game thread, which is exactly the thread being protected, so
+  // accumulate until there is a worthwhile batch. Ordering is unaffected: display lists, frame
+  // boundaries and every sync point flush whatever is pending first.
+  if (detail::sBufferSize < kAsyncFlushThresholdBytes) {
     return;
   }
   flush_buffer_to_worker();
