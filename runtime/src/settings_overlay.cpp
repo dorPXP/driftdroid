@@ -82,6 +82,13 @@ int g_voicesVolumePercent = static_cast<int>(std::lround(RuntimeConfigFile::Voic
 bool g_audioMuted = RuntimeConfigFile::AudioMuted(false);
 bool g_audioMixWorker = RuntimeConfigFile::AudioMixWorkerEnabled(true);
 bool g_attenuateMusicWhenMediaPlays = RuntimeConfigFile::AttenuateMusicWhenMediaPlays(false);
+#if defined(__ANDROID__)
+constexpr const char* kMediaMonitorWaitingText = "Waiting for media playback detection...";
+constexpr const char* kMediaMonitorUnavailableText = "Media playback detection is unavailable.";
+#else
+constexpr const char* kMediaMonitorWaitingText = "Waiting for Windows Media Control...";
+constexpr const char* kMediaMonitorUnavailableText = "Windows Media Control is unavailable.";
+#endif
 int g_frameInterpolationMode = [] {
     switch (RuntimeConfigFile::FrameInterpolationFps(0)) {
     case 120:
@@ -572,17 +579,8 @@ void DrawAudioSettings() {
             "suspect an audio problem; the mix then runs inline as it used to.");
     }
     ImGui::Separator();
-#if !defined(__ANDROID__)
-    // Android's version of this - detecting "is something else currently playing" via
-    // AudioManager focus - turned out to have no reliable, non-disruptive implementation: the
-    // only way to detect regain is to periodically re-request focus, which is an exclusive
-    // request and can itself interrupt whatever the player is actually listening to. Confirmed
-    // directly as still not working after two different mitigation attempts ("music ducking is
-    // still not working well, its not unmuting" / "doesn't work, let's just leave music ducking
-    // for the future, disable the toggle"). Hidden here rather than reworked further for now;
-    // MusicAttenuation itself is untouched and this can come back once Android exposes a real,
-    // passive way to answer "is anything else playing" (e.g. a properly attributable
-    // getActivePlaybackConfigurations()).
+    // Android detects other apps' playback passively (ExternalMediaDetector.kt, never audio
+    // focus); desktop uses the platform media-session monitor.
     if (ImGui::Checkbox("Mute game music while external media is playing",
                         &g_attenuateMusicWhenMediaPlays)) {
         MusicAttenuation::SetEnabled(g_attenuateMusicWhenMediaPlays);
@@ -592,14 +590,13 @@ void DrawAudioSettings() {
         if (MusicAttenuation::IsExternalMediaPlaying()) {
             ImGui::TextDisabled("External media is playing; game music is muted.");
         } else if (!MusicAttenuation::IsMediaControlInitializationComplete()) {
-            ImGui::TextDisabled("Waiting for Windows Media Control...");
+            ImGui::TextDisabled(kMediaMonitorWaitingText);
         } else if (!MusicAttenuation::IsMediaControlAvailable()) {
-            ImGui::TextDisabled("Windows Media Control is unavailable.");
+            ImGui::TextDisabled(kMediaMonitorUnavailableText);
         } else {
             ImGui::TextDisabled("No external media is currently playing.");
         }
     }
-#endif
 }
 
 // Render-resolution scale (0.5x-8x the Wii's native output), same list/logic as DrawTopBar's own
@@ -1232,10 +1229,7 @@ void InitializeRuntimeSettings() noexcept {
     g_voicesVolumePercent = static_cast<int>(std::lround(RuntimeConfigFile::VoicesVolume(1.0f) * 100.0f));
     g_audioMuted = RuntimeConfigFile::AudioMuted(false);
     g_audioMixWorker = RuntimeConfigFile::AudioMixWorkerEnabled(true);
-    // Forced off, not just hidden - see DrawAudioSettings' matching #if for why. A player who had
-    // this on before it was disabled here shouldn't stay stuck silently ducked (or silently NOT
-    // ducked in a way they can no longer see/control) with no visible toggle to fix it.
-    g_attenuateMusicWhenMediaPlays = false;
+    g_attenuateMusicWhenMediaPlays = RuntimeConfigFile::AttenuateMusicWhenMediaPlays(false);
     g_frameInterpolationMode = [] {
         switch (RuntimeConfigFile::FrameInterpolationFps(0)) {
         case 120:
