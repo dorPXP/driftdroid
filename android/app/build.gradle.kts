@@ -10,7 +10,7 @@ android {
 
     defaultConfig {
         applicationId = "com.driftdroid.android"
-        minSdk = 28
+        minSdk = 29
         targetSdk = 34
         versionCode = 2
         versionName = "1.1.0"
@@ -32,6 +32,22 @@ android {
             path = file("src/main/cpp/CMakeLists.txt")
             version = "3.28.3"
         }
+    }
+
+    sourceSets {
+        getByName("main") {
+            // cacert.pem: the TLS root bundle network_ssl.cpp needs; same file desktop builds copy
+            // next to the executable (runtime/cmake/PublicProducts.cmake).
+            assets.srcDir("../../runtime/assets/certs")
+            // initial_pipeline_cache.db: shader recipes imported on first launch
+            // (aurora-main/lib/gfx/pipeline_cache.cpp).
+            assets.srcDir("../../runtime/assets/pipeline")
+        }
+    }
+
+    androidResources {
+        // SQLite reads the pipeline seed with random access through SDL's asset stream.
+        noCompress += "db"
     }
 
     buildTypes {

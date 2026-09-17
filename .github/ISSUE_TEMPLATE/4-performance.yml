@@ -1,79 +1,67 @@
 name: Performance problem
-description: Low FPS, stutters, or the game runs worse than expected.
-title: "[Perf] "
+description: Low FPS, stutter, or overheating.
+title: "[Performance] "
 labels: ["performance"]
 body:
-  - type: markdown
-    attributes:
-      value: |
-        **Where to find your logs** (paste the path into the File Explorer address bar):
-        - Playing through **WheelWizard** (most people): `%APPDATA%\CT-MKWII\Recomp\UserData\Logs`
-        - Installed with the standalone setup exe: `%LOCALAPPDATA%\WiiCompiled\Logs`
-
-        Every run gets its own folder. Open the **newest** one and attach `console.log`.
-  - type: checkboxes
-    id: preflight
-    attributes:
-      label: Before you continue
-      options:
-        - label: I'm on the latest release of WiiCompiled.
-          required: true
-        - label: I searched the existing issues and nobody has reported this yet.
-          required: true
-        - label: I checked that nothing else was hogging the GPU/CPU (recording software, browser video, etc.).
-          required: true
   - type: input
     id: version
     attributes:
-      label: WiiCompiled version
-      description: It's the very first line of `console.log` (see the log locations above) - it starts with `[runtime] WiiCompiled v…`.
-      placeholder: "e.g. v0.2.12"
+      label: DriftDroid version
+      description: Android Settings > Apps > DriftDroid shows it at the bottom.
+      placeholder: "e.g. 1.1.0"
     validations:
       required: true
-  - type: dropdown
-    id: pattern
+  - type: input
+    id: device
     attributes:
-      label: What does the problem look like?
-      options:
-        - Constant low FPS everywhere
-        - Stutters / hitches (mostly smooth, brief freezes)
-        - Only certain tracks or situations are slow
-        - Got worse after an update
-        - Slow only while recording/streaming the game window
+      label: Phone / handheld model
+      placeholder: "e.g. Galaxy S24 Ultra, Odin 2 Portal, Retroid Pocket 5"
     validations:
       required: true
-  - type: textarea
-    id: doing
-    attributes:
-      label: When does it happen?
-      description: Which tracks/modes, offline or online, how many players, and roughly what FPS you see.
-      placeholder: "e.g. Drops to ~40 FPS on Rainbow Road with 12 players online, fine offline…"
-    validations:
-      required: true
-  - type: textarea
-    id: logs
-    attributes:
-      label: Logs
-      description: Attach `console.log` from your newest run folder.
-      render: text
   - type: input
     id: gpu
     attributes:
-      label: GPU + driver version
-      placeholder: "e.g. RTX 3060, driver 560.94"
+      label: Chip or GPU (if you know it)
+      description: Helps a lot for graphics bugs. Search your model online if unsure.
+      placeholder: "e.g. Snapdragon 8 Gen 2 / Adreno 740, Helio G85 / Mali-G52"
+  - type: input
+    id: android
+    attributes:
+      label: Android version
+      placeholder: "e.g. Android 14"
+  - type: dropdown
+    id: mode
+    attributes:
+      label: Which game?
+      options:
+        - Original Mario Kart Wii
+        - Retro Rewind
+        - Both
+        - Doesn't get that far
     validations:
       required: true
   - type: input
-    id: cpu
+    id: fps
     attributes:
-      label: CPU
-      placeholder: "e.g. Ryzen 5 5600"
-    validations:
-      required: true
+      label: FPS you see
+      placeholder: "e.g. 30-40 in races, 60 in menus"
   - type: input
-    id: os
+    id: settings
     attributes:
-      label: Windows version
-      placeholder: "e.g. Windows 11 24H2"
+      label: Resolution setting and phone power mode
+      description: Many phones have a "Performance" or "High performance" mode that makes a big difference.
+      placeholder: "e.g. 1x resolution, balanced power mode"
+  - type: textarea
+    id: where
+    attributes:
+      label: Where is it slow?
+      description: Specific tracks, menus, number of CPU racers, only after a while (heat)?
     validations:
       required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Diagnostics
+      description: |
+        In DriftDroid's start screen, tap **Export Diagnostics** and drag the zip file here.
+        This is the single most useful thing you can attach.

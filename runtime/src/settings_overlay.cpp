@@ -40,6 +40,7 @@
 #include <dolphin/vi.h>
 #include <aurora/aurora.h>
 #include <aurora/gfx.h>
+#include <dolphin/gx/GXAurora.h>
 
 extern "C" int g_gxFrameCount;
 // dynamic_aspect.cpp
@@ -104,6 +105,7 @@ int ParseDisplayModeConfig(const std::string& mode) {
 int g_displayMode = ParseDisplayModeConfig(RuntimeConfigFile::DisplayMode("borderless"));
 bool g_skipUnreadyPipelines = RuntimeConfigFile::SkipUnreadyPipelines(true);
 bool g_disableCopyFilter = RuntimeConfigFile::DisableCopyFilter(true);
+bool g_constantMatrixIndexing = RuntimeConfigFile::ConstantMatrixIndexing(false);
 bool g_showFps = RuntimeConfigFile::ShowFps(true);
 bool g_widescreen = RuntimeConfigFile::WidescreenEnabled(true);
 uint32_t g_disabledPostProcessingPaths = RuntimeConfigFile::DisabledPostProcessingPaths(0);
@@ -729,6 +731,12 @@ void DrawGraphicsSettings() {
         aurora_set_disable_copy_filter(g_disableCopyFilter);
         RuntimeConfigFile::SetDisableCopyFilter(g_disableCopyFilter);
     }
+    // KartPad issue #193: on some Adreno phones (Galaxy S24 Ultra) characters render as only their
+    // eyes while karts are fine. Off by default - it is an unconfirmed workaround.
+    if (ImGui::Checkbox("Fix missing characters (some Adreno GPUs)", &g_constantMatrixIndexing)) {
+        AuroraSetConstantMatrixIndexing(g_constantMatrixIndexing);
+        RuntimeConfigFile::SetConstantMatrixIndexing(g_constantMatrixIndexing);
+    }
     if (ImGui::Checkbox("Skip draws while shaders compile", &g_skipUnreadyPipelines)) {
         aurora_set_skip_unready_pipelines(g_skipUnreadyPipelines);
         RuntimeConfigFile::SetSkipUnreadyPipelines(g_skipUnreadyPipelines);
@@ -867,6 +875,15 @@ void DrawStartupScreen() {
 // device specifically.
 std::bitset<64> g_androidControllersAutoConfigured{};
 
+bool HasConfiguredControllerBindings() {
+    for (size_t i = 0; i < kControllerButtons.size(); ++i) {
+        if (!RuntimeConfigFile::ControllerButton(i)) {
+            return false;
+        }
+    }
+    return true;
+}
+
 void AutoConfigureNewAndroidControllersIfPresent() {
     const uint32_t controllerCount = PADCount();
     RT_LOG(RT_TAG_CONFIG) << "AutoConfigureNewAndroidControllersIfPresent: scanning " << controllerCount
@@ -900,6 +917,22 @@ void AutoConfigureNewAndroidControllersIfPresent() {
             continue;
         }
         PADSetPortForIndex(index, targetPort);
+        // A controller with a saved mapping has been set up before - by this function on an
+        // earlier launch, or by the player remapping it. Likewise, once Config.toml holds
+        // bindings (the preset from a first run, or the player's own remap),
+        // ApplyConfiguredMappings applies those to every newly connected controller, so writing
+        // the preset again would only overwrite the player's choices. g_androidControllersAutoConfigured only
+        // lasts for this process, so without this check every launch re-applied the preset and
+        // overwrote the player's own bindings (reported on an Odin 2, whose built-in controls
+        // are a real SDL gamepad: "controls aren't saved when saving settings").
+        if (PADHasSavedMappingForIndex(index) || HasConfiguredControllerBindings()) {
+            if (index < g_androidControllersAutoConfigured.size()) {
+                g_androidControllersAutoConfigured.set(index);
+            }
+            RT_LOG(RT_TAG_CONFIG) << "AutoConfigureNewAndroidControllersIfPresent: index " << index
+                                   << " has a saved mapping, keeping it";
+            continue;
+        }
         // Classic Controller Pro, not GameCube: matches TouchControlsOverlay's L/R buttons,
         // which send SDL_GAMEPAD_BUTTON_LEFT/RIGHT_SHOULDER (this preset's "left_shoulder"/
         // "right_shoulder"), not an analog trigger axis - and matches a real Switch Pro
@@ -1216,6 +1249,7 @@ void InitializeRuntimeSettings() noexcept {
     g_displayMode = ParseDisplayModeConfig(RuntimeConfigFile::DisplayMode("borderless"));
     g_skipUnreadyPipelines = RuntimeConfigFile::SkipUnreadyPipelines(true);
     g_disableCopyFilter = RuntimeConfigFile::DisableCopyFilter(true);
+    g_constantMatrixIndexing = RuntimeConfigFile::ConstantMatrixIndexing(false);
     g_showFps = RuntimeConfigFile::ShowFps(true);
     g_disabledPostProcessingPaths = RuntimeConfigFile::DisabledPostProcessingPaths(0);
     // Same staleness class as everything else in this block, plus one more wrinkle: on a
@@ -1243,6 +1277,7 @@ void InitializeRuntimeSettings() noexcept {
     aurora_set_display_mode(static_cast<AuroraDisplayMode>(g_displayMode));
     g_displayMode = static_cast<int>(aurora_get_display_mode());
     aurora_set_disable_copy_filter(g_disableCopyFilter);
+    AuroraSetConstantMatrixIndexing(g_constantMatrixIndexing);
     aurora_set_skip_unready_pipelines(g_skipUnreadyPipelines);
     g_strapInputAccepted.store(false, std::memory_order_relaxed);
     g_startupDismissFrame.store(UINT64_MAX, std::memory_order_relaxed);

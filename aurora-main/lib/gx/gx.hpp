@@ -13,6 +13,7 @@
 #include <bitset>
 #include <memory>
 #include <array>
+#include <atomic>
 #include <cfloat>
 #include <cmath>
 
@@ -484,6 +485,9 @@ void set_render_scissor(const gfx::ClipRect& scissor) noexcept;
 const gfx::TextureBind& get_texture(GXTexMapID id) noexcept;
 void resolve_sampled_textures(const ShaderInfo& info) noexcept;
 
+// Set from the producer, read while building pipeline configs; see AuroraSetConstantMatrixIndexing.
+inline std::atomic_bool g_constantMatrixIndexing{false};
+
 inline float clear_depth_value() {
   // g_gxState.clearDepth is in GX's own distance terms (0 = near, larger = farther), independent of
   // how UseReversedZ encodes that as a host depth value - it must be re-mapped the same way the
@@ -557,7 +561,11 @@ struct ShaderConfig {
   u8 lineMode : 2 = 0; // 1 = GX_LINES, 2 = GX_LINESTRIP, 3 = GX_POINTS
   u8 dualTexEnabled : 1 = 0;
   u8 fogRangeAdjust : 1 = 0;
-  u8 pad1 : 4 = 0;
+  // Index the position/normal matrix palette through a switch of literal indices instead of a
+  // dynamic array index (see AuroraSetConstantMatrixIndexing). Uses a former padding bit, so
+  // recipes with it off keep their existing hashes.
+  u8 constantPnMtxIndexing : 1 = 0;
+  u8 pad1 : 3 = 0;
   u8 numTexGens = 0;
   u32 zTexture = 0; // bias[0:23], format[24:25], op[26:27]; 0 disables shader depth output.
   std::array<AttrConfig, MaxVtxAttr> attrs;
