@@ -2,10 +2,16 @@
 #include "command_processor.hpp"
 #include "../internal.hpp"
 
+#include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <deque>
+#include <mutex>
+#include <thread>
+#include <vector>
 
 #include "tracy/Tracy.hpp"
 
@@ -72,7 +78,122 @@ static void note_drain_wait(uint64_t nanos) noexcept {
   TracyPlot("aurora: fifoDrainWaitUs", static_cast<int64_t>(nanos / 1000));
 }
 
-void drain() {
+namespace {
+// One command stream handed to the worker. The producer's FIFO buffer is swapped out rather than
+// copied, so a drain costs a pointer exchange; buffers are recycled through sPool.
+struct Batch {
+  uint8_t* data = nullptr;
+  uint32_t size = 0;
+  uint32_t capacity = 0;
+  bool bigEndian = true;
+};
+
+std::atomic_bool sThreaded{false};
+// Set by the producer on submit, cleared by the worker once the inbox is empty and it is idle.
+std::atomic_bool sPending{false};
+std::mutex sMutex;
+std::condition_variable sWorkCv;
+std::condition_variable sIdleCv;
+std::deque<Batch> sQueue;
+std::vector<Batch> sPool;
+bool sWorkerBusy = false;
+bool sWorkerStop = false;
+std::thread sWorker;
+std::atomic<std::thread::id> sWorkerId{};
+
+void worker_main() {
+  sWorkerId.store(std::this_thread::get_id(), std::memory_order_release);
+  aurora::pin_calling_thread_to_core_tier(aurora::CoreTier::Fast);
+  // GXEnd drains after every primitive, so batches arrive in the thousands per frame. Take the
+  // whole queue per wakeup: one lock round-trip and one frame-worker join for the lot.
+  std::vector<Batch> batches;
+  std::unique_lock lock(sMutex);
+  while (true) {
+    sWorkCv.wait(lock, [] { return sWorkerStop || !sQueue.empty(); });
+    if (sQueue.empty()) {
+      break;
+    }
+    batches.assign(sQueue.begin(), sQueue.end());
+    sQueue.clear();
+    sWorkerBusy = true;
+    lock.unlock();
+    {
+      ZoneScopedN("GX worker batch");
+      // The producer-side drain waited here; recording the next frame must still follow SEALED.
+      aurora::wait_for_frame_worker_sealed_quiet();
+      for (const auto& batch : batches) {
+        process(batch.data, batch.size, batch.bigEndian);
+      }
+    }
+    lock.lock();
+    for (auto& batch : batches) {
+      batch.size = 0;
+      sPool.push_back(batch);
+    }
+    batches.clear();
+    sWorkerBusy = false;
+    if (sQueue.empty()) {
+      sPending.store(false, std::memory_order_release);
+      sIdleCv.notify_all();
+    }
+  }
+}
+
+// Caller holds sMutex. Returns a recycled buffer with at least `capacity` bytes, or a new one.
+Batch take_pooled_locked(uint32_t capacity) {
+  if (!sPool.empty()) {
+    // Newest first: the buffer most likely still hot in cache, and all pooled buffers grow to the
+    // same working size within a frame or two.
+    Batch batch = sPool.back();
+    sPool.pop_back();
+    if (batch.capacity < capacity) {
+      batch.data = static_cast<uint8_t*>(realloc(batch.data, capacity));
+      batch.capacity = capacity;
+    }
+    batch.size = 0;
+    return batch;
+  }
+  return Batch{static_cast<uint8_t*>(malloc(capacity)), 0, capacity, true};
+}
+
+// Hands the producer's own FIFO buffer to the worker and installs a recycled one in its place.
+void enqueue_buffer_locked() {
+  if (detail::sBufferSize == 0) {
+    return;
+  }
+  Batch replacement = take_pooled_locked(detail::sBufferCapacity);
+  sQueue.push_back(Batch{detail::sBufferData, detail::sBufferSize, detail::sBufferCapacity, true});
+  detail::sBufferData = replacement.data;
+  detail::sBufferCapacity = replacement.capacity;
+  detail::sBufferSize = 0;
+}
+
+// Display lists live in memory the caller may reuse, so these bytes are copied.
+void enqueue_copy_locked(const uint8_t* data, uint32_t size, bool bigEndian) {
+  Batch batch = take_pooled_locked(size);
+  std::memcpy(batch.data, data, size);
+  batch.size = size;
+  batch.bigEndian = bigEndian;
+  sQueue.push_back(batch);
+}
+
+void flush_buffer_to_worker() {
+  bool wake;
+  {
+    std::lock_guard lock(sMutex);
+    if (detail::sBufferSize == 0) {
+      return;
+    }
+    enqueue_buffer_locked();
+    sPending.store(true, std::memory_order_release);
+    wake = !sWorkerBusy;
+  }
+  if (wake) {
+    sWorkCv.notify_one();
+  }
+}
+
+void drain_inline() {
   // SEALED, not DONE.
   const auto waited = aurora::wait_for_frame_worker_sealed();
   if (waited.count() > 0) UNLIKELY {
@@ -84,6 +205,94 @@ void drain() {
   process(detail::sBufferData, detail::sBufferSize, true);
   detail::sBufferSize = 0;
 }
+} // namespace
+
+void sync() {
+  if (!sPending.load(std::memory_order_acquire)) {
+    return;
+  }
+  if (std::this_thread::get_id() == sWorkerId.load(std::memory_order_acquire)) {
+    // Reached from inside command processing; the worker cannot wait for itself.
+    return;
+  }
+  ZoneScopedN("GX worker sync");
+  constexpr auto kServiceInterval = std::chrono::milliseconds(1);
+  std::unique_lock lock(sMutex);
+  while (!sQueue.empty() || sWorkerBusy) {
+    if (!sIdleCv.wait_for(lock, kServiceInterval, [] { return sQueue.empty() && !sWorkerBusy; })) {
+      // Keep the guest's alarm/retrace pump alive, as the inline drain's frame-worker wait does.
+      lock.unlock();
+      aurora::service_producer_wait();
+      lock.lock();
+    }
+  }
+}
+
+void drain() {
+  if (!sThreaded.load(std::memory_order_relaxed)) {
+    drain_inline();
+    return;
+  }
+  flush_buffer_to_worker();
+  sync();
+}
+
+void drain_async() {
+  if (!sThreaded.load(std::memory_order_relaxed)) {
+    drain_inline();
+    return;
+  }
+  flush_buffer_to_worker();
+}
+
+void submit_stream(const uint8_t* data, uint32_t size, bool bigEndian) {
+  if (!sThreaded.load(std::memory_order_relaxed)) {
+    drain_inline();
+    process(data, size, bigEndian);
+    return;
+  }
+  bool wake;
+  {
+    std::lock_guard lock(sMutex);
+    // Keep stream order: anything still in the FIFO buffer was written before this list.
+    enqueue_buffer_locked();
+    enqueue_copy_locked(data, size, bigEndian);
+    sPending.store(true, std::memory_order_release);
+    wake = !sWorkerBusy;
+  }
+  if (wake) {
+    sWorkCv.notify_one();
+  }
+}
+
+void set_threaded(bool enabled) {
+  if (enabled == sThreaded.load(std::memory_order_relaxed)) {
+    return;
+  }
+  if (enabled) {
+    {
+      std::lock_guard lock(sMutex);
+      sWorkerStop = false;
+    }
+    sWorker = std::thread(worker_main);
+    sThreaded.store(true, std::memory_order_relaxed);
+    Log.info("Enabled threaded GX command processing");
+    return;
+  }
+  drain();
+  sThreaded.store(false, std::memory_order_relaxed);
+  {
+    std::lock_guard lock(sMutex);
+    sWorkerStop = true;
+  }
+  sWorkCv.notify_all();
+  if (sWorker.joinable()) {
+    sWorker.join();
+  }
+  Log.info("Disabled threaded GX command processing");
+}
+
+bool threaded() { return sThreaded.load(std::memory_order_relaxed); }
 
 const uint8_t* get_buffer_data() { return detail::sBufferData; }
 uint32_t get_buffer_size() { return detail::sBufferSize; }

@@ -1373,7 +1373,20 @@ static void handle_bp(u32 value, bool bigEndian) {
 }
 
 extern "C" void GXApplyBPReg(u8 reg, u32 value) {
-  handle_bp((static_cast<u32>(reg) << 24) | (value & 0x00FFFFFFu), true);
+  const u32 word = (static_cast<u32>(reg) << 24) | (value & 0x00FFFFFFu);
+  if (fifo::threaded()) {
+    if (!fifo::in_display_list()) {
+      // Keep the write in stream order with commands the GX worker hasn't decoded yet.
+      fifo::write_u8(CP_CMD_LOAD_BP_REG);
+      fifo::write_u32(word);
+      return;
+    }
+    fifo::sync();
+    std::lock_guard gpuLock(aurora::renderer_gpu_mutex());
+    handle_bp(word, true);
+    return;
+  }
+  handle_bp(word, true);
 }
 
 static bool cacheable_cp_register(u8 addr) {
@@ -2365,6 +2378,14 @@ bool handle_aurora(const u8* data, u32& pos, u32 size, bool bigEndian) {
       // Only drop the cached upload when the backing array actually changes.
       array.cachedRange = {};
       mark_pipeline_state_dirty();
+    }
+  } else if (subCmd == GX_LOAD_AURORA_SOURCE_VTXDESC) {
+    CHECK(pos + 2 <= size, "GX_LOAD_AURORA_SOURCE_VTXDESC read overrun");
+    const u8 attr = data[pos];
+    const u8 type = data[pos + 1];
+    pos += 2;
+    if (attr >= GX_VA_PNMTXIDX && attr < GX_VA_MAX_ATTR) {
+      g_gxState.sourceVtxDesc[attr] = static_cast<GXAttrType>(type);
     }
   } else if (subCmd == GX_LOAD_AURORA_TEXOBJ) {
     CHECK(pos + 34 <= size, "GX_LOAD_AURORA_TEXOBJ read overrun");

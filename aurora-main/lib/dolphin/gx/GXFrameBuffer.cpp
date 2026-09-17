@@ -313,6 +313,8 @@ void GXAdjustForOverscan(GXRenderModeObj* rmin, GXRenderModeObj* rmout, u16 hor,
 }
 
 void GXSetDispCopySrc(u16 left, u16 top, u16 wd, u16 ht) {
+  // Direct GX state access: catch up the GX worker first.
+  aurora::gx::fifo::sync();
   g_gxState.dispCopySrc = {left, top, wd, ht};
   GX_WRITE_RAS_REG(0x49000000u | ((static_cast<u32>(top) & 0x3ffu) << 10) | (static_cast<u32>(left) & 0x3ffu));
   GX_WRITE_RAS_REG(0x4a000000u | (((static_cast<u32>(ht) - 1u) * 0x400u) & 0x000ffc00u) |
@@ -320,17 +322,23 @@ void GXSetDispCopySrc(u16 left, u16 top, u16 wd, u16 ht) {
 }
 
 void GXSetTexCopySrc(u16 left, u16 top, u16 wd, u16 ht) {
+  // Direct GX state access: catch up the GX worker first.
+  aurora::gx::fifo::sync();
   g_gxState.texCopySrc = {left, top, wd, ht};
   g_gxState.texCopySrcRenderSpace = false;
 }
 
 void GXSetDispCopyDst(u16 wd, u16 ht) {
+  // Direct GX state access: catch up the GX worker first.
+  aurora::gx::fifo::sync();
   g_gxState.dispCopyDstWidth = wd;
   g_gxState.dispCopyDstHeight = ht;
   GX_WRITE_RAS_REG(0x4d000000u | ((((static_cast<u32>(wd) & 0x7fffu) << 1) >> 5) & 0x3ffu));
 }
 
 void GXSetTexCopyDst(u16 wd, u16 ht, GXTexFmt fmt, GXBool mipmap) {
+  // Direct GX state access: catch up the GX worker first.
+  aurora::gx::fifo::sync();
   g_gxState.texCopyFmt = fmt;
   g_gxState.texCopyDstWidth = wd;
   g_gxState.texCopyDstHeight = ht;
@@ -338,14 +346,20 @@ void GXSetTexCopyDst(u16 wd, u16 ht, GXTexFmt fmt, GXBool mipmap) {
 }
 
 void GXSetDispCopyFrame2Field(u32 mode) {
+  // Direct GX state access: catch up the GX worker first.
+  aurora::gx::fifo::sync();
   g_gxState.dispCopyFrame2Field = mode & 3;
 }
 
 void GXSetCopyClamp(GXFBClamp clamp) {
+  // Direct GX state access: catch up the GX worker first.
+  aurora::gx::fifo::sync();
   g_gxState.copyClamp = static_cast<GXFBClamp>(static_cast<u32>(clamp) & 3);
 }
 
 u32 GXSetDispCopyYScale(f32 vscale) {
+  // Direct GX state access: catch up the GX worker first.
+  aurora::gx::fifo::sync();
   const u32 iScale = y_scale_to_integer(vscale);
   g_gxState.dispCopyYScale = vscale;
   GX_WRITE_RAS_REG(0x4e000000u | iScale);
@@ -377,6 +391,8 @@ void GXSetCopyClear(GXColor color, u32 depth) {
 }
 
 void GXSetCopyFilter(GXBool aa, u8 sample_pattern[12][2], GXBool vf, u8 vfilter[7]) {
+  // Direct GX state access: catch up the GX worker first.
+  aurora::gx::fifo::sync();
   g_gxState.copyFilterAa = aa;
   g_gxState.copyFilterVf = vf;
   if (sample_pattern) {
@@ -410,6 +426,8 @@ void GXSetCopyFilter(GXBool aa, u8 sample_pattern[12][2], GXBool vf, u8 vfilter[
 }
 
 void GXSetDispCopyGamma(GXGamma gamma) {
+  // Direct GX state access: catch up the GX worker first.
+  aurora::gx::fifo::sync();
   g_gxState.dispCopyGamma = static_cast<GXGamma>(static_cast<u32>(gamma) & 3u);
   g_gxState.bpRegCache[0x52] = (g_gxState.bpRegCache[0x52] & ~(3u << 7)) |
                                ((static_cast<u32>(g_gxState.dispCopyGamma) & 3u) << 7);
@@ -418,7 +436,7 @@ void GXSetDispCopyGamma(GXGamma gamma) {
 void GXCopyDisp(void* dest, GXBool clear) {
   (void)dest;
   // Finish queued commands before this copy reads live EFB state.
-  if (aurora::gx::fifo::get_buffer_size() != 0) {
+  if (aurora::gx::fifo::get_buffer_size() != 0 || aurora::gx::fifo::threaded()) {
     aurora::gx::fifo::drain();
   }
   const auto rect = aurora::gx::map_logical_scissor(g_gxState.dispCopySrc);
@@ -451,7 +469,7 @@ void GXCopyDisp(void* dest, GXBool clear) {
 
 void GXCopyTex(void* dest, GXBool clear) {
   // Texture copies must see all earlier draws and state changes.
-  if (aurora::gx::fifo::get_buffer_size() != 0) {
+  if (aurora::gx::fifo::get_buffer_size() != 0 || aurora::gx::fifo::threaded()) {
     aurora::gx::fifo::drain();
   }
   const auto sourceRect = map_texture_copy_source(g_gxState.texCopySrc, g_gxState.texCopySrcRenderSpace);
@@ -542,6 +560,8 @@ void GXCopyTex(void* dest, GXBool clear) {
 }
 
 void GXClearBoundingBox() {
+  // Direct GX state access: catch up the GX worker first.
+  aurora::gx::fifo::sync();
   g_gxState.boundingBox = {1023, 0, 1023, 0};
   GX_WRITE_RAS_REG(0x550003FFu);
   GX_WRITE_RAS_REG(0x560003FFu);
@@ -549,6 +569,8 @@ void GXClearBoundingBox() {
 }
 
 void GXReadBoundingBox(u16* left, u16* right, u16* top, u16* bottom) {
+  // Direct GX state access: catch up the GX worker first.
+  aurora::gx::fifo::sync();
   if (left) {
     *left = g_gxState.boundingBox[0];
   }

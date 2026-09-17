@@ -113,6 +113,7 @@ int g_displayMode = ParseDisplayModeConfig(RuntimeConfigFile::DisplayMode("borde
 bool g_skipUnreadyPipelines = RuntimeConfigFile::SkipUnreadyPipelines(true);
 bool g_disableCopyFilter = RuntimeConfigFile::DisableCopyFilter(true);
 bool g_constantMatrixIndexing = RuntimeConfigFile::ConstantMatrixIndexing(false);
+bool g_threadedGx = RuntimeConfigFile::ThreadedGx(false);
 bool g_showFps = RuntimeConfigFile::ShowFps(true);
 bool g_widescreen = RuntimeConfigFile::WidescreenEnabled(true);
 uint32_t g_disabledPostProcessingPaths = RuntimeConfigFile::DisabledPostProcessingPaths(0);
@@ -645,6 +646,11 @@ void DrawResolutionSettings() {
         RuntimeConfigFile::SetWidescreen(g_widescreen);
         RequestMkwAspectMode(g_widescreen);
     }
+    // The picture switches immediately, but the game lays out menus and the HUD when a screen
+    // loads, so whatever is already on screen keeps its old layout until the next one.
+    ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + 380.0f);
+    ImGui::TextDisabled("The HUD and menus update on the next screen or race.");
+    ImGui::PopTextWrapPos();
     ImGui::Separator();
 }
 
@@ -730,6 +736,12 @@ void DrawGraphicsSettings() {
     }
     // KartPad issue #193: on some Adreno phones (Galaxy S24 Ultra) characters render as only their
     // eyes while karts are fine. Off by default - it is an unconfirmed workaround.
+    // Decodes graphics commands on their own thread, freeing roughly a fifth of the game thread in
+    // profiles. Experimental: off by default until it has been played on more devices.
+    if (ImGui::Checkbox("Multithreaded graphics (experimental)", &g_threadedGx)) {
+        AuroraSetThreadedGx(g_threadedGx);
+        RuntimeConfigFile::SetThreadedGx(g_threadedGx);
+    }
     if (ImGui::Checkbox("Fix missing characters (some Adreno GPUs)", &g_constantMatrixIndexing)) {
         AuroraSetConstantMatrixIndexing(g_constantMatrixIndexing);
         RuntimeConfigFile::SetConstantMatrixIndexing(g_constantMatrixIndexing);
@@ -1244,6 +1256,7 @@ void InitializeRuntimeSettings() noexcept {
     g_skipUnreadyPipelines = RuntimeConfigFile::SkipUnreadyPipelines(true);
     g_disableCopyFilter = RuntimeConfigFile::DisableCopyFilter(true);
     g_constantMatrixIndexing = RuntimeConfigFile::ConstantMatrixIndexing(false);
+    g_threadedGx = RuntimeConfigFile::ThreadedGx(false);
     g_showFps = RuntimeConfigFile::ShowFps(true);
     g_disabledPostProcessingPaths = RuntimeConfigFile::DisabledPostProcessingPaths(0);
     // Same staleness class as everything else in this block, plus one more wrinkle: on a
@@ -1272,6 +1285,7 @@ void InitializeRuntimeSettings() noexcept {
     g_displayMode = static_cast<int>(aurora_get_display_mode());
     aurora_set_disable_copy_filter(g_disableCopyFilter);
     AuroraSetConstantMatrixIndexing(g_constantMatrixIndexing);
+    AuroraSetThreadedGx(g_threadedGx);
     aurora_set_skip_unready_pipelines(g_skipUnreadyPipelines);
     g_strapInputAccepted.store(false, std::memory_order_relaxed);
     g_startupDismissFrame.store(UINT64_MAX, std::memory_order_relaxed);

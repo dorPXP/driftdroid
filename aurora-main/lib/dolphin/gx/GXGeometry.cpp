@@ -153,11 +153,20 @@ static inline void SETVAT(u32* va, u32* vb, u32* vc, GXAttr attr, GXCompCnt cnt,
   }
 }
 
+// Both comparisons read the worker's state, which lags the stream in threaded mode, so a stale
+// "unchanged" could drop a needed write there. Always republish instead; the command processor
+// already skips register writes that don't change anything.
 static inline bool AuroraVtxDescDiffers(GXAttr attr, GXAttrType type) {
+  if (aurora::gx::fifo::threaded()) {
+    return true;
+  }
   return attr >= GX_VA_PNMTXIDX && attr < GX_VA_MAX_ATTR && g_gxState.vtxDesc[attr] != type;
 }
 
 static inline bool AuroraVtxAttrFmtDiffers(GXVtxFmt vtxfmt, GXAttr attr, GXCompCnt cnt, GXCompType type, u8 frac) {
+  if (aurora::gx::fifo::threaded()) {
+    return true;
+  }
   if (vtxfmt < GX_VTXFMT0 || vtxfmt >= GX_MAX_VTXFMT || attr < GX_VA_POS || attr >= GX_VA_MAX_ATTR) {
     return true;
   }
@@ -189,9 +198,13 @@ void GXSetVtxDesc(GXAttr attr, GXAttrType type) {
 }
 
 void GXSetSourceVtxDesc(GXAttr attr, GXAttrType type) {
-  if (attr >= GX_VA_PNMTXIDX && attr < GX_VA_MAX_ATTR) {
-    g_gxState.sourceVtxDesc[attr] = type;
+  if (attr < GX_VA_PNMTXIDX || attr >= GX_VA_MAX_ATTR) {
+    return;
   }
+  // Through the stream so it stays ordered with the CP VCD writes that also reset it.
+  GX_WRITE_AURORA(GX_LOAD_AURORA_SOURCE_VTXDESC);
+  GX_WRITE_U8(static_cast<u8>(attr));
+  GX_WRITE_U8(static_cast<u8>(type));
 }
 
 void GXSetVtxDescv(GXVtxDescList* list) {

@@ -38,11 +38,15 @@ void GXInsertDebugMarker(const char* label) {
   GXWriteString(label);
 }
 
+void AuroraSetThreadedGx(bool enabled) { aurora::gx::fifo::set_threaded(enabled); }
+
 void AuroraSetConstantMatrixIndexing(bool enabled) {
   aurora::gx::g_constantMatrixIndexing.store(enabled, std::memory_order_relaxed);
 }
 
 void AuroraSetViewportPolicy(AuroraViewportPolicy policy) {
+  // Direct GX state access: catch up the GX worker first.
+  aurora::gx::fifo::sync();
   const bool changed = g_gxState.viewportPolicy != policy;
   if (changed) {
     // Finish commands using the old framebuffer mapping before changing it.
@@ -111,13 +115,13 @@ void WriteMappedRenderState(const aurora::gx::MappedRenderState& mapped) {
 } // namespace
 
 void GXSetViewportScissorRenderSafeArea(f32 aspect) {
+  // Apply queued viewport changes before direct layout draws use the safe area.
+  aurora::gx::fifo::drain();
   const auto [targetWidth, targetHeight] = aurora::gfx::get_render_target_size();
   if (targetWidth == 0 || targetHeight == 0 || !std::isfinite(aspect) || aspect <= 0.0f) {
     return;
   }
 
-  // Apply queued viewport changes before direct layout draws use the safe area.
-  aurora::gx::fifo::drain();
   auto mapped = aurora::gx::map_logical_render_state();
   const float targetAspect = static_cast<float>(targetWidth) / static_cast<float>(targetHeight);
 
@@ -166,6 +170,8 @@ void GXRestoreViewportScissorRender() {
 }
 
 void GXSetTexCopySrcRender(u16 left, u16 top, u16 wd, u16 ht) {
+  // Direct GX state access: catch up the GX worker first.
+  aurora::gx::fifo::sync();
   aurora::gx::g_gxState.texCopySrc = {left, top, wd, ht};
   aurora::gx::g_gxState.texCopySrcRenderSpace = true;
 }

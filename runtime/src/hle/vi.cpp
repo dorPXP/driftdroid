@@ -397,6 +397,25 @@ bool AdvanceDueRetraces(CpuContext* ctx, int maxToProcess, bool serviceAurora)
             if (now < target) {
                 return advancedAny;
             }
+            // Guest time follows these boundaries, so a backlog is replayed at whatever rate the
+            // host manages - i.e. the game fast-forwards. Anything beyond what this call could
+            // work through is unreachable (the app was suspended, the device slept, or a long
+            // stall like a shader-compile burst), so drop it and resynchronise instead of
+            // sprinting through minutes or hours of missed retraces. Confirmed on-device: the
+            // phone slept with the game open and came back running at ~100fps, fast-forwarded.
+            const auto backlog = now - target;
+            const auto maxCatchUp = g_vi.retraceInterval * maxToProcess;
+            if (backlog > maxCatchUp) {
+                static std::atomic<uint32_t> s_resyncLogCount{0};
+                if (s_resyncLogCount.fetch_add(1, std::memory_order_relaxed) < 16) {
+                    RT_LOGF(RT_TAG_VI,
+                            "retrace backlog of %lld ms exceeds the catch-up budget; resynchronising\n",
+                            static_cast<long long>(
+                                std::chrono::duration_cast<std::chrono::milliseconds>(backlog).count()));
+                }
+                g_vi.lastRetrace = now - g_vi.retraceInterval;
+                target = now;
+            }
         }
 
 

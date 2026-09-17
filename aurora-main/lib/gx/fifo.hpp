@@ -78,8 +78,26 @@ void begin_display_list(uint8_t* buf, uint32_t size);
 uint32_t end_display_list();
 bool in_display_list();
 
-// Drain the internal FIFO buffer through the command processor
+// Drain the internal FIFO buffer through the command processor. Returns once everything written so
+// far has been processed, so the caller may read or change renderer state afterwards.
 void drain();
+
+// Hand the internal FIFO buffer to the command processor without waiting for it. With threaded
+// processing enabled the GX worker decodes it later; otherwise this is drain().
+void drain_async();
+
+// Queue a complete command stream owned by the caller (display lists). The bytes are copied when
+// threaded processing is enabled, since the caller's memory may change once this returns.
+void submit_stream(const uint8_t* data, uint32_t size, bool bigEndian);
+
+// Wait for the GX worker to finish everything submitted so far. Required before touching renderer
+// or GX state from the game thread outside the command stream. Cheap when nothing is pending.
+void sync();
+
+// Decode commands on a dedicated worker thread instead of the game thread (Dolphin "dual core"
+// style). The worker may lag within a frame; every drain()/sync() point catches it up.
+void set_threaded(bool enabled);
+bool threaded();
 
 // Internal buffer inspection
 const uint8_t* get_buffer_data();

@@ -64,9 +64,9 @@ void GXCallDisplayList(const void* data, u32 nbytes) {
     return;
   }
 
-  // Decode the display list immediately while its borrowed resources are valid.
-  aurora::gx::fifo::drain();
-  aurora::gx::fifo::process(static_cast<const u8*>(data), nbytes, true);
+  // Inline mode decodes the list immediately while its borrowed resources are valid; threaded mode
+  // copies the bytes for the GX worker.
+  aurora::gx::fifo::submit_stream(static_cast<const u8*>(data), nbytes, true);
 }
 
 void GXCallDisplayListLE(const void* data, u32 nbytes) {
@@ -81,9 +81,6 @@ void GXCallDisplayListLE(const void* data, u32 nbytes) {
   }
 
   // Decode little-endian lists separately after finishing the normal FIFO work.
-  aurora::gx::fifo::drain();
-
-  // Process the display list through the command processor (little-endian)
-  aurora::gx::fifo::process(static_cast<const u8*>(data), nbytes, false);
+  aurora::gx::fifo::submit_stream(static_cast<const u8*>(data), nbytes, false);
 }
 }

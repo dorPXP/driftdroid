@@ -131,6 +131,11 @@ extern char g_gameName[4];
 // wait_for_frame_worker_sealed() joins only SEALED, which is what the FIFO drain uses.
 void wait_for_frame_worker() noexcept;
 std::chrono::nanoseconds wait_for_frame_worker_sealed() noexcept;
+// Same join as wait_for_frame_worker_sealed(), but never runs the producer's wait callback, which
+// services guest timing and so must only run on the game thread. Used by the GX worker thread.
+void wait_for_frame_worker_sealed_quiet() noexcept;
+// Runs the producer's wait callback (guest alarm/retrace pump). Game thread only.
+void service_producer_wait() noexcept;
 bool wait_for_frame_worker_for(std::chrono::microseconds timeout) noexcept;
 std::recursive_mutex& renderer_gpu_mutex() noexcept;
 
