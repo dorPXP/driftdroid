@@ -63,6 +63,12 @@ extern "C" {
 
 #define GX_LOAD_AURORA_INVALIDATE_TEX_ALL 0x0035
 
+/**
+ * Sets the source vertex description of one attribute (GXSetSourceVtxDesc).
+ * Must be followed by a u8 attribute and a u8 GXAttrType.
+ */
+#define GX_LOAD_AURORA_SOURCE_VTXDESC 0x0040
+
 
 /*
  * Debug marker stuff
@@ -99,6 +105,8 @@ void AuroraSetViewportPolicy(AuroraViewportPolicy policy);
 // shaders (reported on Adreno: skinned characters render as only their eyes). Takes effect for
 // pipelines created after the call.
 void AuroraSetConstantMatrixIndexing(bool enabled);
+// Experimental: decode GX commands on a dedicated worker thread. Call before rendering starts.
+void AuroraSetThreadedGx(bool enabled);
 
 /**
  * Retrieves the current content framebuffer size.

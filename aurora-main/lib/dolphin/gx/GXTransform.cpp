@@ -189,6 +189,8 @@ void GXProject(f32 x, f32 y, f32 z, const f32 mtx[3][4], const f32* pm, const f3
 // TODO GXLoadNrmMtxIndx3x3
 // TODO GXLoadTexMtxIndx
 void GXSetZScaleOffset(f32 scale, f32 offset) {
+  // Direct GX state access: catch up the GX worker first.
+  aurora::gx::fifo::sync();
   g_gxState.zScale = scale;
   g_gxState.zOffset = offset;
   constexpr f32 z24Scale = 16777215.0f;
@@ -205,6 +207,8 @@ void GXSetZScaleOffset(f32 scale, f32 offset) {
 }
 
 void GXSetScissorBoxOffset(s32 x_off, s32 y_off) {
+  // Direct GX state access: catch up the GX worker first.
+  aurora::gx::fifo::sync();
   g_gxState.scissorOffsetX = x_off;
   g_gxState.scissorOffsetY = y_off;
 

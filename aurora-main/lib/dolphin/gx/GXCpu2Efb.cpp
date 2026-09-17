@@ -1,10 +1,13 @@
 #include "gx.hpp"
+#include "../../gx/fifo.hpp"
 
 #include "../../gfx/depth_peek.hpp"
 
 #include <dolphin/gx/GXCpu2Efb.h>
 
 void GXPeekZ(u16 x, u16 y, u32* z) {
+  // Direct GX state access: catch up the GX worker first.
+  aurora::gx::fifo::sync();
   aurora::gfx::depth_peek::poll();
 
   if (z != nullptr) {

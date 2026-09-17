@@ -1228,6 +1228,10 @@ void encode_presentation_snapshot(const wgpu::CommandEncoder& encoder,
 #endif
 
 void shutdown() noexcept {
+#ifdef AURORA_ENABLE_GX
+  // Finishes queued GX work while the frame worker can still accept it.
+  gx::fifo::set_threaded(false);
+#endif
   stop_frame_worker();
 #ifdef AURORA_ENABLE_GX
   stop_presenter();
@@ -1660,11 +1664,13 @@ void end_frame_impl(bool pumpEvents, bool drainFifo) noexcept {
   gfx::SealedFrame sealedFrame;
   SealedFrameContext ctx;
   std::vector<PresentationJob> presentationJobs;
+  // Outside the renderer mutex: with threaded GX processing the drain waits for the worker, and
+  // the worker takes that same mutex to decode.
+  if (drainFifo) {
+    gx::fifo::drain();
+  }
   {
     std::lock_guard gpuLock(g_rendererGpuMutex);
-    if (drainFifo) {
-      gx::fifo::drain();
-    }
     seal_frame_locked(sealedFrame, ctx);
     presentationJobs = encode_sealed_frame(sealedFrame, ctx);
   }
@@ -1756,11 +1762,9 @@ void end_frame() noexcept {
   wait_for_frame_worker_private(FrameWorkerPhase::Done);
 
   // Seal all current GX work on the CPU while the renderer is known ready.
-  // Later FIFO writes belong exclusively to the next frame.
-  {
-    std::lock_guard gpuLock(g_rendererGpuMutex);
-    gx::fifo::drain();
-  }
+  // Later FIFO writes belong exclusively to the next frame. Not under the renderer mutex: the GX
+  // worker needs it to finish decoding what this drain waits for.
+  gx::fifo::drain();
   {
     std::lock_guard lock(g_frameWorker.mutex);
     g_frameWorker.framePrepared = false;
@@ -1784,6 +1788,22 @@ std::chrono::nanoseconds wait_for_frame_worker_sealed() noexcept {
 }
 bool wait_for_frame_worker_for(std::chrono::microseconds timeout) noexcept {
   return wait_for_frame_worker_private_for(FrameWorkerPhase::Done, timeout);
+}
+void wait_for_frame_worker_sealed_quiet() noexcept {
+  constexpr auto kPollInterval = std::chrono::milliseconds(1);
+  while (!g_frameWorker.sealed.load(std::memory_order_acquire)) {
+    std::unique_lock lock(g_frameWorker.mutex);
+    if (!g_frameWorker.started || g_frameWorker.stop || g_frameWorker.threadId == std::this_thread::get_id()) {
+      return;
+    }
+    g_frameWorker.cv.wait_for(lock, kPollInterval,
+                              [] { return g_frameWorker.sealed.load(std::memory_order_acquire); });
+  }
+}
+void service_producer_wait() noexcept {
+  if (const auto callback = g_frameWorkerWaitCallback.load(std::memory_order_acquire)) {
+    callback();
+  }
 }
 std::recursive_mutex& renderer_gpu_mutex() noexcept { return g_rendererGpuMutex; }
 } // namespace aurora
