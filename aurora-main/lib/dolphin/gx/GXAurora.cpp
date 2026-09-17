@@ -38,6 +38,10 @@ void GXInsertDebugMarker(const char* label) {
   GXWriteString(label);
 }
 
+void AuroraSetConstantMatrixIndexing(bool enabled) {
+  aurora::gx::g_constantMatrixIndexing.store(enabled, std::memory_order_relaxed);
+}
+
 void AuroraSetViewportPolicy(AuroraViewportPolicy policy) {
   const bool changed = g_gxState.viewportPolicy != policy;
   if (changed) {

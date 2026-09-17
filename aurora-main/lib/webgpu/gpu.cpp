@@ -16,6 +16,10 @@
 #include <aurora/render_size_limits.hpp>
 #include <magic_enum.hpp>
 #include <webgpu/webgpu_cpp.h>
+#if defined(WEBGPU_DAWN) && !defined(_WIN32) && __has_include(<dawn/native/DawnNative.h>)
+#include <dawn/native/DawnNative.h>
+#define AURORA_HAS_STATIC_DAWN_NATIVE 1
+#endif
 
 #include "../gfx/common.hpp"
 #include "../internal.hpp"
@@ -864,8 +868,17 @@ void fail_if_device_lost() noexcept {
   }
 }
 
+// With vulkan_monolithic_pipeline_cache the driver's compiled pipelines only reach the blob cache
+// (and so the next launch) when Dawn runs its idle tasks.
 void serialize_pipeline_caches() noexcept {
-#if defined(WEBGPU_DAWN) && defined(_WIN32)
+#if defined(AURORA_HAS_STATIC_DAWN_NATIVE)
+  if (!g_device || g_backendType != wgpu::BackendType::Vulkan) {
+    return;
+  }
+  // Dawn is linked statically here, so call it directly. Without this, Android never saved its
+  // Vulkan pipeline cache and recompiled every recorded pipeline on each launch.
+  dawn::native::PerformIdleTasks(g_device);
+#elif defined(WEBGPU_DAWN) && defined(_WIN32)
   if (!g_device || g_backendType != wgpu::BackendType::Vulkan) {
     return;
   }

@@ -10,7 +10,7 @@ body:
       options:
         - label: I searched the existing issues and nobody has suggested this yet.
           required: true
-        - label: This is about WiiCompiled itself, not WheelWizard or Retro Rewind content.
+        - label: This is about DriftDroid itself, not Retro Rewind content or the desktop WiiCompiled app.
           required: true
   - type: textarea
     id: idea

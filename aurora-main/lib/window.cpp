@@ -235,6 +235,13 @@ bool SDLCALL lifecycle_event_watch(void*, SDL_Event* event) {
   case SDL_EVENT_WINDOW_RESTORED:
     g_backgrounded.store(false, std::memory_order_relaxed);
     break;
+  // Mobile apps are usually killed rather than shut down, so the shutdown-time save of the
+  // pipeline cache rarely runs. Save while the OS still lets us (this watch runs synchronously
+  // on the thread delivering the lifecycle callback).
+  case SDL_EVENT_WILL_ENTER_BACKGROUND:
+  case SDL_EVENT_TERMINATING:
+    webgpu::serialize_pipeline_caches();
+    break;
 #endif
   default:
     break;

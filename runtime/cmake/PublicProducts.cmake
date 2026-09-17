@@ -251,6 +251,10 @@ function(mkw_configure_product target)
         # vulkan: the NDK's libvulkan.so loader stub - verified present for every API level this
         # NDK ships (checked API 24 through 35 in the r27c sysroot).
         target_link_libraries(${target} PRIVATE log android EGL GLESv2 vulkan)
+        # Bind calls between functions defined in this library directly instead of through the
+        # PLT. Nothing interposes on these symbols (Java finds its JNI entry points by name, which
+        # this doesn't affect), and profiling showed ~5% of the game thread in @plt stubs.
+        target_link_options(${target} PRIVATE -Wl,-Bsymbolic-functions)
     endif()
     if(WIN32)
         foreach(runtime_dll libc++.dll libunwind.dll)

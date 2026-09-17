@@ -1814,6 +1814,7 @@ void populate_pipeline_config(PipelineConfig& config, GXPrimitive primitive, GXV
     config.shaderConfig.lineMode = 0;
   }
   config.shaderConfig.dualTexEnabled = (g_gxState.dualTex & 1u) != 0;
+  config.shaderConfig.constantPnMtxIndexing = g_constantMatrixIndexing.load(std::memory_order_relaxed) ? 1 : 0;
   config.shaderConfig.tevSwapTable = g_gxState.tevSwapTable;
   for (u8 i = 0; i < g_gxState.numTevStages; ++i) {
     config.shaderConfig.tevStages[i] = g_gxState.tevStages[i];

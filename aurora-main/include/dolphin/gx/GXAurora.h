@@ -95,6 +95,10 @@ typedef enum _AuroraViewportPolicy {
  * When AURORA_VIEWPORT_NATIVE is used, GXSetTexCopySrc/GXSetTexCopyDst will use native framebuffer resolution.
  */
 void AuroraSetViewportPolicy(AuroraViewportPolicy policy);
+// Opt-in workaround for GPU drivers that mis-handle dynamically indexed matrix arrays in vertex
+// shaders (reported on Adreno: skinned characters render as only their eyes). Takes effect for
+// pipelines created after the call.
+void AuroraSetConstantMatrixIndexing(bool enabled);
 
 /**
  * Retrieves the current content framebuffer size.

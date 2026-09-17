@@ -23,6 +23,19 @@ using namespace std::string_view_literals;
 static Module Log("aurora::gfx::gx");
 
 
+// `var local = vec * ubuf.array[in_pnmtxidx]` written as a switch over literal indices. Some
+// Adreno drivers mis-evaluate the dynamic index form for skinned characters.
+static std::string constant_matrix_switch(std::string_view arrayName, std::string_view localName,
+                                          std::string_view vectorExpression, u32 count) {
+  std::string result = fmt::format("\n    var {} = vec3f(0.0);\n    switch (in_pnmtxidx) {{", localName);
+  for (u32 slot = 0; slot < count; ++slot) {
+    result += fmt::format("\n      case {0}u: {{ {1} = {2} * ubuf.{3}[{0}u]; }}", slot, localName, vectorExpression,
+                          arrayName);
+  }
+  result += fmt::format("\n      default: {{ {} = vec3f(0.0); }}\n    }}", localName);
+  return result;
+}
+
 static inline std::string_view chan_comp(GXTevColorChan chan) noexcept {
   switch (chan) {
   case GX_CH_RED:
@@ -960,7 +973,17 @@ wgpu::ShaderModule build_shader(const ShaderConfig& config) noexcept {
     }
   }
 
-  if (config.lineMode == 0) {
+  // Only when the whole palette is uploaded uncompacted, so a literal index names the same slot.
+  const bool constantPnMtx = config.constantPnMtxIndexing != 0 && config.lineMode == 0 &&
+                             config.attrs[GX_VA_PNMTXIDX].attrType == GX_DIRECT &&
+                             info.matrixLayout.absolutePosRegion && info.matrixLayout.postexCount >= MaxPnMtx &&
+                             info.matrixLayout.nrmCount == MaxPnMtx;
+  if (config.lineMode == 0 && constantPnMtx) {
+    vtxXfrAttrsPre += constant_matrix_switch("postex_mtx"sv, "mv_pos"sv,
+                                             fmt::format("vec4f({}, 1.0)", vtx_attr(config, GX_VA_POS)),
+                                             info.matrixLayout.postexCount);
+    vtxXfrAttrsPre += "\n    out.pos = vec4f(mv_pos, 1.0) * ubuf.proj;";
+  } else if (config.lineMode == 0) {
     vtxXfrAttrsPre += fmt::format(
         "\n    let mv_pos = vec4f({}, 1.0) * ubuf.postex_mtx[in_pnmtxidx];"
         "\n    out.pos = vec4f(mv_pos, 1.0) * ubuf.proj;",
@@ -1005,10 +1028,17 @@ wgpu::ShaderModule build_shader(const ShaderConfig& config) noexcept {
       "\n    let gx_pixel_center_correction = "
       "vec2f(-1.0, 1.0) / (6.0 * max(abs(ubuf.render_viewport_size), vec2f(1.0)));"
       "\n    out.pos = vec4f(out.pos.xy + out.pos.w * gx_pixel_center_correction, out.pos.zw);";
-  vtxXfrAttrsPre += fmt::format(
-      "\n    let nrm_tmp = vec4f({}, 0.0) * ubuf.nrm_mtx[in_pnmtxidx];"
-      "\n    let mv_nrm = select(nrm_tmp, normalize(nrm_tmp), dot(nrm_tmp, nrm_tmp) > 1e-10);",
-      vtx_attr(config, GX_VA_NRM));
+  if (constantPnMtx) {
+    vtxXfrAttrsPre += constant_matrix_switch("nrm_mtx"sv, "nrm_tmp"sv,
+                                             fmt::format("vec4f({}, 0.0)", vtx_attr(config, GX_VA_NRM)),
+                                             info.matrixLayout.nrmCount);
+    vtxXfrAttrsPre += "\n    let mv_nrm = select(nrm_tmp, normalize(nrm_tmp), dot(nrm_tmp, nrm_tmp) > 1e-10);";
+  } else {
+    vtxXfrAttrsPre += fmt::format(
+        "\n    let nrm_tmp = vec4f({}, 0.0) * ubuf.nrm_mtx[in_pnmtxidx];"
+        "\n    let mv_nrm = select(nrm_tmp, normalize(nrm_tmp), dot(nrm_tmp, nrm_tmp) > 1e-10);",
+        vtx_attr(config, GX_VA_NRM));
+  }
 
   uniBufAttrs += "\n    proj: mat4x4f,";
   // Only the matrix slots this shader can read are uploaded, in compacted order; see UniformMatrixLayout.

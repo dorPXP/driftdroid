@@ -186,6 +186,8 @@ typedef struct PADDefaultMapping {
 u32 PADCount();
 /* Returns the controller name for the given index into the controller map */
 const char* PADGetNameForControllerIndex(u32 idx);
+// True if a mapping file written by PADSerializeMappings already exists for this controller.
+bool PADHasSavedMappingForIndex(u32 idx);
 void PADSetPortForIndex(u32 index, u32 port);
 s32 PADGetIndexForPort(u32 port);
 void PADGetVidPid(u32 port, u32* vid, u32* pid);

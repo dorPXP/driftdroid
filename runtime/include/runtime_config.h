@@ -40,6 +40,7 @@ struct RuntimeUserConfig {
     std::optional<uint32_t> frameInterpolationFps;
     std::optional<bool> skipUnreadyPipelines;
     std::optional<bool> disableCopyFilter;
+    std::optional<bool> constantMatrixIndexing;
     std::optional<bool> textureReplacements;
     std::optional<bool> textureDumps;
     std::optional<bool> showFps;
@@ -442,6 +443,7 @@ inline RuntimeUserConfig ParseConfigDocument(const toml::value& document) {
     }
     config.skipUnreadyPipelines = FindConfigValue<bool>(document, "video", "skip_unready_pipelines");
     config.disableCopyFilter = FindConfigValue<bool>(document, "video", "disable_copy_filter");
+    config.constantMatrixIndexing = FindConfigValue<bool>(document, "video", "constant_matrix_indexing");
     config.showFps = FindConfigValue<bool>(document, "video", "show_fps");
     config.textureReplacements = FindConfigValue<bool>(document, "video", "texture_replacements");
     config.textureDumps = FindConfigValue<bool>(document, "video", "texture_dumps");
@@ -646,6 +648,11 @@ inline bool SetSkipUnreadyPipelines(bool value) {
     return WriteSetting("video", "skip_unready_pipelines", value ? "true" : "false");
 }
 
+inline bool SetConstantMatrixIndexing(bool value) {
+    Mutable().constantMatrixIndexing = value;
+    return WriteSetting("video", "constant_matrix_indexing", value ? "true" : "false");
+}
+
 inline bool SetDisableCopyFilter(bool value) {
     Mutable().disableCopyFilter = value;
     return WriteSetting("video", "disable_copy_filter", value ? "true" : "false");
@@ -798,6 +805,10 @@ inline uint32_t FrameInterpolationFps(uint32_t fallback = 0) {
 
 inline bool SkipUnreadyPipelines(bool fallback = true) {
     return Get().skipUnreadyPipelines.value_or(fallback);
+}
+
+inline bool ConstantMatrixIndexing(bool fallback = false) {
+    return Get().constantMatrixIndexing.value_or(fallback);
 }
 
 inline bool DisableCopyFilter(bool fallback = true) {

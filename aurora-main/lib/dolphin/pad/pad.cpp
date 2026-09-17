@@ -357,6 +357,20 @@ const char* PADGetNameForControllerIndex(const u32 idx) {
   return SDL_GetGamepadName(ctrl->m_controller);
 }
 
+bool PADHasSavedMappingForIndex(const u32 idx) {
+  const auto* ctrl = __PADGetControllerForIndex(idx);
+  if (ctrl == nullptr) {
+    return false;
+  }
+  // Same file name PADSerializeMappings writes.
+  const std::filesystem::path path =
+      std::filesystem::path{aurora::g_config.userPath} /
+      fmt::format("{}_{:04X}_{:04X}.controller", aurora::input::controller_name(ctrl->m_index), ctrl->m_vid,
+                  ctrl->m_pid);
+  std::error_code ec;
+  return std::filesystem::exists(path, ec);
+}
+
 void PADSetPortForIndex(const u32 idx, const u32 port) {
   const auto* ctrl = __PADGetControllerForIndex(idx);
   if (ctrl == nullptr) {

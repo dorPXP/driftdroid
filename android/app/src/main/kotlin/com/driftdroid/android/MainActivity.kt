@@ -560,9 +560,20 @@ class MainActivity : SDLActivity() {
     private fun ensureBundledAssets() {
         val wiiCompiledDir = File(filesDir, "WiiCompiled")
         copyAssetIfMissing("dsp_coef.bin", File(wiiCompiledDir, "dsp_coef.bin"))
+        // Refreshed whenever an app update ships a different bundle, since CAs rotate.
+        copyAssetIfChanged("cacert.pem", File(wiiCompiledDir, "cacert.pem"))
         for (relative in BUNDLED_BOOTSTRAP_FILES) {
             copyAssetIfMissing(relative, File(wiiCompiledDir, relative))
         }
+    }
+
+    private fun copyAssetIfChanged(assetPath: String, dest: File) {
+        val bundled = assets.open(assetPath).use { it.readBytes() }
+        if (dest.exists() && dest.length() == bundled.size.toLong() && dest.readBytes().contentEquals(bundled)) {
+            return
+        }
+        dest.parentFile?.mkdirs()
+        dest.writeBytes(bundled)
     }
 
     private fun copyAssetIfMissing(assetPath: String, dest: File) {

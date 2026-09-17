@@ -322,6 +322,13 @@ public class SDLSurface extends SurfaceView implements SurfaceHolder.Callback,
 
     // Sensor events
     protected void enableSensor(int sensortype, boolean enabled) {
+        // DriftDroid: SDL's accelerometer only feeds its orientation tracking and "accelerometer
+        // joystick", neither of which the game uses, yet it streamed events to the UI thread for
+        // the whole session (seen in profiles). Tilt steering has its own listener
+        // (MotionSteering.kt), so SDL's is never registered.
+        if (sensortype == Sensor.TYPE_ACCELEROMETER) {
+            return;
+        }
         // TODO: This uses getDefaultSensor - what if we have >1 accels?
         if (enabled) {
             mSensorManager.registerListener(this,

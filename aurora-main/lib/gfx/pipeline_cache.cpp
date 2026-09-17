@@ -560,6 +560,11 @@ static void pipeline_cache_abort() {
 static bool write_pipeline_cache_record(const PipelineCacheWrite& write);
 
 static std::string pipeline_cache_seed_path() {
+#if defined(__ANDROID__)
+  // Shipped as an APK asset. SDL_IOFromFile only falls back to assets for a plain relative name;
+  // SDL_GetBasePath()'s "./" prefix made the lookup miss, so the seed was never imported.
+  return InitialPipelineCacheName;
+#else
   if (g_config.resourcesPath == nullptr || g_config.resourcesPath[0] == '\0') {
     return InitialPipelineCacheName;
   }
@@ -570,6 +575,7 @@ static std::string pipeline_cache_seed_path() {
   }
   path += InitialPipelineCacheName;
   return path;
+#endif
 }
 
 static sqlite3* open_pipeline_cache_seed_db(const std::string& path) {

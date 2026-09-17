@@ -1,91 +1,82 @@
-name: In-game bug report
-description: Something looks, sounds, or behaves wrong (graphics, audio, input, online) - but the game doesn't crash.
+name: Bug report
+description: Something looks, sounds, or behaves wrong (graphics, audio, controls, online, saving).
 title: "[Bug] "
 labels: ["bug"]
 body:
-  - type: markdown
-    attributes:
-      value: |
-        **Where to find your logs** (paste the path into the File Explorer address bar):
-        - Playing through **WheelWizard** (most people): `%APPDATA%\CT-MKWII\Recomp\UserData\Logs`
-        - Installed with the standalone setup exe: `%LOCALAPPDATA%\WiiCompiled\Logs`
-
-        Every run gets its own folder. Open the **newest** one and attach `console.log`.
-
-        For visual bugs, a screenshot or short clip helps enormously.
-  - type: checkboxes
-    id: preflight
-    attributes:
-      label: Before you continue
-      options:
-        - label: I'm on the latest release of WiiCompiled.
-          required: true
-        - label: I searched the existing issues and nobody has reported this yet.
-          required: true
-        - label: The problem does NOT also happen on Dolphin or a real Wii (if it does, it's a game/mod issue, not a WiiCompiled issue).
-          required: true
-  - type: input
-    id: version
-    attributes:
-      label: WiiCompiled version
-      description: It's the very first line of `console.log` (see the log locations above) - it starts with `[runtime] WiiCompiled v…`.
-      placeholder: "e.g. v0.2.12"
-    validations:
-      required: true
   - type: dropdown
     id: category
     attributes:
-      label: What kind of bug is it?
+      label: What kind of bug?
       options:
         - Graphics / visual glitch
         - Audio
-        - Input / controllers
-        - Online / matchmaking
-        - Gameplay behaves differently than on Wii/Dolphin
-        - Save data / settings
+        - Touch controls
+        - Controller / gamepad
+        - Online (include the error code)
+        - Settings or save data not kept
+        - Setup (disc import, Retro Rewind install)
         - Other
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: DriftDroid version
+      description: Android Settings > Apps > DriftDroid shows it at the bottom.
+      placeholder: "e.g. 1.1.0"
+    validations:
+      required: true
+  - type: input
+    id: device
+    attributes:
+      label: Phone / handheld model
+      placeholder: "e.g. Galaxy S24 Ultra, Odin 2 Portal, Retroid Pocket 5"
+    validations:
+      required: true
+  - type: input
+    id: gpu
+    attributes:
+      label: Chip or GPU (if you know it)
+      description: Helps a lot for graphics bugs. Search your model online if unsure.
+      placeholder: "e.g. Snapdragon 8 Gen 2 / Adreno 740, Helio G85 / Mali-G52"
+  - type: input
+    id: android
+    attributes:
+      label: Android version
+      placeholder: "e.g. Android 14"
+  - type: dropdown
+    id: mode
+    attributes:
+      label: Which game?
+      options:
+        - Original Mario Kart Wii
+        - Retro Rewind
+        - Both
+        - Doesn't get that far
     validations:
       required: true
   - type: textarea
     id: what
     attributes:
-      label: What happens?
-      description: Describe the bug and what you expected instead.
-      placeholder: "e.g. The flag textures near the start line flicker on Coconut Mall…"
+      label: What happens, and what did you expect?
     validations:
       required: true
   - type: textarea
-    id: doing
+    id: steps
     attributes:
-      label: What were you doing? / How to reproduce
-      description: Game mode, track, and exact steps if you can reproduce it.
+      label: How to make it happen
       placeholder: |
-        1. Start a VS race on …
-        2. …
-    validations:
-      required: true
+        1. Start a VS race on ...
+        2. ...
   - type: textarea
     id: media
     attributes:
       label: Screenshot / video
-      description: Drag & drop images or clips here (very helpful for visual bugs).
+      description: Drag images or clips here. Very helpful for visual bugs.
   - type: textarea
-    id: logs
+    id: diagnostics
     attributes:
-      label: Logs
-      description: Attach `console.log` from your newest run folder, or paste the relevant part below.
-      render: text
-  - type: input
-    id: gpu
-    attributes:
-      label: GPU + driver version
-      placeholder: "e.g. RTX 3060, driver 560.94"
-    validations:
-      required: true
-  - type: input
-    id: os
-    attributes:
-      label: Windows version
-      placeholder: "e.g. Windows 11 24H2"
-    validations:
-      required: true
+      label: Diagnostics
+      description: |
+        In DriftDroid's start screen, tap **Export Diagnostics** and drag the zip file here.
+        This is the single most useful thing you can attach.

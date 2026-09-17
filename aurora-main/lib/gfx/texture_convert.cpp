@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cmath>
 #include <limits>
 #include <optional>
@@ -696,6 +697,8 @@ ConvertedTexture convert_texture_palette(u32 textureFormat, uint32_t width, uint
   const uint32_t baseWidth = width;
   const uint32_t baseHeight = height;
   size_t offset = 0;
+  size_t outOfRange = 0;
+  u32 maxIndex = 0;
   for (u32 mip = 0; mip < mips; ++mip) {
     const size_t pixelCount = static_cast<size_t>(width) * height;
     for (size_t i = 0; i < pixelCount; ++i) {
@@ -703,6 +706,8 @@ ConvertedTexture convert_texture_palette(u32 textureFormat, uint32_t width, uint
       if (index >= tlutEntries) {
         constexpr uint8_t transparent[4] = {0, 0, 0, 0};
         pixels.append(transparent, sizeof(transparent));
+        ++outOfRange;
+        maxIndex = std::max(maxIndex, index);
         continue;
       }
       const size_t src = static_cast<size_t>(index) * 4;
@@ -711,6 +716,18 @@ ConvertedTexture convert_texture_palette(u32 textureFormat, uint32_t width, uint
     offset += pixelCount;
     width = std::max(width >> 1, 1u);
     height = std::max(height >> 1, 1u);
+  }
+
+  if (outOfRange != 0) {
+    // Those pixels come out transparent black. Suspected cause of the rare black vehicle icons
+    // in kart selection, so always log (rate-limited) to confirm it from user logs.
+    static std::atomic<u32> s_logged{0};
+    if (s_logged.fetch_add(1, std::memory_order_relaxed) < 32) {
+      Log.warn("convert_texture_palette: {} of {} indices past the {}-entry TLUT (max index {}) in {}x{} fmt={} "
+               "tlutFmt={}",
+               outOfRange, indices.data.size() / sizeof(u16), tlutEntries, maxIndex, baseWidth, baseHeight,
+               textureFormat, static_cast<u32>(tlutFormat));
+    }
   }
 
   bool hasArbitraryMips = arb_mip_check(baseWidth, baseHeight, mips, pixels);
