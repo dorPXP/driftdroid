@@ -1,6 +1,7 @@
 #include "fifo.hpp"
 #include "command_processor.hpp"
 #include "../internal.hpp"
+#include "../webgpu/gpu.hpp"
 
 #include <atomic>
 #include <chrono>
@@ -277,6 +278,19 @@ void submit_stream(const uint8_t* data, uint32_t size, bool bigEndian) {
 }
 
 void set_threaded(bool enabled) {
+  if (enabled && (webgpu::g_backendType == wgpu::BackendType::OpenGL ||
+                  webgpu::g_backendType == wgpu::BackendType::OpenGLES)) {
+    // Decoding commands off the main thread means mapping vertex buffers there, and Dawn's GL
+    // backend keeps its one EGL context current on the thread that last used the device, so the
+    // second thread's eglMakeCurrent fails with EGL_BAD_ACCESS. Same reason the asynchronous
+    // frame submission worker stays off for these backends (see frame_worker_requested).
+    static const bool logged = [] {
+      Log.info("Threaded GX command processing is unavailable on the OpenGL backend");
+      return true;
+    }();
+    (void)logged;
+    return;
+  }
   if (enabled == sThreaded.load(std::memory_order_relaxed)) {
     return;
   }

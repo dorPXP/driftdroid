@@ -22,6 +22,16 @@
 #include <fmt/format.h>
 #include <tracy/Tracy.hpp>
 
+#if defined(__SWITCH__)
+// No WAL (compiled out: no mmap) and no on-disk rollback journal: Horizon's filesystem fails
+// SQLite's journal fsync/fstat sequence with EIO ("disk I/O error"), while an in-memory journal
+// works. A cache only risks losing its newest entries on a crash.
+constexpr const char* kCachePragmas = "PRAGMA journal_mode=MEMORY; PRAGMA synchronous=OFF;";
+#else
+constexpr const char* kCachePragmas = "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;";
+#endif
+
+
 namespace aurora::gfx {
 static Module Log("aurora::gfx::pipeline_cache");
 
@@ -57,7 +67,6 @@ static std::mutex g_pipelineMutex;
 static bool g_hasPipelineThread = false;
 static bool g_pipelineFrameActive = false;
 static std::atomic_bool g_skipUnreadyGxPipelines = false;
-static size_t g_pipelinesPerFrame = 0;
 // Keep first-use compilation bounded. The render command stream remains ordered;
 // it waits for a queued pipeline only when the corresponding draw is consumed.
 constexpr size_t MaxQueuedPipelineBuilds = 256;
@@ -67,12 +76,14 @@ constexpr size_t ReservedLogicalProcessors = 2;
 constexpr size_t MaxPipelineWorkers = 22;
 // Cached clear and GX pipelines are prewarmed using the full worker pool.
 constexpr size_t MaxBackgroundPipelineWorkers = MaxPipelineWorkers;
-// For synchronous pipeline fallback (OpenGL)
-#ifdef NDEBUG
-constexpr size_t BuildPipelinesPerFrame = 5;
-#else
-constexpr size_t BuildPipelinesPerFrame = 1;
-#endif
+// For synchronous pipeline fallback (OpenGL). A fixed count is the wrong unit here: GL shader
+// compiles range from about a millisecond to tens of milliseconds depending on the permutation,
+// so "five per frame" is anywhere between free and a quarter-second hitch. Spend a time budget
+// instead, and take a much bigger one during the boot prewarm - the game is on its logo and
+// title screens there, where a low frame rate costs nothing, and every recipe retired then is a
+// stutter that does not happen mid-race.
+constexpr auto PrewarmPipelineTimePerFrame = std::chrono::milliseconds(50);
+constexpr auto SteadyPipelineTimePerFrame = std::chrono::milliseconds(4);
 static std::vector<std::thread> g_pipelineThreads;
 static bool g_pipelineThreadEnd = false;
 static size_t g_activeBackgroundPipelineWorkers = 0;
@@ -729,7 +740,7 @@ static bool prepare_pipeline_cache_db() {
     return false;
   }
 
-  ret = sqlite::exec(g_pipelineCacheDb, "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;");
+  ret = sqlite::exec(g_pipelineCacheDb, kCachePragmas);
   if (ret != SQLITE_OK) {
     Log.error("Failed to set pipeline cache pragmas: {}", sqlite3_errmsg(g_pipelineCacheDb));
     pipeline_cache_abort();
@@ -1044,7 +1055,11 @@ static void pipeline_worker() {
 }
 
 static void build_synchronous_pipelines_for_frame() {
-  while (g_pipelinesPerFrame < BuildPipelinesPerFrame) {
+  const auto budget =
+      g_prewarmActive.load(std::memory_order_relaxed) ? PrewarmPipelineTimePerFrame : SteadyPipelineTimePerFrame;
+  const auto deadline = std::chrono::steady_clock::now() + budget;
+  // Always retire at least one, or a queue of uniformly expensive pipelines would never drain.
+  do {
     PendingPipeline pending;
     {
       std::lock_guard lock{g_pipelineMutex};
@@ -1056,8 +1071,7 @@ static void build_synchronous_pipelines_for_frame() {
       source.pop_front();
     }
     compile_pending_pipeline(std::move(pending));
-    ++g_pipelinesPerFrame;
-  }
+  } while (std::chrono::steady_clock::now() < deadline);
 }
 
 static size_t pipeline_worker_count() {
@@ -1226,7 +1240,6 @@ void shutdown_pipeline_cache() {
   pipeline_cache_abort();
   g_pipelineCacheBroken = false;
   g_pipelineFrameActive = false;
-  g_pipelinesPerFrame = 0;
   g_pipelines.clear();
   g_priorityPipelines.clear();
   g_backgroundPipelines.clear();
@@ -1240,9 +1253,6 @@ void begin_pipeline_frame() {
   g_pipelineFrameActive = true;
   if (!g_presentationStarted.load(std::memory_order_acquire)) {
     g_presentationStarted.store(true, std::memory_order_release);
-  }
-  if (!g_hasPipelineThread) {
-    g_pipelinesPerFrame = 0;
   }
 }
 
