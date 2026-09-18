@@ -11,6 +11,7 @@ import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.Bundle
 import android.os.Process
+import android.view.KeyEvent
 import android.view.View
 import android.view.ViewGroup
 import android.widget.Button
@@ -60,11 +61,17 @@ class MainActivity : SDLActivity() {
         runOnUiThread { settingsButton?.visibility = if (hidden) View.GONE else View.VISIBLE }
     }
 
-    @Deprecated("Back handling for the settings sidebar; the modern callback needs API 33.")
-    override fun onBackPressed() {
-        // With the gear hidden there is no other way in, and it is a natural "menu" gesture even
-        // when it is visible.
-        nativeToggleSettingsOverlay()
+    /**
+     * SDL's key handling swallows KEYCODE_BACK before Android ever calls onBackPressed (it returns
+     * true for both the down and up events, see SDLSurface.onKey), so the sidebar has to be opened
+     * from here instead. Confirmed on device: the override of onBackPressed never ran.
+     */
+    override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        if (event.keyCode == KeyEvent.KEYCODE_BACK && event.action == KeyEvent.ACTION_UP) {
+            nativeToggleSettingsOverlay()
+            return true
+        }
+        return super.dispatchKeyEvent(event)
     }
     private external fun nativeSetTouchControlsVisibleCache(visible: Boolean)
     private external fun nativeSetDoubleTapAutoHoldCache(enabled: Boolean)
