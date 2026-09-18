@@ -254,6 +254,16 @@ FrameWorkerState g_frameWorker;
 
 bool frame_worker_requested() noexcept {
 #ifdef AURORA_ENABLE_GX
+  // Dawn's GL backend binds its single EGL context persistently on several call paths, so a
+  // second thread touching the device fails eglMakeCurrent (EGL_BAD_ACCESS). That is a property
+  // of the backend, not of the platform: it killed the Switch's GL path, and then Android's new
+  // OpenGL ES path in exactly the same way, on the very first buffer mapping. Every other backend
+  // (including deko3d, which serializes the device through ImplicitDeviceSynchronization) may
+  // encode off the main thread. Not cached: the first query can come before the backend is chosen.
+  if (webgpu::g_backendType == wgpu::BackendType::OpenGL ||
+      webgpu::g_backendType == wgpu::BackendType::OpenGLES) {
+    return false;
+  }
   static const bool enabled = [] {
 #if defined(_WIN32)
     // RenderDoc's D3D12 layer is injected before Aurora starts and needs device and command
@@ -600,6 +610,8 @@ constexpr const char* backend_name(AuroraBackend backend) noexcept {
     return "WebGPU";
   case BACKEND_NULL:
     return "Null";
+  case BACKEND_DEKO3D:
+    return "deko3d";
   }
   return "Unknown";
 }
@@ -630,9 +642,13 @@ constexpr std::array PreferredBackendOrder{
 // #ifdef DAWN_ENABLE_BACKEND_OPENGLES
 //     BACKEND_OPENGLES,
 // #endif
+#if defined(__SWITCH__) && defined(DAWN_ENABLE_BACKEND_OPENGLES)
+    // Switch's only backend: Dawn's GLES backend on switch-mesa (deko3d comes later for 60fps).
+    BACKEND_OPENGLES,
+#endif
 #if defined(__ANDROID__) && defined(DAWN_ENABLE_BACKEND_OPENGLES)
-    // Only reached when the Vulkan adapter request fails: phones whose Vulkan driver is missing or
-    // broken (GitHub issue #3 and friends) would otherwise have nothing left to try.
+    // Only reached when the Vulkan adapter request fails: phones whose Vulkan driver is missing
+    // or broken (GitHub issue #3 and friends) would otherwise have nothing left to try.
     BACKEND_OPENGLES,
 #endif
 #ifdef DAWN_ENABLE_BACKEND_NULL
