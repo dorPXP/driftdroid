@@ -189,6 +189,9 @@ No. Don't ask. Nothing in this repo or any release contains Nintendo code or ass
 **Which game version works?**
 Clean PAL `RMCP01`. Other regions and modified executables are rejected outright.
 
+**Is there gonna be a Switch version?**
+Im considering this and im going to see if this is possible
+
 **Is it done?**
 No - this is an active, personal work-in-progress fork. It's playable start to finish, but
 performance work, device compatibility and bug fixing are ongoing.
