@@ -1072,6 +1072,14 @@ void InstallSehLogger() {
     }
 }
 #else
+#if defined(__ANDROID__)
+// Set once at startup from the host_tombstone marker file; read from the signal handler, so it is
+// a plain atomic rather than a filesystem check at fault time.
+std::atomic<bool> g_hostTombstoneRequested{false};
+struct sigaction g_previousSigsegvAction {};
+struct sigaction g_previousSigbusAction {};
+#endif
+
 // POSIX counterpart to SehLogger above. Unlike Windows' AddVectoredExceptionHandler, which lets
 // GuestFlat and this module each install their own handler and defensively re-check each other,
 // sigaction only allows one handler per signal - the second registration replaces the first
@@ -1184,6 +1192,27 @@ void PosixMemoryFaultHandler(int sig, siginfo_t* info, void* ucontextVoid) {
         return;
     }
 
+#if defined(__ANDROID__)
+    // Debug escape hatch: our own handler reports rich GUEST state but no host backtrace
+    // ("Host stack trace unavailable on this platform"), which is useless when the faulting
+    // pointer is a host address rather than a guest one. Creating the marker file
+    // WiiCompiled/host_tombstone re-raises the signal into debuggerd's handler instead, so
+    // Android writes a real tombstone with a symbolised native stack (read it from `adb logcat`).
+    // Restoring SIG_DFL is NOT enough and was the first attempt: our sigaction() REPLACED
+    // debuggerd's handler, so the default disposition just kills the process with bionic's
+    // "exiting due to SIG_DFL handler for signal 11" and no trace at all. Chain to the handler
+    // that was installed before ours. A marker file rather than an environment variable because
+    // `am start` cannot set one, and it is resolved at startup so the handler itself stays
+    // async-signal-safe. Off unless explicitly asked for, because it sacrifices the guest
+    // diagnostics that are usually the more useful half.
+    if (g_hostTombstoneRequested.load(std::memory_order_relaxed)) {
+        struct sigaction* previous = sig == SIGBUS ? &g_previousSigbusAction : &g_previousSigsegvAction;
+        sigaction(sig, previous, nullptr);
+        raise(sig);
+        return;
+    }
+#endif
+
     // Guard against re-entrancy: if we crash while reporting, don't recurse.
     static std::atomic_flag s_inCrashHandler = ATOMIC_FLAG_INIT;
     if (s_inCrashHandler.test_and_set()) {
@@ -1215,15 +1244,36 @@ void PosixMemoryFaultHandler(int sig, siginfo_t* info, void* ucontextVoid) {
 }
 
 void InstallPosixMemoryFaultHandler() {
+#if defined(__ANDROID__)
+    {
+        std::error_code markerEc;
+        const auto marker = RuntimeConfigFile::ResolveConfigPath().parent_path() / "host_tombstone";
+        if (std::filesystem::exists(marker, markerEc)) {
+            g_hostTombstoneRequested.store(true, std::memory_order_relaxed);
+            RT_LOG(RT_TAG_RUNTIME)
+                << "host_tombstone marker present: crashes will produce a debuggerd tombstone "
+                   "instead of the usual guest diagnostics"
+                << std::endl;
+        }
+    }
+#endif
     struct sigaction action {};
     action.sa_sigaction = PosixMemoryFaultHandler;
     action.sa_flags = SA_SIGINFO;
     sigemptyset(&action.sa_mask);
+#if defined(__ANDROID__)
+    sigaction(SIGSEGV, &action, &g_previousSigsegvAction);
+#else
     sigaction(SIGSEGV, &action, nullptr);
+#endif
     // A touch beyond a memfd-backed mapping's ftruncate()'d size raises SIGBUS rather than
     // SIGSEGV on Linux; region sizing should make this unreachable, but routing it to the same
     // handler costs nothing and avoids a silent gap if it ever isn't.
+#if defined(__ANDROID__)
+    sigaction(SIGBUS, &action, &g_previousSigbusAction);
+#else
     sigaction(SIGBUS, &action, nullptr);
+#endif
 }
 
 #if defined(ANDROID)
