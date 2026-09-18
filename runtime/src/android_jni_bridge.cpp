@@ -299,7 +299,7 @@ extern "C" int SDL_main(int argc, char** argv) {
     std::error_code ec;
     std::filesystem::create_directories(configPath.parent_path(), ec);
 
-    // Set dvd_root/retro_rewind_root/graphics_api via the same read-modify-write path the in-game
+    // Set dvd_root/retro_rewind_root via the same read-modify-write path the in-game
     // settings sidebar uses (RuntimeConfigFile::WriteSetting), NOT a raw truncating overwrite.
     // The truncating version this replaced destroyed every other saved setting - audio volumes,
     // the "mute music while external media plays" toggle, resolution scale, controller mappings,
@@ -309,7 +309,12 @@ extern "C" int SDL_main(int argc, char** argv) {
     // boot, before you could even background the app." dvd_root itself needs a real, uncommented
     // value even on a first launch with no config file yet, which is exactly what WriteSetting
     // already provides (EnsureConfigFile leaves it commented out).
-    RuntimeConfigFile::WriteSetting("video", "graphics_api", "\"auto\"");
+    //
+    // graphics_api is deliberately NOT written here. It used to be, pinned to "auto", which
+    // silently undid the renderer the user picked in the launcher (GraphicsSettings.kt writes it
+    // into this same file) on every single launch - choose OpenGL ES, and the game still came up
+    // on Vulkan. EnsureConfigFile's template already seeds "auto" for a brand new config, so
+    // there is nothing left for launch to do here.
     RuntimeConfigFile::WriteSetting("paths", "dvd_root", "\"" + g_androidDvdRoot + "\"");
     if (!g_androidRetroRewindRoot.empty()) {
         RuntimeConfigFile::WriteSetting("paths", "retro_rewind_root", "\"" + g_androidRetroRewindRoot + "\"");
