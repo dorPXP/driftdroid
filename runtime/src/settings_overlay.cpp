@@ -66,6 +66,7 @@ const char* GraphicsApiDisplayName() {
     case BACKEND_OPENGLES: return "OpenGL ES";
     case BACKEND_WEBGPU: return "WebGPU";
     case BACKEND_NULL: return "Null";
+    case BACKEND_DEKO3D: return "deko3d";
     case BACKEND_AUTO: return "Automatic";
     }
     return "Unknown";
@@ -1297,6 +1298,19 @@ void InitializeRuntimeSettings() noexcept {
     g_skipUnreadyPipelines = RuntimeConfigFile::SkipUnreadyPipelines(true);
     g_disableCopyFilter = RuntimeConfigFile::DisableCopyFilter(true);
     g_constantMatrixIndexing = RuntimeConfigFile::ConstantMatrixIndexing(false);
+    if (aurora_get_backend() == BACKEND_OPENGLES && !g_constantMatrixIndexing) {
+        // Not optional on this backend. Dynamically indexed matrices make Qualcomm's GLSL
+        // compiler segfault outright rather than merely miscompile: confirmed by a debuggerd
+        // tombstone landing inside libllvm-glnext.so's CreateQGLCShader, called from Dawn's
+        // ShaderModule::CompileShader, which took the whole process down during boot every
+        // time. On Vulkan the same setting is a fix for missing characters and stays the user's
+        // choice; here it is the difference between running and not.
+        g_constantMatrixIndexing = true;
+        RT_LOG(RT_TAG_RUNTIME)
+            << "forcing constant matrix indexing on: the OpenGL ES driver cannot compile the "
+               "dynamically indexed form"
+            << std::endl;
+    }
     g_threadedGx = RuntimeConfigFile::ThreadedGx(false);
     g_thermalAutoQuality = RuntimeConfigFile::ThermalAutoQuality(true);
     g_showFps = RuntimeConfigFile::ShowFps(true);

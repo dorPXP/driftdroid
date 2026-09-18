@@ -1147,6 +1147,18 @@ static void load_pipeline_cache() {
   if (g_pipelineCacheBroken) {
     return;
   }
+  if (!g_hasPipelineThread) {
+    // Boot prewarm only pays off when there are worker threads to absorb it. Without them every
+    // recipe compiles on the render thread, so replaying the whole cache means paying for
+    // thousands of pipelines - most of them for content this session may never reach - before
+    // the game can be played at all. Measured on an Adreno device with the OpenGL ES backend:
+    // the 1199 seeded recipes had not finished after several minutes of solid stutter, and none
+    // of it is reusable, because Dawn's GL backend does not store program binaries in the blob
+    // cache (confirmed: the cache DB does not grow across a GL run, while the Vulkan backend
+    // reported 8729/8729 hits on the same machine). Compile on first use instead.
+    Log.info("Skipping boot pipeline prewarm: this backend compiles pipelines on the render thread");
+    return;
+  }
   load_pipeline_cache_entries<clear::PipelineConfig>(ShaderType::Clear, clear::ClearPipelineConfigVersion,
                                                      clear::create_pipeline);
   load_pipeline_cache_entries<gx::PipelineConfig>(ShaderType::GX, gx::GXPipelineConfigVersion,
