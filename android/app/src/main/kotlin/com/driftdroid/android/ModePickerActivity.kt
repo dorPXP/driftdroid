@@ -58,6 +58,7 @@ class ModePickerActivity : Activity() {
     private lateinit var progressBar: ProgressBar
     private lateinit var diagnosticsButton: Button
     private lateinit var graphicsButton: Button
+    private lateinit var iconButton: Button
     private lateinit var serverSettingsButton: Button
     private lateinit var modsButton: Button
     private lateinit var miiDataButton: Button
@@ -304,6 +305,25 @@ class ModePickerActivity : Activity() {
         graphicsButton.setTextColor(Color.rgb(0xDD, 0xDD, 0xDD))
         graphicsButton.setShadowLayer(0f, 0f, 0f, 0)
 
+        // Custom home-screen shortcut icon. Lives here rather than in the in-game sidebar because
+        // it opens the gallery picker, which must not run over a live game surface (see the
+        // Mods... button below for the crash that caused).
+        iconButton = Button(this)
+        iconButton.text = "App icon..."
+        iconButton.textSize = 11f
+        iconButton.setOnClickListener { IconSettings.show(this) }
+        val iconButtonParams =
+            LinearLayout.LayoutParams(dp(260), dp(40))
+        iconButtonParams.topMargin = dp(8)
+        styleChannelButton(
+            iconButton,
+            Color.rgb(0x5A, 0x5A, 0x5A),
+            Color.rgb(0x3A, 0x3A, 0x3A),
+            dp(12).toFloat(),
+        )
+        iconButton.setTextColor(Color.rgb(0xDD, 0xDD, 0xDD))
+        iconButton.setShadowLayer(0f, 0f, 0f, 0)
+
         // Import/manage from here, not from the in-game settings sidebar - launching Android's
         // file picker while a live game session's GPU surface is running lost the WebGPU/Vulkan
         // surface on-device ("QueuePresent failed with VK_ERROR_SURFACE_LOST_KHR") and crashed
@@ -350,6 +370,7 @@ class ModePickerActivity : Activity() {
         root.addView(statusText)
         root.addView(diagnosticsButton, diagnosticsButtonParams)
         root.addView(graphicsButton, graphicsButtonParams)
+        root.addView(iconButton, iconButtonParams)
         root.addView(serverSettingsButton, serverSettingsButtonParams)
         root.addView(modsButton, modsButtonParams)
 
@@ -509,6 +530,7 @@ class ModePickerActivity : Activity() {
             REQUEST_CODE_IMPORT_MII_DATA -> handleMiiImportSourcePicked(data?.data)
             REQUEST_CODE_IMPORT_SINGLE_MII -> handleSingleMiiSourcePicked(data?.data)
             ModManager.REQUEST_CODE_PICK_ZIP -> ModManager.onZipPicked(this, data?.data)
+            IconSettings.REQUEST_CODE_PICK_IMAGE -> IconSettings.onImagePicked(this, data?.data)
         }
     }
 
