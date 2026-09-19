@@ -116,7 +116,7 @@ bool g_skipUnreadyPipelines = RuntimeConfigFile::SkipUnreadyPipelines(true);
 bool g_disableCopyFilter = RuntimeConfigFile::DisableCopyFilter(true);
 bool g_constantMatrixIndexing = RuntimeConfigFile::ConstantMatrixIndexing(false);
 bool g_threadedGx = RuntimeConfigFile::ThreadedGx(false);
-bool g_thermalAutoQuality = RuntimeConfigFile::ThermalAutoQuality(true);
+bool g_thermalAutoQuality = RuntimeConfigFile::ThermalAutoQuality(false);
 bool g_showFps = RuntimeConfigFile::ShowFps(true);
 bool g_showShaderCompilation = RuntimeConfigFile::ShowShaderCompilation(true);
 bool g_hideSettingsButton = RuntimeConfigFile::HideSettingsButton(false);
@@ -1312,7 +1312,7 @@ void InitializeRuntimeSettings() noexcept {
             << std::endl;
     }
     g_threadedGx = RuntimeConfigFile::ThreadedGx(false);
-    g_thermalAutoQuality = RuntimeConfigFile::ThermalAutoQuality(true);
+    g_thermalAutoQuality = RuntimeConfigFile::ThermalAutoQuality(false);
     g_showFps = RuntimeConfigFile::ShowFps(true);
     g_showShaderCompilation = RuntimeConfigFile::ShowShaderCompilation(true);
     g_hideSettingsButton = RuntimeConfigFile::HideSettingsButton(false);
