@@ -156,7 +156,9 @@ inline bool IsSupportedResolutionMultiplier(float value) {
 // Must stay in step with the backend table in main.cpp, which is what actually
 // maps these to AuroraBackend.
 inline bool IsSupportedGraphicsApi(std::string_view value) {
-#if defined(__ANDROID__)
+#if defined(__SWITCH__)
+    static constexpr std::array<std::string_view, 3> values{"auto", "opengles", "deko3d"};
+#elif defined(__ANDROID__)
     static constexpr std::array<std::string_view, 3> values{"auto", "vulkan", "opengles"};
 #else
     static constexpr std::array<std::string_view, 3> values{"auto", "d3d12", "vulkan"};
@@ -839,7 +841,7 @@ inline bool SkipUnreadyPipelines(bool fallback = true) {
     return Get().skipUnreadyPipelines.value_or(fallback);
 }
 
-inline bool ThermalAutoQuality(bool fallback = true) {
+inline bool ThermalAutoQuality(bool fallback = false) {
     return Get().thermalAutoQuality.value_or(fallback);
 }
 
