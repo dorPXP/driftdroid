@@ -190,7 +190,7 @@ No. Don't ask. Nothing in this repo or any release contains Nintendo code or ass
 Clean PAL `RMCP01`. Other regions and modified executables are rejected outright.
 
 **Is there gonna be a Switch version?**
-Yes, it's actively being worked on - Switch port next week.
+Yes, it's actively being worked on.
 
 **Is it done?**
 No - this is an active, personal work-in-progress fork. It's playable start to finish, but
