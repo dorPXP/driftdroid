@@ -406,10 +406,11 @@ class ModePickerActivity : Activity() {
     private fun showRetroRewindMenuDialog() {
         AlertDialog.Builder(this)
             .setTitle("Retro Rewind")
-            .setItems(arrayOf("Update", "Delete")) { _, which ->
+            .setItems(arrayOf("Check for updates", "Reinstall", "Delete")) { _, which ->
                 when (which) {
-                    0 -> showInstallRetroRewindDialog()
-                    1 -> showDeleteRetroRewindDialog()
+                    0 -> startDeltaUpdate()
+                    1 -> showInstallRetroRewindDialog()
+                    2 -> showDeleteRetroRewindDialog()
                 }
             }
             .show()
@@ -457,8 +458,9 @@ class ModePickerActivity : Activity() {
         val message = TextView(this)
         message.text =
             "Retro Rewind is a separate, optional community mod. The download option below " +
-                "fetches the official release straight from update.rwfc.net (verified by hash " +
-                "before install) - or hand over a copy you already have (search \"Retro Rewind " +
+                "checks update.rwfc.net for the newest release this build of DriftDroid can " +
+                "actually run and fetches it straight from there (verified by hash before " +
+                "install) - or hand over a copy you already have (search \"Retro Rewind " +
                 "Mario Kart Wii\" or use the Wheel Wizard tool)."
         message.setTextColor(Color.argb(220, 255, 255, 255))
         message.textSize = 14f
@@ -492,7 +494,7 @@ class ModePickerActivity : Activity() {
             return button
         }
 
-        optionButton("Download official pack (v${RetroRewindRelease.VERSION}, ~1.9GB)") { startDownloadInstall() }
+        optionButton("Download newest supported release (~1.9GB)") { startLatestInstall() }
         optionButton("Select .zip file I already have") { launchRetroRewindZipPicker() }
         optionButton("Select an already-extracted folder") { launchRetroRewindFolderPicker() }
 
@@ -505,8 +507,32 @@ class ModePickerActivity : Activity() {
         startStatusPolling()
     }
 
+    /** Installs whatever the live release catalog says is newest AND runnable on this build,
+     * rather than only ever the release that was current when the app was compiled. */
+    private fun startLatestInstall() {
+        beginImportUi("Checking for the newest Retro Rewind...")
+        RetroRewindInstallService.startLatestInstall(this)
+        startStatusPolling()
+    }
+
+    /** Applies the mod's own small per-version update archives to the existing install - a few MB
+     * rather than another ~1.9GB. */
+    private fun startDeltaUpdate() {
+        beginImportUi("Checking for Retro Rewind updates...")
+        RetroRewindInstallService.startDeltaUpdate(this)
+        startStatusPolling()
+    }
+
     private fun launchRetroRewindFolderPicker() {
         val intent = Intent(Intent.ACTION_OPEN_DOCUMENT_TREE)
+        // FLAG_GRANT_PERSISTABLE_URI_PERMISSION has to be asked for HERE, on the picker intent -
+        // without it the grant handed back is transient, and takePersistableUriPermission() on it
+        // throws SecurityException ("No persistable permission grants found"), which was thrown
+        // straight out of onActivityResult and took the whole app down the instant a folder was
+        // picked (reported as "it just boots me out of the app").
+        intent.addFlags(
+            Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION,
+        )
         startActivityForResult(intent, REQUEST_CODE_PICK_RETRO_REWIND_FOLDER)
     }
 
@@ -815,19 +841,49 @@ class ModePickerActivity : Activity() {
 
     private fun handleFolderPicked(treeUri: Uri?) {
         if (treeUri == null) return
-        contentResolver.takePersistableUriPermission(treeUri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
-        val picked = DocumentFile.fromTreeUri(this, treeUri) ?: return
-        val resolved = resolveRetroRewind6(picked)
-        if (resolved == null) {
-            statusText.setTextColor(Color.rgb(190, 30, 30))
-            statusText.text =
-                "That folder doesn't contain RetroRewind6/Binaries/Code.pul - pick the folder " +
-                    "you extracted Retro Rewind into (or the RetroRewind6 folder itself)."
+        // Best-effort: the transient grant this Activity already holds is enough to run the copy
+        // (the service is the same UID, same process), so a provider that refuses to persist is
+        // not a reason to fail the import - and must never be a reason to crash.
+        try {
+            contentResolver.takePersistableUriPermission(treeUri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        } catch (_: SecurityException) {
+        }
+        val picked = DocumentFile.fromTreeUri(this, treeUri)
+        if (picked == null) {
+            showImportError("Couldn't open that folder - try picking it again.")
             return
         }
-        beginImportUi("Copying Retro Rewind files - this can take a while for ~2GB...")
-        RetroRewindInstallService.startFolderInstall(this, resolved.uri)
-        startStatusPolling()
+        // Walking a SAF tree means a content-provider round trip per entry, which on a big folder
+        // on slow storage is far too slow for the main thread (an ANR reads to the player exactly
+        // like the crash above). Resolve off-thread, then come back to the UI.
+        beginImportUi("Checking the selected folder...")
+        Thread {
+            val resolved =
+                try {
+                    resolveRetroRewind6(picked)
+                } catch (_: Exception) {
+                    null
+                }
+            mainHandler.post {
+                if (isFinishing || isDestroyed) return@post
+                if (resolved == null) {
+                    endImportUi()
+                    showImportError(
+                        "That folder doesn't contain RetroRewind6/Binaries/Code.pul - pick the " +
+                            "folder you extracted Retro Rewind into (or the RetroRewind6 folder itself).",
+                    )
+                    return@post
+                }
+                statusText.text = "Copying Retro Rewind files - this can take a while for ~2GB..."
+                RetroRewindInstallService.startFolderInstall(this, resolved.uri)
+                startStatusPolling()
+            }
+        }.start()
+    }
+
+    private fun showImportError(message: String) {
+        statusText.setTextColor(Color.rgb(190, 30, 30))
+        statusText.text = message
     }
 
     private fun handleZipPicked(uri: Uri?) {
@@ -882,14 +938,21 @@ class ModePickerActivity : Activity() {
         statusText.text = statusMessage
     }
 
-    private fun finishImportUi(error: String?, filesCount: Int) {
+    /** Puts the buttons/progress bar back without writing any status text - for bailing out of an
+     * import before the service was ever started (the caller sets its own message). */
+    private fun endImportUi() {
         progressBar.isIndeterminate = false
         progressBar.visibility = View.GONE
         baseButton.isEnabled = true
         retroButton.isEnabled = true
+    }
+
+    private fun finishImportUi(error: String?, filesCount: Int) {
+        endImportUi()
         if (error == null) {
             statusText.setTextColor(Color.rgb(20, 140, 60))
-            statusText.text = "Retro Rewind installed ($filesCount files)."
+            statusText.text =
+                RetroRewindInstallStatus.successMessage ?: "Retro Rewind installed ($filesCount files)."
             refreshChannelButtons()
         } else {
             // Leave no half-copied install behind - isRetroRewindInstalled() only checks for

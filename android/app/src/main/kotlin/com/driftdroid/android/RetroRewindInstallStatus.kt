@@ -19,6 +19,10 @@ internal object RetroRewindInstallStatus {
     @Volatile var error: String? = null
     @Volatile var finished: Boolean = false
 
+    /** Set by flows whose success isn't "N files copied" - an update that applied deltas, or one
+     * that found nothing to do. Null means the generic installed-N-files wording. */
+    @Volatile var successMessage: String? = null
+
     fun start(label: String) {
         running = true
         this.label = label
@@ -27,6 +31,7 @@ internal object RetroRewindInstallStatus {
         totalBytes = 0
         error = null
         finished = false
+        successMessage = null
     }
 
     fun complete(error: String?) {

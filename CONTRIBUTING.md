@@ -75,6 +75,38 @@ phone that has been running for ten minutes is thermally throttled and will
 score differently from a cold one, and some devices have a boost or performance
 mode that silently changes the answer.
 
+## Supporting a new Retro Rewind release
+
+Retro Rewind ships faster than this app does, and most of the time nothing needs
+doing: the app reads the official release list from `update.rwfc.net` at runtime
+and decides what it can run from the SHA-256 of `Binaries/Code.pul`, not from a
+version number. A release that only changes tracks, characters or other assets
+is picked up on its own, with no code change and no app update.
+
+A release that changes `Code.pul` is different. That file is the mod's PowerPC
+game logic, and because everything here is compiled to native code ahead of time
+rather than emulated, it has to be translated on a desktop and compiled into the
+app - a phone cannot pick it up at runtime. The app detects this case from the
+release's small delta archive before downloading anything large, refuses it, and
+leaves the player's working install alone.
+
+To add support for such a release:
+
+1. Re-translate against the new `Code.pul` (see the translator's `retro_rewind`
+   build shards under `runtime/generated/build_shards`) and rebuild.
+2. Append the new `Code.pul` SHA-256 to `SUPPORTED_CODE_PUL_SHA256` in
+   `android/app/src/main/kotlin/com/driftdroid/android/RetroRewindRelease.kt`,
+   with the version in a trailing comment. It is a set, so older supported
+   releases keep working - don't replace the existing entries.
+3. If the fallback release used when the device is offline should move too,
+   update `VERSION`, `ARCHIVE_URL`, `ARCHIVE_BYTES` and `ARCHIVE_SHA256` in the
+   same file to the new full archive.
+4. Test both a fresh install and "Check for updates" on an existing install.
+
+Never relax the hash check to make a release install. It exists because an
+unsupported `Code.pul` desyncs from the recompiled logic at runtime instead of
+failing cleanly, which is far worse for the player than being told to wait.
+
 ## Bug reports
 
 Use the issue templates, and see the FAQ in the [README](README.md). The most

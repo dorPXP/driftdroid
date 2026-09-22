@@ -160,18 +160,44 @@ automatically apply there, and vice versa.
 ## Retro Rewind
 
 [Retro Rewind](https://wiki.tockdom.com/wiki/Retro_Rewind) is a separate, optional community mod -
-this app doesn't include, bundle, or download it, the same way it doesn't include the base game.
+nothing in this repo or any release bundles it, the same way nothing here includes the base game.
 The app's first screen lets you choose Original Mario Kart Wii or Retro Rewind; picking Retro
-Rewind before it's installed walks you through getting it set up:
+Rewind before it's installed walks you through getting it set up, three ways:
 
-1. Get your own copy of Retro Rewind first (search "Retro Rewind Mario Kart Wii", or use the
-   separate Wheel Wizard tool most PC players already use for this).
-2. Come back to the app and tap "Install Retro Rewind...", then either:
-   - **Select the `.zip` file** exactly as you downloaded it - the app extracts it for you, no
-     separate unzip step needed, or
-   - **Select a folder**, if you've already extracted it yourself.
-3. The app copies the pack into place (~2GB, so this takes a minute) and you're done - no manual
-   file management, no computer required.
+1. **Download it** - the app asks the mod's own official update service
+   (`update.rwfc.net`, the same one Wheel Wizard and the Retro Rewind updater use) which release
+   is newest, and fetches it straight from there. Nothing is mirrored or re-hosted here, and every
+   download is hash-verified before it's installed.
+2. **Select the `.zip` file** you already downloaded - the app extracts it for you, no separate
+   unzip step needed.
+3. **Select a folder**, if you've already extracted it yourself. Use this one if you're bringing
+   an install over from Dolphin with your own mods in it - your files are copied as they are.
+
+Either way the pack lands in place (~2GB, so it takes a few minutes) and you're done: no manual
+file management, no computer required. Downloads resume where they left off if your connection
+drops, and the copy keeps running while you're in another app.
+
+### Retro Rewind versions
+
+Retro Rewind releases more often than this app does, so the app checks what's actually out there
+rather than knowing about one hardcoded release, and **"Check for updates"** in the Retro Rewind
+menu applies the mod's own small per-version update archives - a few megabytes instead of
+re-downloading the whole pack.
+
+There is one real limit worth understanding. Retro Rewind's *game logic* lives in
+`Binaries/Code.pul`, and because DriftDroid compiles everything to native code ahead of time
+rather than emulating a Wii, that file has to be compiled into the app itself - it can't be picked
+up on your phone at runtime. So:
+
+- A Retro Rewind update that changes **tracks, characters or other assets** works immediately, with
+  no app update at all.
+- A Retro Rewind update that changes **game code** needs a new DriftDroid build. The app detects
+  this before downloading anything large, tells you, and leaves your working install alone rather
+  than replacing it with something that would crash.
+
+This is also why importing a Retro Rewind copy from somewhere else can be refused: it's checked
+against the code this build was compiled for. Character/track mods in an otherwise-supported
+install are fine - those are assets, and they're preserved.
 
 Both the Riivolution-style file-overlay system this depends on, and a network stack built
 specifically to talk to the community Retro-WFC service, are shared with upstream WiiCompiled's
@@ -188,6 +214,11 @@ No. Don't ask. Nothing in this repo or any release contains Nintendo code or ass
 
 **Which game version works?**
 Clean PAL `RMCP01`. Other regions and modified executables are rejected outright.
+
+**Can I use the newest Retro Rewind version?**
+If it only changed assets, yes - the app picks it up on its own. If it changed game code, it needs
+a DriftDroid update first; the app will say so instead of installing something broken. See
+[Retro Rewind versions](#retro-rewind-versions).
 
 **Is there gonna be a Switch version?**
 Yes, it's actively being worked on.

@@ -9,12 +9,13 @@ package com.driftdroid.android
  * accepted, so a corrupted or unexpectedly-changed download fails closed instead of silently
  * installing something else.
  *
- * Deliberately pinned rather than always "whatever's newest": bumping this to a new Retro Rewind
- * release means updating the hash/size here too and re-translating/re-validating our own
- * statically-recompiled Code.pul support against it (see runtime/generated/build_shards -
- * re-translated for 6.12.8 on 2026-09-10, after RR's 6.12.8 hotfix genuinely changed Code.pul at
- * the byte level and broke the previous 6.12.7-translated build for anyone who updated), not
- * something to change casually.
+ * This is the known-good FALLBACK release, used when the live release catalog can't be reached
+ * (offline, or the service is down). The app normally discovers releases from that catalog
+ * instead - see RetroRewindCatalog - and only what it can actually run is offered, decided by
+ * [SUPPORTED_CODE_PUL_SHA256]. Bumping this means re-translating/re-validating our own
+ * statically-recompiled Code.pul support (see runtime/generated/build_shards - re-translated for
+ * 6.12.8 on 2026-09-10, after RR's 6.12.8 hotfix genuinely changed Code.pul at the byte level and
+ * broke the previous 6.12.7-translated build for anyone who updated).
  *
  * ARCHIVE_SHA256 and CODE_PUL_SHA256 were independently cross-checked against KartPad's own
  * v0.4.16-android.1 release (chrissotraidis/kartpad), which bumped to 6.12.8 the same day and
@@ -27,14 +28,28 @@ internal object RetroRewindRelease {
     const val ARCHIVE_SHA256 = "9dc9f689b2d1bc03f7b9f49e9013f31d2ab31e9b800aa2da1f6badbd2ecf21dc"
 
     /**
-     * SHA-256 of Binaries/Code.pul from this exact release, verified against the file this app
-     * ships/downloads. Our Retro Rewind support is a static, ahead-of-time recompilation of this
-     * one file's game logic (see the translator's retro_rewind build shards) - a Code.pul from any
-     * other release (older or newer, including hotfixes that only bump a patch version) genuinely
-     * differs at the byte level and will desync from that recompiled logic at runtime instead of
-     * failing cleanly. Used to reject a manually-imported zip/folder whose Code.pul doesn't match,
-     * rather than let it silently load and crash/hang (see the 6.12.8 hotfix breakage report that
-     * prompted this whole version bump).
+     * Every Binaries/Code.pul build this app has native code for, newest last.
+     *
+     * A SET, not a single pin, and the thing compatibility is actually decided on - see
+     * [RetroRewindCatalog]. Our Retro Rewind support is a static, ahead-of-time recompilation of
+     * this exact file's game logic (see the translator's retro_rewind build shards): a Code.pul
+     * that isn't in here has no translated code on the device and would desync at runtime instead
+     * of failing cleanly, so it is rejected before it can replace a working install.
+     *
+     * Keying on this hash rather than on a version number is what lets version detection be
+     * automatic: Retro Rewind releases that only change assets/tracks ship the same Code.pul (or
+     * no Code.pul at all in their delta), so they are adopted with no app update at all. Adding a
+     * genuinely new release means re-translating against its Code.pul and appending the hash here.
+     *
+     * 6.12.8 ("88cd25...") cross-checked against KartPad's v0.4.16-android.1 build profile, and
+     * re-verified directly against the live 6.12.8 delta archive on update.rwfc.net.
      */
+    val SUPPORTED_CODE_PUL_SHA256 =
+        setOf(
+            "88cd25ff08121f7c4ddb40538703f40c270f414f2dbc55a6b4b6767e62db7253", // 6.12.8
+        )
+
+    /** The build [VERSION] itself ships - the fallback when the network is unavailable and the
+     * live catalog can't be consulted. */
     const val CODE_PUL_SHA256 = "88cd25ff08121f7c4ddb40538703f40c270f414f2dbc55a6b4b6767e62db7253"
 }
