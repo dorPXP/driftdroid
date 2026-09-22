@@ -28,6 +28,8 @@ Code.pul
 /build-*/
 /android-native-build/
 /linux-native-build/
+/switch-native-build/
+/switch-build/
 /dist/
 /out/
 [Bb]in/

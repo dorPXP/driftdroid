@@ -319,16 +319,27 @@ struct IndirectResolvedDispatchMemoEntry {
     uint32_t address;
     const TranslatedFunctionInfo* info;
 };
+#if defined(__SWITCH__) || defined(__ANDROID__)
+// See g_currentCpuContext: guest dispatch only happens on the emulation thread.
+inline IndirectResolvedDispatchMemoEntry
+    g_indirectResolvedDispatchMemo[kIndirectDispatchCacheEntries]{};
+#else
 inline thread_local IndirectResolvedDispatchMemoEntry
     g_indirectResolvedDispatchMemo[kIndirectDispatchCacheEntries]{};
+#endif
 
 struct IndirectRawDispatchMemoEntry {
     bool valid;
     uint32_t address;
     const RawDispatchRecord* record;
 };
+#if defined(__SWITCH__) || defined(__ANDROID__)
+inline IndirectRawDispatchMemoEntry
+    g_indirectRawDispatchMemo[kIndirectDispatchCacheEntries]{};
+#else
 inline thread_local IndirectRawDispatchMemoEntry
     g_indirectRawDispatchMemo[kIndirectDispatchCacheEntries]{};
+#endif
 
 class TranslatedFunctionRegistry {
 public:

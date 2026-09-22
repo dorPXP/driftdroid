@@ -888,9 +888,10 @@ void DrawStartupScreen() {
                                         ImGuiWindowFlags_NoBringToFrontOnFocus;
     if (ImGui::Begin("Wiicompiled Startup", nullptr, kFlags)) {
         ImGui::SetWindowFontScale(1.25f);
-        // Android app branding is "DriftDroid" - desktop stays "WiiCompiled" (the underlying
-        // static-recompilation project's own name, unrelated to the Android port's rebrand).
-#if defined(__ANDROID__)
+        // The shipped app branding is "DriftDroid" on both device ports (the Switch NRO carries
+        // the DriftDroid name, icon and NACP too); desktop stays "WiiCompiled", the underlying
+        // static-recompilation project's own name, unrelated to the port's rebrand.
+#if defined(__ANDROID__) || defined(__SWITCH__)
         constexpr const char* kTitle = "DriftDroid";
 #else
         constexpr const char* kTitle = "WiiCompiled";

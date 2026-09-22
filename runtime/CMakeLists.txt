@@ -19,14 +19,43 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Android" AND CMAKE_ANDROID_ARCH_ABI STREQUAL "arm
     set(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE BOTH)
 endif()
 
-if((NOT (WIN32 AND MINGW)) AND (NOT CMAKE_SYSTEM_NAME STREQUAL "Linux") AND (NOT MKW_TARGET_ANDROID))
-    message(FATAL_ERROR "WiiCompiled requires Windows (LLVM-MinGW), native Linux, or Android arm64-v8a")
+# Switch homebrew, via devkitPro's Switch.cmake toolchain file (sets CMAKE_SYSTEM_NAME to
+# "NintendoSwitch" and CMAKE_SYSTEM_PROCESSOR to "aarch64"). Unlike the NDK's toolchain file,
+# devkitA64.cmake's find_root_path handling only takes the CMAKE_FIND_ROOT_PATH_MODE_PACKAGE=ONLY
+# branch on CMake <3.16 (see dkp-toolchain-common.cmake) - this project requires 3.16+ (see
+# cmake_minimum_required above), so it lands in the CMAKE_SYSTEM_PREFIX_PATH branch instead and
+# never sets that variable at all. The Android find_package gotcha above does not apply here;
+# nothing needs overriding for Switch on that front.
+set(MKW_TARGET_SWITCH FALSE)
+if(CMAKE_SYSTEM_NAME STREQUAL "NintendoSwitch")
+    set(MKW_TARGET_SWITCH TRUE)
+    # libnx gives every pthread/std::thread a 128 KiB stack; Tint's WGSL resolver and mesa's GLSL
+    # compiler overflow that. __wrap___syscall_thread_create (main.cpp) raises the floor for every
+    # thread in the process, including ones created inside Dawn, SDL and libstdc++.
+    add_link_options(-Wl,--wrap=__syscall_thread_create)
+endif()
+
+if((NOT (WIN32 AND MINGW)) AND (NOT CMAKE_SYSTEM_NAME STREQUAL "Linux") AND
+   (NOT MKW_TARGET_ANDROID) AND (NOT MKW_TARGET_SWITCH))
+    message(FATAL_ERROR "WiiCompiled requires Windows (LLVM-MinGW), native Linux, Android arm64-v8a, or Nintendo Switch (devkitA64)")
 endif()
 if(MKW_TARGET_ANDROID)
     if(NOT CMAKE_CXX_COMPILER_ID STREQUAL "Clang" OR
        NOT CMAKE_SIZEOF_VOID_P EQUAL 8 OR
        NOT CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64|AARCH64)$")
         message(FATAL_ERROR "WiiCompiled for Android requires 64-bit Clang targeting arm64-v8a")
+    endif()
+elseif(MKW_TARGET_SWITCH)
+    # devkitPro ships no Clang cross-compiler for Switch - devkitA64 is GCC-only (verified: GCC
+    # 16.1.0, no clang/aarch64-none-elf-clang binary exists anywhere under devkitA64/bin). This is
+    # a deliberate, accepted exception to the Clang-everywhere policy enforced below for every
+    # other target, not an oversight - see [[nifty-discovering-kahn]] plan Phase 1. GCC-vs-Clang
+    # divergences (e.g. a Clang-only #pragma in ax_effects.cpp) are fixed as they're found rather
+    # than assumed away; do not add a second exception here without checking for more.
+    if(NOT CMAKE_CXX_COMPILER_ID STREQUAL "GNU" OR
+       NOT CMAKE_SIZEOF_VOID_P EQUAL 8 OR
+       NOT CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64|AARCH64)$")
+        message(FATAL_ERROR "WiiCompiled for Switch requires 64-bit GCC (devkitA64) targeting aarch64")
     endif()
 else()
     if(NOT CMAKE_CXX_COMPILER_ID STREQUAL "Clang" OR
@@ -46,6 +75,26 @@ endif()
 # libraries and the products in cmake/PublicProducts.cmake) inherits them while
 # aurora-main and its third-party tree stay unaffected.
 set(MKW_PROJECT_COMPILE_DEFINITIONS NOMINMAX)
+
+# Profile-guided optimization for the Switch build. Two-pass:
+#   cmake -DMKW_PGO=generate ...  -> instrumented build; play, then the runtime calls
+#                                   __gcov_dump() and the .gcda files land under
+#                                   sdmc:/switch/WiiCompiled/Cache/gcov (GCOV_PREFIX).
+#   copy that tree back over the build dir, then
+#   cmake -DMKW_PGO=use ...      -> optimized build using the measured hot paths.
+set(MKW_PGO "" CACHE STRING "Switch PGO pass: empty, generate or use")
+if(MKW_PGO STREQUAL "generate")
+    add_compile_options(-fprofile-generate -fprofile-update=atomic)
+    add_link_options(-fprofile-generate -fprofile-update=atomic)
+    list(APPEND MKW_PROJECT_COMPILE_DEFINITIONS MKW_PGO_GENERATE=1)
+elseif(MKW_PGO STREQUAL "use")
+    # -fprofile-correction: counters are written from several threads; missing or
+    # inconsistent counts must not fail the build.
+    add_compile_options(-fprofile-use -fprofile-correction -Wno-missing-profile)
+    add_link_options(-fprofile-use -fprofile-correction)
+elseif(NOT MKW_PGO STREQUAL "")
+    message(FATAL_ERROR "MKW_PGO must be empty, generate or use")
+endif()
 
 set(CMAKE_CXX_STANDARD 17)
 
@@ -221,6 +270,15 @@ else()
     if(NOT EXISTS ${MKW_AURORA_DIR}/CMakeLists.txt)
         message(FATAL_ERROR "Requested aurora-main but ${MKW_AURORA_DIR} is missing")
     endif()
+    # Switch: aurora-main (SDL3 windowing + Dawn/WebGPU) has no Switch backend at all and cannot
+    # get one - Dawn only targets Vulkan/D3D/Metal/GL, none of which exist on stock Switch
+    # homebrew (graphics go through devkitPro's own deko3d instead). This add_subdirectory() is
+    # still attempted for Switch rather than skipped, deliberately: Phase 1's own goal is to prove
+    # this project's CMake logic gets as far as it can and fails exactly at the SDL3/Dawn boundary,
+    # not to paper over that boundary early. Expect this configure (or the following build) to
+    # fail somewhere in aurora-main/Dawn for MKW_TARGET_SWITCH - that failure is Phase 1's real
+    # deliverable, and Phase 3 replaces aurora_core's GPU/window layer wholesale for this target
+    # rather than trying to make Dawn itself work here. See [[nifty-discovering-kahn]] plan.
     set(DAWN_ENABLE_D3D11 OFF CACHE BOOL "" FORCE)
     if(WIN32)
         set(DAWN_ENABLE_D3D12 ON CACHE BOOL "" FORCE)

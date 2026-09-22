@@ -1,5 +1,59 @@
 include_guard(GLOBAL)
 
+# Switch: Dawn is built separately for devkitA64 with only its OpenGL ES backend, which runs on
+# devkitPro's switch-mesa (EGL + GLES 3.x over nouveau). Source is google/dawn at the exact commit
+# the other platforms' prebuilt packages use, plus small Switch patches (platform detection, EGL
+# surface from nwindowGetDefault(), abseil newlib fixes) - see hermes/13-SWITCH-PORT-SESSION-1.md.
+# This is the first-playable renderer; a deko3d backend (aurora-main/lib/deko3d/) replaces it
+# later for 60fps.
+if (CMAKE_SYSTEM_NAME STREQUAL "NintendoSwitch")
+  set(AURORA_SWITCH_DAWN_SOURCE_DIR "$ENV{HOME}/switch-dawn/dawn" CACHE PATH "Patched Dawn source for Switch")
+  set(AURORA_SWITCH_DAWN_BUILD_DIR "$ENV{HOME}/switch-dawn/build-switch" CACHE PATH "Dawn build tree for Switch")
+  set(_switch_dawn_lib "${AURORA_SWITCH_DAWN_BUILD_DIR}/src/dawn/native/libwebgpu_dawn.a")
+  # uam: deko3d's GLSL -> DKSH compiler, used by Dawn's deko3d backend to build shaders at runtime.
+  set(AURORA_SWITCH_UAM_LIB "$ENV{HOME}/uam/build-switch/libuamcore.a" CACHE FILEPATH "uam static library for Switch")
+  if (NOT EXISTS "${_switch_dawn_lib}")
+    message(FATAL_ERROR "Switch Dawn library not found at ${_switch_dawn_lib}; build it first.")
+  endif ()
+  if (NOT TARGET dawn::webgpu_dawn)
+    add_library(aurora_switch_dawn STATIC IMPORTED GLOBAL)
+    set_target_properties(aurora_switch_dawn PROPERTIES IMPORTED_LOCATION "${_switch_dawn_lib}")
+    target_include_directories(aurora_switch_dawn INTERFACE
+      "${AURORA_SWITCH_DAWN_SOURCE_DIR}/include"
+      "${AURORA_SWITCH_DAWN_BUILD_DIR}/gen/include")
+    # Mesa's static archives reference each other, hence the group.
+    # deko3d ships a debug build (deko3dd) and a release build (deko3d). The debug one validates
+    # every API call and aborts on failure - useful while bringing the backend up, but it is pure
+    # CPU overhead on a renderer that issues thousands of calls a frame, and this port is
+    # CPU-bound. Default to release; set AURORA_SWITCH_DEKO3D_DEBUG=ON to get the validation (and
+    # the "dkmem" style aborts) back when diagnosing a graphics problem.
+    option(AURORA_SWITCH_DEKO3D_DEBUG "Link the validating debug build of deko3d" OFF)
+    if (AURORA_SWITCH_DEKO3D_DEBUG)
+      set(_aurora_deko3d_lib deko3dd)
+    else ()
+      set(_aurora_deko3d_lib deko3d)
+    endif ()
+    target_link_libraries(aurora_switch_dawn INTERFACE
+      -Wl,--start-group "${AURORA_SWITCH_UAM_LIB}" ${_aurora_deko3d_lib} EGL GLESv2 glapi drm_nouveau -Wl,--end-group)
+    target_link_directories(aurora_switch_dawn INTERFACE "$ENV{DEVKITPRO}/portlibs/switch/lib")
+    add_library(dawn::webgpu_dawn ALIAS aurora_switch_dawn)
+  endif ()
+  add_library(dawn_dawncpp_headers INTERFACE IMPORTED GLOBAL)
+  target_include_directories(dawn_dawncpp_headers INTERFACE
+    "${AURORA_SWITCH_DAWN_SOURCE_DIR}/include"
+    "${AURORA_SWITCH_DAWN_BUILD_DIR}/gen/include")
+  add_library(dawn::dawncpp_headers ALIAS dawn_dawncpp_headers)
+  set(DAWN_ENABLE_D3D12 OFF CACHE INTERNAL "")
+  set(DAWN_ENABLE_D3D11 OFF CACHE INTERNAL "")
+  set(DAWN_ENABLE_VULKAN OFF CACHE INTERNAL "")
+  set(DAWN_ENABLE_METAL OFF CACHE INTERNAL "")
+  set(DAWN_ENABLE_DESKTOP_GL OFF CACHE INTERNAL "")
+  set(DAWN_ENABLE_OPENGLES ON CACHE INTERNAL "")
+  set(DAWN_ENABLE_NULL OFF CACHE INTERNAL "")
+  set(AURORA_DAWN_IS_SHARED FALSE PARENT_SCOPE)
+  return()
+endif ()
+
 # Resolve Dawn/WebGPU dependency based on AURORA_DAWN_PROVIDER and AURORA_DAWN_LINKAGE.
 #
 # After this module runs:

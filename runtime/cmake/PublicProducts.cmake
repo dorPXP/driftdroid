@@ -43,10 +43,24 @@ function(mkw_apply_translated_compile_options target)
     # a real per-function bisection to find which specific translated function(s) need O2's more
     # conservative codegen, rather than flipping the whole corpus and hoping a blanket flag fixes
     # it. Explicitly deferred past the next update (UI-focused) - revisit later, not urgent.
+    # -fno-slp-vectorize is Clang/LLVM's flag name; GCC's equivalent pass has a different name
+    # (-fno-tree-slp-vectorize). Switch (devkitA64) is GCC-only - see runtime/CMakeLists.txt's
+    # MKW_TARGET_SWITCH branch - so this needs to branch on compiler ID rather than assume Clang
+    # the way every other platform this project has targeted so far could.
+    if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+        set(MKW_NO_SLP_VECTORIZE_FLAG -fno-tree-slp-vectorize)
+        # The shards are built -fPIC; GCC then treats every non-static function as interposable
+        # and refuses to inline or specialise calls to it across the corpus. Nothing here is
+        # interposed (the Switch NRO is one static executable), so opting out changes no computed
+        # result - unlike -O3 above, this is codegen-neutral for guest semantics.
+        list(APPEND MKW_NO_SLP_VECTORIZE_FLAG -fno-semantic-interposition)
+    else()
+        set(MKW_NO_SLP_VECTORIZE_FLAG -fno-slp-vectorize)
+    endif()
+    # One section per function so the linker can place the hot ones together; see
+    # MKW_SYMBOL_ORDER_FILE below. Layout only - this changes no generated code.
     target_compile_options(${target} PRIVATE
-        -O2 ${MKW_TRANSLATED_PPC_FP_OPTIONS} -fno-slp-vectorize -w -pipe
-        # One section per function so the linker can place the hot ones together; see
-        # MKW_SYMBOL_ORDER_FILE below. Layout only - this changes no generated code.
+        -O2 ${MKW_TRANSLATED_PPC_FP_OPTIONS} ${MKW_NO_SLP_VECTORIZE_FLAG} -w -pipe
         -ffunction-sections -fdata-sections)
 endfunction()
 
@@ -91,7 +105,7 @@ target_compile_definitions(mkw_runtime_common PRIVATE
     SDL_MAIN_HANDLED
     _DISABLE_STRING_ANNOTATION _DISABLE_VECTOR_ANNOTATION)
 target_link_libraries(mkw_runtime_common PRIVATE
-    aurora::gx aurora::pad aurora::si aurora::vi aurora::mtx TracyClient)
+    aurora::gx aurora::pad aurora::si aurora::vi aurora::mtx aurora::thp TracyClient)
 target_link_libraries(mkw_runtime_common PRIVATE mkw::pugixml mkw::toml11 mkw::cryptopp mkw::mbedtls)
 if(WIN32)
     target_link_libraries(mkw_runtime_common PRIVATE shell32 windowsapp)
@@ -132,11 +146,25 @@ endforeach()
 # the same contraction/rounding policy as translated PPC shards.
 set(MKW_PPC_SEMANTIC_RUNTIME_SOURCES
     "${MKW_RUNTIME_SOURCE_DIR}/src/ppc_helpers.cpp"
-    "${MKW_RUNTIME_SOURCE_DIR}/src/fpu_helpers.cpp")
+    "${MKW_RUNTIME_SOURCE_DIR}/src/fpu_helpers.cpp"
+    # ax_effects.cpp previously relied solely on a `#if defined(__clang__) #pragma clang fp
+    # contract(off) #endif` guard to suppress FMA contraction on top of this target's -ffast-math.
+    # That pragma is a silent no-op under GCC (devkitA64/Switch has no Clang - see
+    # runtime/CMakeLists.txt's MKW_TARGET_SWITCH branch), which would leave PowerPC's discrete
+    # fmuls/fadds semantics unenforced there. The compile-flag override below is portable across
+    # every compiler this project targets; the pragma is left in place too since it's harmless on
+    # Clang platforms, but this flag is what actually guarantees the behavior on Switch.
+    "${MKW_RUNTIME_SOURCE_DIR}/src/hle/audio/ax_effects.cpp")
 set_source_files_properties(${MKW_PPC_SEMANTIC_RUNTIME_SOURCES} PROPERTIES
     SKIP_UNITY_BUILD_INCLUSION ON
     SKIP_PRECOMPILE_HEADERS ON
     COMPILE_OPTIONS "${MKW_TRANSLATED_PPC_FP_OPTIONS}")
+# guest_flat_memory.cpp defines MKW_GUEST_FLAT_BASE_WRITER before including guest_flat_memory.h
+# (it owns the only write to the Switch guest base); a unity batch or the PCH would include the
+# reader's const declaration first.
+set_source_files_properties("${MKW_RUNTIME_SOURCE_DIR}/src/guest_flat_memory.cpp" PROPERTIES
+    SKIP_UNITY_BUILD_INCLUSION ON
+    SKIP_PRECOMPILE_HEADERS ON)
 set_target_properties(mkw_runtime_common PROPERTIES UNITY_BUILD ON UNITY_BUILD_MODE GROUP)
 target_precompile_headers(mkw_runtime_common PRIVATE "${MKW_RUNTIME_SOURCE_DIR}/include/mkw_pch.h")
 mkw_apply_common_compile_options(mkw_runtime_common)
@@ -209,7 +237,7 @@ function(mkw_configure_product target)
         mkw_base_shared mkw::pugixml mkw::toml11 mkw::cryptopp mkw::mbedtls)
 
     target_link_libraries(${target} PRIVATE
-        aurora::gx aurora::pad aurora::si aurora::vi aurora::mtx)
+        aurora::gx aurora::pad aurora::si aurora::vi aurora::mtx aurora::thp)
     # mkw_runtime_common is an OBJECT library (see the longer explanation on the WIN32/libco
     # branch below): its own target_link_libraries(... TracyClient) doesn't propagate to a
     # consumer that only pulls in its .o files via $<TARGET_OBJECTS:>, so the Tracy zone/plot
@@ -258,10 +286,10 @@ function(mkw_configure_product target)
         # PLT. Nothing interposes on these symbols (Java finds its JNI entry points by name, which
         # this doesn't affect), and profiling showed ~5% of the game thread in @plt stubs.
         target_link_options(${target} PRIVATE -Wl,-Bsymbolic-functions)
-        # Optional hot/cold code layout: a plain list of symbol names, hottest first, produced from
-        # a profile (runtime/tools/gen_symbol_order.sh). The translated corpus is ~70MB of text laid
-        # out in arbitrary order, which thrashes the instruction TLB; ordering it costs nothing at
-        # runtime and changes no codegen.
+        # Optional hot/cold code layout: a plain list of symbol names, hottest first, as produced
+        # from a profile (see runtime/tools/gen_symbol_order.sh). The translated corpus is ~70MB of text
+        # laid out in arbitrary order, which thrashes the instruction TLB; ordering it costs
+        # nothing at runtime and changes no codegen.
         if(MKW_SYMBOL_ORDER_FILE)
             if(NOT EXISTS "${MKW_SYMBOL_ORDER_FILE}")
                 message(FATAL_ERROR "MKW_SYMBOL_ORDER_FILE does not exist: ${MKW_SYMBOL_ORDER_FILE}")
@@ -334,11 +362,13 @@ function(mkw_configure_product target)
     endif()
 endfunction()
 
-# On every desktop platform each product is a standalone executable. On Android there is no
-# process to exec - the product becomes a SHARED library (libwii.so / libretro_rewind.so) loaded
-# into the host Kotlin app's process via JNI, with RuntimeMain (runtime/src/main.cpp) as the
-# entry point the JNI bridge calls instead of a real argv-driven main(). Not yet wired up: the
-# actual JNI bridge that calls RuntimeMain is P5 work (android/app/src/main/cpp/jni/bridge.cpp,
+# On every desktop platform - and on Switch, which also execs a real process (an .nro via
+# hbloader, not a library loaded into a host app) - each product is a standalone executable. Only
+# Android differs: there is no process to exec there, so the product becomes a SHARED library
+# (libwii.so / libretro_rewind.so) loaded into the host Kotlin app's process via JNI, with
+# RuntimeMain (runtime/src/main.cpp) as the entry point the JNI bridge calls instead of a real
+# argv-driven main(). Not yet wired up: the actual JNI bridge that calls RuntimeMain is P5 work
+# (android/app/src/main/cpp/jni/bridge.cpp,
 # not written yet) - this only makes the library itself buildable as a .so.
 function(mkw_add_product_target target)
     if(MKW_TARGET_ANDROID)
@@ -415,13 +445,16 @@ set(MKW_ALL_BUILD_TARGETS
     mkw_retro_rewind_functions WiiCompiled RetroRewind)
 foreach(target IN LISTS MKW_ALL_BUILD_TARGETS)
     if(TARGET ${target})
-        if(NOT MKW_TARGET_ANDROID)
+        if(NOT MKW_TARGET_ANDROID AND NOT MKW_TARGET_SWITCH)
             # x86-64-v3 (Haswell-class: AVX2/FMA/BMI2/...) is this project's fixed baseline on
             # Windows/Linux - see host_cpu_baseline.cpp, which turns a machine below that line
             # into a readable error instead of an illegal-instruction crash. There is no arm64
             # equivalent question to ask: NEON/Advanced SIMD is mandatory on every ARMv8-A chip,
-            # so Android gets no -march flag at all (the NDK's own per-ABI defaults already target
-            # a reasonable arm64-v8a baseline).
+            # so Android and Switch get no -march flag at all (the NDK's per-ABI defaults and
+            # devkitA64's own aarch64-none-elf defaults already target a reasonable baseline for
+            # their respective chips - Switch's Cortex-A57 in particular is far below Haswell-class
+            # x86, so this exclusion is not optional the way it might look from the Android case
+            # alone).
             target_compile_options(${target} PRIVATE -march=x86-64-v3)
         endif()
     endif()

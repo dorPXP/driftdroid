@@ -1,6 +1,7 @@
 #pragma once
 
 #include "runtime_config.h"
+#include "host_file_copy.h"
 #include "runtime_log.h"
 #include "system_bridge.h"
 
@@ -75,10 +76,14 @@ inline std::optional<std::filesystem::path> BootstrapPayloadPath() {
         }
     }
 
-#if defined(__ANDROID__)
+#if defined(__ANDROID__) || defined(__SWITCH__)
     // Same reasoning as the dsp_coef.bin lookup in ax_mix.cpp: no executable directory and no
     // checked-out source tree on-device, so the bootstrap payload (runtime/assets/wii on desktop)
     // is instead staged alongside Config.toml, debug-only, the same way DiscData/dsp_coef.bin are.
+    // Switch shares this branch with Android rather than getting its own: both have
+    // ExecutableDirectory() == nullopt (see runtime_config.h) for the same underlying reason (no
+    // "next to the executable" concept), so both need the payload staged next to their config the
+    // same way.
     const auto androidPayload = RuntimeConfigFile::ApplicationDataDirectory() / "wii_bootstrap";
     if (ExistingDirectory(androidPayload / "shared2" / "wc24")) {
         return androidPayload;
@@ -114,7 +119,7 @@ inline bool CopyBootstrapFile(const std::filesystem::path& sourceRoot,
     if (ec) {
         return false;
     }
-    std::filesystem::copy_file(source, destination, std::filesystem::copy_options::none, ec);
+    HostFileCopy::CopyFile(source, destination, std::filesystem::copy_options::none, ec);
     return !ec;
 }
 

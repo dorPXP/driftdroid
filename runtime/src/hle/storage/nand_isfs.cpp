@@ -810,7 +810,7 @@ int32_t ISFS_OpenLib_Initialize(CpuContext* ctx) {
     // Create the title data directory if it doesn't exist
     char titlePath[256];
     const std::string& base = GetNandBasePath();
-    std::snprintf(titlePath, sizeof(titlePath), "%s\\title\\%08x\\%08x\\data",
+    std::snprintf(titlePath, sizeof(titlePath), "%s/title/%08x/%08x/data",
                   base.c_str(), kNandTitleIdHi, CurrentMkwTitleIdLo());
     CreateDirectoryPath(titlePath);
 

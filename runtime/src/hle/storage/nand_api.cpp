@@ -3,6 +3,7 @@
 // Shared state and helpers live in nand_internal.h.
 
 #include "nand_internal.h"
+#include "host_file_copy.h"
 
 // ============================================================================
 // Local helpers
@@ -106,7 +107,7 @@ extern "C" int32_t NANDOpen_HLE(uint32_t pathPtr, uint32_t fileInfoPtr, uint32_t
             const std::string tempPath = SafeTempPathFor(hostPath);
             if (DiscardStaleSafeTemp(tempPath)) {
                 std::error_code ec;
-                std::filesystem::copy_file(hostPath, tempPath,
+                HostFileCopy::CopyFile(hostPath, tempPath,
                                            std::filesystem::copy_options::overwrite_existing, ec);
                 if (ec) {
                     LogNandWarning("NANDOpen", "WARNING: could not seed shadow '%s' (%s), writing in place",

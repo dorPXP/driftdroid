@@ -19,9 +19,16 @@
 
 #if defined(MBEDTLS_NET_C)
 
-#if !defined(MBEDTLS_PLATFORM_IS_UNIXLIKE) && !defined(_WIN32)
+#if !defined(MBEDTLS_PLATFORM_IS_UNIXLIKE) && !defined(_WIN32) && !defined(__SWITCH__)
 #error "This module only works on Unix and Windows, see MBEDTLS_NET_C in mbedtls_config.h"
 #endif
+// __SWITCH__ deliberately checked here rather than added to MBEDTLS_PLATFORM_IS_UNIXLIKE's own
+// definition (common.h) - that macro is also used by psa_crypto_random.c and others to assume
+// real Unix entropy-source availability (/dev/urandom etc.), which devkitA64 does NOT have (see
+// entropy_poll.c's dedicated __SWITCH__ branch, using libnx's randomGet() instead). Sockets
+// specifically are fine though: devkitA64/libnx does provide real BSD sockets (socket(),
+// connect(), send(), recv(), getaddrinfo(), ...) via its own socket service, once
+// socketInitializeDefault() has been called - narrower than "Unix-like" in general.
 
 #include "mbedtls/platform.h"
 

@@ -33,6 +33,14 @@
 # include <stdlib.h>
 #endif
 
+// Nintendo Switch homebrew: no /dev/urandom at all, avoid O_NOFOLLOW like the other non-Unix-like
+// targets above - the constructor/destructor's file-descriptor code is skipped entirely for this
+// target anyway (see NonblockingRng::NonblockingRng()/~NonblockingRng() below).
+#ifdef __SWITCH__
+# define DONT_USE_O_NOFOLLOW 1
+# include <switch.h>
+#endif
+
 // Solaris links /dev/urandom -> ../devices/pseudo/random@0:urandom
 // We can't access the device. Avoid O_NOFOLLOW for the platform.
 #ifdef __sun
@@ -156,7 +164,7 @@ MicrosoftCryptoProvider::~MicrosoftCryptoProvider()
 
 NonblockingRng::NonblockingRng()
 {
-#if !defined(CRYPTOPP_WIN32_AVAILABLE) && !defined(USE_FREEBSD_ARC4RANDOM)
+#if !defined(CRYPTOPP_WIN32_AVAILABLE) && !defined(USE_FREEBSD_ARC4RANDOM) && !defined(__SWITCH__)
 # ifndef DONT_USE_O_NOFOLLOW
 	const int flags = O_RDONLY|O_NOFOLLOW;
 # else
@@ -172,7 +180,7 @@ NonblockingRng::NonblockingRng()
 
 NonblockingRng::~NonblockingRng()
 {
-#if !defined(CRYPTOPP_WIN32_AVAILABLE) && !defined(USE_FREEBSD_ARC4RANDOM)
+#if !defined(CRYPTOPP_WIN32_AVAILABLE) && !defined(USE_FREEBSD_ARC4RANDOM) && !defined(__SWITCH__)
 	close(m_fd);
 #endif
 }
@@ -221,6 +229,11 @@ void NonblockingRng::GenerateBlock(byte *output, size_t size)
 	// Cryptographic quality prng based on ChaCha20,
 	// https://www.freebsd.org/cgi/man.cgi?query=arc4random_buf
 	arc4random_buf(output, size);
+# elif defined(__SWITCH__)
+	// Nintendo Switch homebrew (devkitA64/libnx): randomGet() is libnx's own OS-seeded ChaCha
+	// CSPRNG (kernel/random.h) - same rationale and same call as mbedtls's entropy_poll.c
+	// __SWITCH__ branch, no file descriptor to read from here either.
+	randomGet(output, size);
 # else
 	while (size)
 	{

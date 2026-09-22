@@ -516,8 +516,11 @@ static void ScanDirectory(const fs::path& root, const std::string& virtualPrefix
             return;
         }
 
-        const fs::path relative = fs::relative(entry.path(), root, entryEc);
-        if (entryEc) {
+        // Lexical, not fs::relative: every entry path is `root` plus components, and fs::relative
+        // canonicalizes through the real filesystem, which fails for device-prefixed paths like
+        // Switch's "sdmc:/..." and silently dropped every disc file.
+        const fs::path relative = entry.path().lexically_relative(root);
+        if (relative.empty()) {
             return;
         }
 

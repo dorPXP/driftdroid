@@ -122,6 +122,18 @@
   #define section(name) __pragma(code_seg(LIBCO_TOSTRING("." #name))) __declspec(allocate(LIBCO_TOSTRING("." #name)))
 #elif defined(__APPLE__)
   #define section(name) __attribute__((section("__TEXT,__" #name)))
+#elif defined(__SWITCH__)
+  /* devkitA64's NRO linker script does not fold the GNU ".text#" flag-merge trick (used on
+     desktop ELF targets to force a const data object into the executable segment) into the
+     same PT_LOAD segment as real .text - it lands in the read-only RODATA segment instead,
+     making co_swap_function non-executable and causing every co_switch() into a freshly
+     created fiber to hang silently (no crash report - execution never faults, it just never
+     gets anywhere). Verified via readelf -l on a real Switch build: ".text#" merged into
+     Segment 01 (R only) instead of Segment 00 (R E) alongside plain ".text", and confirmed
+     fixed on real hardware (see hermes/13-SWITCH-PORT-SESSION-1.md, Phase 2 fiber verification).
+     Using the bare section name here (no trailing "#") places it directly in the same section
+     as compiled code, landing in the executable segment. */
+  #define section(name) __attribute__((section("." #name)))
 #else
   #define section(name) __attribute__((section("." #name "#")))
 #endif

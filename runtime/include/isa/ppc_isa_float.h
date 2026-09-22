@@ -116,6 +116,25 @@ inline __m128 PpcNegateNonNanLanesInline(__m128 value)
 // register-domain shuffles (no arithmetic/conversion, so NaN/denormal bits pass through);
 // the former union-based forms store-then-reloaded through memory, a guaranteed
 // store-to-load-forwarding stall on every scalar-lane op.
+#if defined(__aarch64__)
+// AArch64: the same pure bit moves as scalar GPR shifts (fmov/lsr/orr). Through sse2neon each
+// lane op above becomes a 128-bit NEON load, shuffle and lane extract.
+inline float PpcGetPs0Inline(double value)
+{
+    return PpcBitCastToFloatInline(static_cast<uint32_t>(PpcBitCastToU64Inline(value) >> 32));
+}
+
+inline float PpcGetPs1Inline(double value)
+{
+    return PpcBitCastToFloatInline(static_cast<uint32_t>(PpcBitCastToU64Inline(value)));
+}
+
+inline double PpcPackPairedInline(float ps0, float ps1)
+{
+    return PpcBitCastToDoubleInline((static_cast<uint64_t>(PpcBitCastToU32Inline(ps0)) << 32) |
+                                    PpcBitCastToU32Inline(ps1));
+}
+#else
 inline float PpcGetPs0Inline(double value)
 {
     // ps0 lives in lane 1; PpcBroadcastPs0Inline already splats it.
@@ -134,6 +153,7 @@ inline double PpcPackPairedInline(float ps0, float ps1)
     // ps1 and lane 1 becomes ps0, matching the union layout bit for bit.
     return PpcM128ToPsInline(_mm_unpacklo_ps(_mm_set_ss(ps1), _mm_set_ss(ps0)));
 }
+#endif
 
 // FPSCR[NI] is modeled by MXCSR FTZ/DAZ, so arithmetic output flushing compiles to nothing.
 // Two cases still need a software check against the mirrored bit (not STMXCSR, too hot):
@@ -143,6 +163,18 @@ inline bool MkwHostNiActiveInline() noexcept
     return g_mkwHostNiActive;
 }
 
+#if defined(__aarch64__)
+inline float PpcForceSingleValueInline(double value)
+{
+    // Scalar form of the SSE mask below: sse2neon widens every scalar-lane op to 128-bit NEON
+    // plus lane extraction, on every float store. Same answer: |value| < threshold keeps only
+    // the sign bit (subnormals flush with or without FZ treating them as zero), NaN compares
+    // false and passes through.
+    const uint64_t bits = PpcBitCastToU64Inline(value);
+    const uint64_t flush = std::fabs(value) < g_mkwNiFlushThreshold ? 0x7FFFFFFFFFFFFFFFull : 0;
+    return static_cast<float>(PpcBitCastToDoubleInline(bits & ~flush));
+}
+#else
 inline float PpcForceSingleValueInline(double value)
 {
     // FPSCR[NI] flushes an exact pre-round single-subnormal even when rounding would promote it
@@ -157,6 +189,7 @@ inline float PpcForceSingleValueInline(double value)
     const __m128d kept = _mm_andnot_pd(_mm_andnot_pd(signMask, flush), v);
     return static_cast<float>(_mm_cvtsd_f64(kept));
 }
+#endif
 
 inline float PpcFlushSingleForNiInline(float value)
 {

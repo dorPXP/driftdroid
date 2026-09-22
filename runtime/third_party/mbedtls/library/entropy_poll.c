@@ -31,12 +31,32 @@
 
 #if !defined(unix) && !defined(__unix__) && !defined(__unix) && \
     !defined(__APPLE__) && !defined(_WIN32) && !defined(__QNXNTO__) && \
-    !defined(__HAIKU__) && !defined(__midipix__) && !defined(__MVS__)
+    !defined(__HAIKU__) && !defined(__midipix__) && !defined(__MVS__) && \
+    !defined(__SWITCH__)
 #error \
     "Platform entropy sources only work on Unix and Windows, see MBEDTLS_NO_PLATFORM_ENTROPY in mbedtls_config.h"
 #endif
 
-#if defined(_WIN32) && !defined(EFIX64) && !defined(EFI32)
+#if defined(__SWITCH__)
+// Nintendo Switch homebrew (devkitA64/libnx): no /dev/urandom, no getrandom() syscall - Horizon
+// OS exposes real entropy only via its own services. randomGet() is libnx's own OS-seeded ChaCha
+// CSPRNG (backed by hardware-seeded entropy at boot, see kernel/random.h) - used in preference to
+// the lower-level csrng service IPC wrapper (services/csrng.h) since it needs no explicit
+// Initialize()/Exit() service-session lifecycle, matching how simply every other platform branch
+// in this file calls straight into a ready-to-use OS primitive. This project already ships real
+// TLS support (contributed upstream, see [[wiicompiled-tomorrow-plan]] memory) - genuine hardware
+// entropy here, not a stub, matters for that to stay meaningfully secure on this target too.
+#include <switch/kernel/random.h>
+
+int mbedtls_platform_entropy_poll(void *data,
+                                  unsigned char *output, size_t len, size_t *olen)
+{
+    ((void) data);
+    randomGet(output, len);
+    *olen = len;
+    return 0;
+}
+#elif defined(_WIN32) && !defined(EFIX64) && !defined(EFI32)
 
 #include <windows.h>
 #include <bcrypt.h>

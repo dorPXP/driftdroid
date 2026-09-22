@@ -36,10 +36,26 @@ else ()
     set(ABSL_MSVC_STATIC_RUNTIME ON CACHE INTERNAL "Link static runtime libraries")
   endif()
   set(ABSL_PROPAGATE_CXX_STD ON)
+  set(_aurora_abseil_patch_command "")
+  if (CMAKE_SYSTEM_NAME STREQUAL "NintendoSwitch")
+    # Three separate Switch/devkitA64 gaps, bundled into one patch (see the patch file itself for
+    # full rationale on each): (1) struct tm has no tm_gmtoff member under any name (newlib never
+    # defines __TM_GMTOFF) - cctz's time_zone_libc.cc SFINAE detection fails, fixed by extending
+    # the existing __native_client__/__myriad2__/__EMSCRIPTEN__ branch, which already uses the
+    # matching '_timezone'/'tzname' fallback. (2) sysinfo.cc's GetTID() fallback assumes pthread_t
+    # is arithmetic; devkitA64's is a pointer, and (unlike the __native_client__ branch this file
+    # already has for that) sizeof(pid_t) != sizeof(pthread_t) here - uses libnx's
+    # threadGetCurHandle() instead. (3) elf_mem_image.h needs <link.h> (glibc's dynamic-linker
+    # ELF introspection), which doesn't exist on a target with no dynamic linking at all - added
+    # to the existing platform exclusion list alongside OpenBSD/QNX/NaCl/etc.
+    set(_aurora_abseil_patch_command PATCH_COMMAND git apply --verbose
+      "${CMAKE_CURRENT_SOURCE_DIR}/../cmake/patches/abseil-nintendo-switch-platform.patch")
+  endif ()
   FetchContent_Declare(abseil-cpp
     URL https://github.com/abseil/abseil-cpp/archive/refs/tags/20240722.0.tar.gz
     DOWNLOAD_EXTRACT_TIMESTAMP TRUE
     EXCLUDE_FROM_ALL
+    ${_aurora_abseil_patch_command}
   )
   FetchContent_MakeAvailable(abseil-cpp)
   if (NOT TARGET absl::flat_hash_map OR NOT TARGET absl::btree)
@@ -237,11 +253,29 @@ if (AURORA_ENABLE_GX)
       URL_HASH SHA256=acb1e6f5d832484bf6d32b681e858c38add8b2acdfd42ac5df24b8afb46552b4
       DOWNLOAD_EXTRACT_TIMESTAMP TRUE
       EXCLUDE_FROM_ALL
+      PATCH_COMMAND patch -p1 -N -r - < ${CMAKE_CURRENT_LIST_DIR}/../cmake/patches/sqlite3-nintendo-switch-platform.patch || ${CMAKE_COMMAND} -E true
     )
     FetchContent_MakeAvailable(sqlite3)
 
     add_library(sqlite3 STATIC ${sqlite3_SOURCE_DIR}/sqlite3.c)
     target_include_directories(sqlite3 PUBLIC ${sqlite3_SOURCE_DIR})
+    if (CMAKE_SYSTEM_NAME STREQUAL "NintendoSwitch")
+      # devkitA64/newlib has no mmap() at all (no <sys/mman.h> - same root cause already hit with
+      # libco's mprotect() in Phase 2, see [[switch-port-effort]] memory). sqlite3.c pulls in
+      # <sys/mman.h> whenever SQLITE_MAX_MMAP_SIZE>0 OR WAL mode isn't compiled out (WAL's
+      # shared-memory wal-index needs real mmap, not just the optional mmap-I/O fast path) - so
+      # SQLITE_MAX_MMAP_SIZE=0 alone isn't enough, WAL itself must go too. Single-process homebrew
+      # has no use for WAL's concurrent-reader/writer performance semantics anyway; the default
+      # rollback-journal mode this falls back to is functionally complete.
+      # No dlfcn.h either - devkitA64/libnx homebrew doesn't support dynamic linking at all (same
+      # reason SDL3's own dynapi is disabled for this target, see SDL_dynapi.h's SDL_PLATFORM_SWITCH
+      # branch) - SQLITE_OMIT_LOAD_EXTENSION drops sqlite3_load_extension() and its <dlfcn.h> use.
+      # newlib's fcntl() has no POSIX advisory locks, so the default "unix" VFS fails its first
+      # SHARED lock with SQLITE_IOERR ("disk I/O error"). Only this process ever opens these
+      # caches, so the lock-free "unix-none" VFS is safe.
+      target_compile_definitions(sqlite3 PRIVATE SQLITE_MAX_MMAP_SIZE=0 SQLITE_OMIT_WAL
+        SQLITE_OMIT_LOAD_EXTENSION SQLITE_DEFAULT_UNIX_VFS="unix-none")
+    endif ()
   else ()
     message(STATUS "aurora: Using existing sqlite3")
   endif ()
@@ -295,12 +329,23 @@ if (NOT TARGET TracyClient)
   # Default to off, users can enable the cache variable if they want to use it.
   set(TRACY_ENABLE OFF CACHE BOOL "Enable Tracy profiling")
 
+  set(_aurora_tracy_patch_command "")
+  if (CMAKE_SYSTEM_NAME STREQUAL "NintendoSwitch")
+    # TracySystem.cpp's thread-ID/user-login platform detection has no Switch case at all
+    # (#error "Unsupported platform!" for the former, missing getlogin_r() for the latter) - see
+    # the patch file for the two small additions (threadGetCurHandle(), a "(?)" placeholder login
+    # matching the existing __ANDROID__ treatment). TRACY_ENABLE is OFF by default just above, but
+    # this file still needs to compile regardless - these platform checks aren't gated on it.
+    set(_aurora_tracy_patch_command PATCH_COMMAND git apply --verbose
+      "${CMAKE_CURRENT_SOURCE_DIR}/../cmake/patches/tracy-nintendo-switch-platform.patch")
+  endif ()
   FetchContent_Declare(
           tracy
           URL https://github.com/wolfpld/tracy/archive/a64b9a20294d59421a2f57aeca3c6383d8c48169.tar.gz
           URL_HASH SHA256=24d342b5127d7f659dc3cf94f24347b348cc736f25b17a691fd7f69541937658
           DOWNLOAD_EXTRACT_TIMESTAMP TRUE
           EXCLUDE_FROM_ALL
+          ${_aurora_tracy_patch_command}
   )
   FetchContent_MakeAvailable(tracy)
 

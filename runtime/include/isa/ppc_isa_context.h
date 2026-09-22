@@ -53,7 +53,14 @@ struct CpuContext {
     uint32_t msr;       // Machine State Register
 };
 
+// Switch: guest code only ever runs on the emulation host thread, and every thread_local access
+// there is an out-of-line __aarch64_read_tp call (Horizon resets TPIDR_EL0, so -mtp=el0 is not
+// an option). A plain global keeps this hot variable to one load.
+#if defined(__SWITCH__) || defined(__ANDROID__)
+inline CpuContext* g_currentCpuContext = nullptr;
+#else
 inline thread_local CpuContext* g_currentCpuContext = nullptr;
+#endif
 
 class CpuContextScope {
 public:

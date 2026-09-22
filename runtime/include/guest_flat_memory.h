@@ -29,11 +29,36 @@ inline constexpr uint64_t kGuestSpaceSize = 0x1'0000'0000ull;
 // hits the same "reserve the 4 GiB flat guest address space" runtime error, try successively
 // lower values here (0x0000'0010'0000'0000ull and below) and report which one works.
 inline constexpr uintptr_t kFixedFlatGuestBase = 0x0000'0020'0000'0000ull;
+#elif defined(__SWITCH__)
+// No fixed base on Switch. Horizon places each process's 8 GiB heap region and 6 GiB alias region
+// at random addresses inside the 64 GiB ASLR region, and code/aliased memory (the only kind that
+// can carry multiple views - see guest_flat_memory.cpp) may not overlap either of them. Any
+// constant 4 GiB window therefore collides on some fraction of launches; hardware showed the heap
+// sitting at 0x8e8bc7000, right inside the old 32 GiB constant. Initialize() instead picks a free
+// window per launch and publishes it here once, before any translated code runs.
+//
+// Declared const (with a fixed symbol name) everywhere except guest_flat_memory.cpp, which owns
+// the one write. A mutable global could be aliased by any guest memory write (they go through
+// uint8_t*), so GCC reloaded it before every single guest access; a const object cannot be
+// modified by those writes, which lets each translated function load the base once. Hidden
+// visibility removes the extra GOT indirection. Safe because the value is set exactly once,
+// before any reader runs, and never changes afterwards.
+#if defined(MKW_GUEST_FLAT_BASE_WRITER)
+extern uintptr_t g_switchFlatGuestBase __asm__("mkw_switch_flat_guest_base")
+    __attribute__((visibility("hidden")));
+#else
+extern const uintptr_t g_switchFlatGuestBase __asm__("mkw_switch_flat_guest_base")
+    __attribute__((visibility("hidden")));
+#endif
 #else
 inline constexpr uintptr_t kFixedFlatGuestBase = 0x0000'1000'0000'0000ull;
 #endif
 
+#if defined(__SWITCH__)
+#define MKW_FLAT_GUEST_BASE (reinterpret_cast<uint8_t*>(GuestFlat::g_switchFlatGuestBase))
+#else
 #define MKW_FLAT_GUEST_BASE (reinterpret_cast<uint8_t*>(GuestFlat::kFixedFlatGuestBase))
+#endif
 
 enum class Backing {
     Owned,

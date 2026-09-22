@@ -11,7 +11,17 @@
 
 inline uint32_t PpcRotl32Inline(uint32_t value, uint32_t shift)
 {
+#if defined(__clang__)
     return __builtin_rotateleft32(value, shift);
+#else
+    // __builtin_rotateleft32 is Clang-only - confirmed absent even on GCC 16 (devkitA64/Switch is
+    // GCC-only, see runtime/CMakeLists.txt's MKW_TARGET_SWITCH branch). This is the standard
+    // portable rotate idiom instead: masking `shift` to 0-31 avoids UB from a >>32 shift when
+    // shift==0, and GCC reliably recognizes this exact shape and emits a single rotate
+    // instruction (verified in godbolt-style GCC output for this idiom on aarch64/x86).
+    shift &= 31u;
+    return (value << shift) | (value >> ((32u - shift) & 31u));
+#endif
 }
 
 extern "C" uint32_t OSSystemCall();

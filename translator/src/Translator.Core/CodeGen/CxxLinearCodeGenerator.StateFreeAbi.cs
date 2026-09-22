@@ -137,7 +137,7 @@ public sealed partial class CxxLinearCodeGenerator
             (uint)(contract.HidReadBeforeWriteMask | contract.HidPossibleWriteMask));
 
     private static bool StateFreeFitsNativeRegisterBudget(GuestAbiContract contract) =>
-        StateFreeInputCount(contract) <= 4 && StateFreeOutputCount(contract) <= 2;
+        StateFreeInputCount(contract) <= 8 && StateFreeOutputCount(contract) <= 4;
 
     // Do not use Clang's __regcall here: a state-free callee using host r12 as scratch once collided
     // with a caller that kept the guest-memory page table live in r12, crashing at address 0x4808. The
@@ -475,9 +475,21 @@ public sealed partial class CxxLinearCodeGenerator
         for (var hid = 0; hid < 3; ++hid)
             if ((contract.HidPossibleWriteMask & (1 << hid)) != 0)
                 values.Add(packed ? $"static_cast<uint64_t>(native_hid{hid})" : $"native_hid{hid}");
-        return values.Count == 1
-            ? $"return {values[0]};"
-            : $"return {{ {string.Join(", ", values)} }};";
+        // Exactly 2 outputs return MkwStateFreeResult2, a GCC/Clang vector type (see
+        // ppc_isa_config.h) - not a plain aggregate struct like the 3+ output case below. GCC
+        // accepts direct-list-init (`T v{a,b}; return v;`) for vector_size types but rejects
+        // copy-list-init (`return {a,b};`) with "cannot convert <brace-enclosed initializer
+        // list>" - confirmed directly against devkitA64's GCC 16, one of the first Switch-port
+        // build errors hit in dozens of generated shard files (see [[switch-port-effort]]
+        // memory). Naming the type explicitly makes this direct-list-init instead, which both
+        // compilers accept identically - Clang's ext_vector_type never had this restriction, so
+        // this is a no-op behavior change there.
+        return values.Count switch
+        {
+            1 => $"return {values[0]};",
+            2 => $"return MkwStateFreeResult2{{ {string.Join(", ", values)} }};",
+            _ => $"return {{ {string.Join(", ", values)} }};"
+        };
     }
 
     private static string RemoveStateFreeDirectCallFallbacks(string body)

@@ -15,7 +15,13 @@
 // only sigsetjmp/siglongjmp save and restore the process signal mask, which is what keeps SIGSEGV
 // from staying blocked (and a second fault during the same ctor loop from escalating instead of
 // trapping) after the first recovered fault.
-#if defined(_WIN32)
+#if defined(_WIN32) || defined(__SWITCH__)
+// Switch (devkitA64/libnx): Horizon OS has no sigaction()/POSIX signal delivery at all (see
+// main.cpp's InstallPosixMemoryFaultHandler - not compiled/called on this target, deferred to
+// Phase 6's libnx exception-hook plumbing per [[nifty-discovering-kahn]] plan). No POSIX signal
+// handler is ever installed here, so this jmp_buf is never actually longjmp'd into from signal
+// context - the signal-mask-preserving behavior sigsetjmp/siglongjmp exist for doesn't apply.
+// Plain jmp_buf just needs to compile; same treatment as Windows' SEH path for that reason.
 using MkwJmpBuf = jmp_buf;
 #define MKW_SETJMP(buf) setjmp(buf)
 #else

@@ -1,5 +1,7 @@
 #include "gpu.hpp"
 
+#include <filesystem>
+
 #include <array>
 #include <algorithm>
 #include <atomic>
@@ -16,6 +18,9 @@
 #include <aurora/render_size_limits.hpp>
 #include <magic_enum.hpp>
 #include <webgpu/webgpu_cpp.h>
+#if defined(__ANDROID__) && defined(DAWN_ENABLE_BACKEND_OPENGLES)
+#include <EGL/egl.h>
+#endif
 #if defined(WEBGPU_DAWN) && !defined(_WIN32) && __has_include(<dawn/native/DawnNative.h>)
 #include <dawn/native/DawnNative.h>
 #define AURORA_HAS_STATIC_DAWN_NATIVE 1
@@ -26,7 +31,7 @@
 #include "../window.hpp"
 #include "../dolphin/vi/vi_internal.hpp"
 
-#if defined(WEBGPU_DAWN) && !defined(__MINGW32__)
+#if defined(WEBGPU_DAWN) && !defined(__MINGW32__) && !defined(__SWITCH__)
 #include "../dawn/BackendBinding.hpp"
 #include <dawn/native/DawnNative.h>
 #elif defined(WEBGPU_DAWN)
@@ -37,9 +42,13 @@
 #include <windows.h>
 #endif
 
-#if defined(__ANDROID__) && defined(DAWN_ENABLE_BACKEND_OPENGLES)
-#include <EGL/egl.h>
+#if defined(__SWITCH__) || (defined(__ANDROID__) && defined(DAWN_ENABLE_BACKEND_OPENGLES))
 #include <dawn/native/OpenGLBackend.h>
+#endif
+#if defined(__SWITCH__)
+// lib/switch/gl_proc_table.c: name -> address for every switch-mesa EGL/GL export, standing in
+// for dlsym (no dynamic linking on Switch).
+extern "C" void (*aurora_switch_gl_get_proc(const char* name))(void);
 #endif
 
 namespace aurora::gx {
@@ -51,6 +60,9 @@ void clear_offscreen_cache();
 
 namespace aurora::webgpu {
 static Module Log("aurora::gpu");
+#ifdef __SWITCH__
+void run_deko3d_selftest();
+#endif
 
 wgpu::Device g_device;
 wgpu::Queue g_queue;
@@ -501,6 +513,10 @@ static wgpu::BackendType to_wgpu_backend(AuroraBackend backend) {
     return wgpu::BackendType::OpenGL;
   case BACKEND_OPENGLES:
     return wgpu::BackendType::OpenGLES;
+#if defined(__SWITCH__)
+  case BACKEND_DEKO3D:
+    return wgpu::BackendType::Deko3d;
+#endif
   default:
     return wgpu::BackendType::Null;
   }
@@ -540,9 +556,11 @@ bool initialize(AuroraBackend auroraBackend) {
         .requiredFeatureCount = requiredInstanceFeatures.size(),
         .requiredFeatures = requiredInstanceFeatures.data(),
     };
-#if defined(WEBGPU_DAWN) && !defined(__MINGW32__)
+#if defined(WEBGPU_DAWN) && !defined(__MINGW32__) && !defined(__SWITCH__)
     // DawnNative.h's C++ constructor has an MSVC ABI that cannot cross into llvm-mingw, and the
-    // descriptor only restates Dawn's defaults, so use the public WebGPU descriptor here.
+    // descriptor only restates Dawn's defaults, so use the public WebGPU descriptor here. Not
+    // applicable on Switch at all - the deko3d backend isn't Dawn, so there's no Dawn-native
+    // instance descriptor to set.
     dawn::native::DawnInstanceDescriptor dawnInstanceDescriptor;
     dawnInstanceDescriptor.backendValidationLevel = dawn::native::BackendValidationLevel::Disabled;
     instanceDescriptor.nextInChain = &dawnInstanceDescriptor;
@@ -572,11 +590,15 @@ bool initialize(AuroraBackend auroraBackend) {
     }
   }
   {
-#if defined(__ANDROID__) && defined(DAWN_ENABLE_BACKEND_OPENGLES)
-    // Dawn's GL backend only offers Compatibility-level adapters, and wants the EGL entry point
-    // handed to it rather than dlopening libEGL itself.
+#if defined(__SWITCH__) || (defined(__ANDROID__) && defined(DAWN_ENABLE_BACKEND_OPENGLES))
+    // Dawn's GL backend only offers Compatibility-level adapters, and wants an explicit entry
+    // point rather than dlopening libEGL itself.
     dawn::native::opengl::RequestAdapterOptionsGetGLProc glProcOptions;
+#if defined(__SWITCH__)
+    glProcOptions.getProc = aurora_switch_gl_get_proc;
+#else
     glProcOptions.getProc = reinterpret_cast<dawn::native::opengl::EGLGetProcProc>(&eglGetProcAddress);
+#endif
     glProcOptions.display = nullptr;  // Dawn opens EGL_DEFAULT_DISPLAY itself
     const bool glBackend = backend == wgpu::BackendType::OpenGLES;
     const wgpu::RequestAdapterOptions options{
@@ -716,9 +738,18 @@ bool initialize(AuroraBackend auroraBackend) {
     enableToggles.push_back("skip_validation");
     enableToggles.push_back("disable_robustness");
 #endif
+#if defined(__SWITCH__)
+    // Debug switch with no rebuild: creating this file makes Dawn log every generated shader
+    // (WGSL in, GLSL out) to stdout, i.e. the game's log.txt on the SD card.
+    if (std::filesystem::exists("sdmc:/switch/WiiCompiled/Cache/dump_shaders.flag")) {
+      enableToggles.push_back("dump_shaders");
+      Log.info("dump_shaders.flag present: logging generated shaders");
+    }
+#endif
     if (g_backendType == wgpu::BackendType::Vulkan) {
       enableToggles.push_back("vulkan_monolithic_pipeline_cache");
     }
+
     const wgpu::DawnTogglesDescriptor togglesDescriptor({
         .nextInChain = &cacheDescriptor,
         .enabledToggleCount = enableToggles.size(),
@@ -842,6 +873,11 @@ bool initialize(AuroraBackend auroraBackend) {
       .maxTextureDimension2D = maxTextureDimension2D,
   };
   create_copy_pipeline();
+#ifdef __SWITCH__
+  if (g_backendType == wgpu::BackendType::Deko3d) {
+    run_deko3d_selftest();
+  }
+#endif
   {
     window::SurfaceLock surfaceLock;
     resize_swapchain(size.fb_width, size.fb_height, size.native_fb_width, size.native_fb_height, true);

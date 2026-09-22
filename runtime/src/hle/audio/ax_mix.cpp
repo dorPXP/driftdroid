@@ -39,11 +39,13 @@ std::filesystem::path FindDspCoefficientRom() {
         }
     }
 
-#if defined(__ANDROID__)
-    // No "next to the executable" or source-tree concept on Android (ExecutableDirectory() is
-    // always nullopt there, and there is no checked-out source tree on-device) - the ROM instead
-    // lives alongside Config.toml in the app's own data directory, staged the same debug-only way
-    // DiscData is (see android_jni_bridge.cpp / MainActivity.kt).
+#if defined(__ANDROID__) || defined(__SWITCH__)
+    // No "next to the executable" or source-tree concept on Android or Switch
+    // (ExecutableDirectory() is always nullopt on both - see runtime_config.h - and neither has a
+    // checked-out source tree on-device) - the ROM instead lives alongside Config.toml in the
+    // app's own data directory, staged the same debug-only way DiscData is (see
+    // android_jni_bridge.cpp / MainActivity.kt for the Android side; Switch stages the same way
+    // under sdmc:/switch/WiiCompiled/).
     const auto androidAsset = RuntimeConfigFile::ApplicationDataDirectory() / "dsp_coef.bin";
     if (std::filesystem::is_regular_file(androidAsset)) {
         return androidAsset;

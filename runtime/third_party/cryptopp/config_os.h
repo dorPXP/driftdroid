@@ -141,6 +141,17 @@
 #	define OS_RNG_AVAILABLE
 #endif
 
+// Nintendo Switch homebrew (devkitA64/libnx): not Unix-like (no /dev/urandom, no getrandom()
+// syscall - same reasoning as mbedtls's entropy_poll.c __SWITCH__ branch), but libnx's
+// randomGet() provides a real OS-seeded CSPRNG - see osrng.cpp's NonblockingRng::GenerateBlock
+// for the Switch branch. Only NONBLOCKING_RNG_AVAILABLE (AutoSeededRandomPool's default,
+// blocking=false, is all wii_es_crypto.h actually constructs) - no blocking-quality distinction
+// exists for randomGet() to offer, so BLOCKING_RNG_AVAILABLE is intentionally not defined here.
+#if defined(__SWITCH__)
+#	define NONBLOCKING_RNG_AVAILABLE
+#	define OS_RNG_AVAILABLE
+#endif
+
 // Cygwin/Newlib requires _XOPEN_SOURCE=600
 #if defined(CRYPTOPP_UNIX_AVAILABLE)
 # define UNIX_SIGNALS_AVAILABLE 1

@@ -9,6 +9,8 @@
 #include <chrono>
 #include <cstdint>
 #include <mutex>
+#include <span>
+#include <limits>
 #include <type_traits>
 #include <vector>
 
@@ -205,5 +207,78 @@ public:
 private:
   const T* ptr = nullptr;
   size_t length = 0;
+};
+
+// Big-endian scalar load from an unaligned address, matching upstream aurora's read_bits default.
+// THPDec.cpp calls this directly for the JPEG restart interval.
+template <typename T>
+  requires(std::is_integral_v<T> && !std::is_same_v<T, bool>)
+inline T read_bits(const void* ptr) noexcept {
+  const auto* bytes = static_cast<const uint8_t*>(ptr);
+  std::make_unsigned_t<T> raw{};
+  for (size_t i = 0; i < sizeof(T); ++i) {
+    raw = static_cast<std::make_unsigned_t<T>>((raw << 8) | bytes[i]);
+  }
+  return static_cast<T>(raw);
+}
+
+// Minimal big-endian byte reader, ported from upstream aurora's internal.hpp for the THP decoder
+// (upstream commit 3251f4e2). Only the members THPDec.cpp actually uses are carried over:
+// unbounded(), offset(), read<T>(), try_read<T>() and try_take().
+class ByteReader {
+public:
+  ByteReader(const uint8_t* data, size_t size) noexcept : mData{data}, mSize{size} {}
+
+  static ByteReader unbounded(const void* data) noexcept {
+    return {static_cast<const uint8_t*>(data), std::numeric_limits<size_t>::max()};
+  }
+
+  [[nodiscard]] size_t offset() const noexcept { return mPosition; }
+  [[nodiscard]] size_t remaining() const noexcept { return mSize - mPosition; }
+
+  template <typename T>
+    requires(std::is_integral_v<T> && !std::is_same_v<T, bool>)
+  T read() noexcept {
+    // Upstream asserts on overrun via a static Module; aurora::Module here is not a literal type,
+    // so it cannot be a constexpr class member. Every THP call site uses try_read() and checks the
+    // result, so returning zero on overrun is enough and keeps this header dependency-free.
+    T value{};
+    (void)try_read(value);
+    return value;
+  }
+
+  template <typename T>
+    requires(std::is_integral_v<T> && !std::is_same_v<T, bool>)
+  bool try_read(T& value) noexcept {
+    if (!can_read(sizeof(T))) {
+      return false;
+    }
+    // THP/JPEG stream data is big-endian, matching upstream's default for read_bits.
+    std::make_unsigned_t<T> raw{};
+    for (size_t i = 0; i < sizeof(T); ++i) {
+      raw = static_cast<std::make_unsigned_t<T>>((raw << 8) | mData[mPosition + i]);
+    }
+    mPosition += sizeof(T);
+    value = static_cast<T>(raw);
+    return true;
+  }
+
+  bool try_take(size_t count, std::span<const uint8_t>& bytes) noexcept {
+    if (!can_read(count)) {
+      return false;
+    }
+    bytes = {mData + mPosition, count};
+    mPosition += count;
+    return true;
+  }
+
+private:
+  [[nodiscard]] bool can_read(size_t count) const noexcept {
+    return mPosition <= mSize && count <= mSize - mPosition;
+  }
+
+  const uint8_t* mData;
+  size_t mSize;
+  size_t mPosition = 0;
 };
 } // namespace aurora

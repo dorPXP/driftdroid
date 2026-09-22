@@ -50,13 +50,21 @@ inline void MkwWriteHostFpControl(uint32_t value) noexcept
 #endif
 
 
+#if defined(__SWITCH__) || defined(__ANDROID__)
+inline bool g_mkwHostNiActive = false;  // see g_currentCpuContext
+#else
 inline thread_local bool g_mkwHostNiActive = false;
+#endif
 
 // Same state in the form PpcForceSingleValueInline consumes: the pre-round subnormal threshold
 // while NI is active, 0.0 (identity, `|value| < 0.0` is always false) otherwise, so that path
 // needs no branch. Every writer of g_mkwHostNiActive must write this beside it in agreement.
 inline constexpr double kMkwNiFlushThreshold = 0x1p-126;  // 0x3810000000000000
+#if defined(__SWITCH__) || defined(__ANDROID__)
+inline double g_mkwNiFlushThreshold = 0.0;  // see g_currentCpuContext
+#else
 inline thread_local double g_mkwNiFlushThreshold = 0.0;
+#endif
 
 inline void MkwApplyHostNiMode(uint32_t fpscr) noexcept
 {

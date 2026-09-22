@@ -132,10 +132,21 @@ elseif (_aurora_sdl3_provider STREQUAL "vendor")
     endif ()
 
     include(FetchContent)
+    set(_aurora_sdl3_patch_command "")
+    if (CMAKE_SYSTEM_NAME STREQUAL "NintendoSwitch")
+      # SDL's release tarball has no Switch platform branch at all (see
+      # sdl3-nintendo-switch-platform.patch's own header comment for the full rationale and
+      # [[nifty-discovering-kahn]] plan Phase 3b/3c) - patched in here rather than forked/vendored
+      # wholesale, so upgrading AURORA_SDL3_VERSION stays a one-line version bump for every other
+      # platform and only needs re-verifying (or updating) this patch for Switch specifically.
+      set(_aurora_sdl3_patch_command PATCH_COMMAND git apply --verbose
+        "${CMAKE_CURRENT_LIST_DIR}/patches/sdl3-nintendo-switch-platform.patch")
+    endif ()
     FetchContent_Declare(SDL
       URL "https://github.com/libsdl-org/SDL/releases/download/release-${AURORA_SDL3_VERSION}/SDL3-${AURORA_SDL3_VERSION}.tar.gz"
       DOWNLOAD_EXTRACT_TIMESTAMP TRUE
       EXCLUDE_FROM_ALL
+      ${_aurora_sdl3_patch_command}
     )
     FetchContent_MakeAvailable(SDL)
   else ()

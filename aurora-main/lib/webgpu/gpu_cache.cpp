@@ -19,6 +19,16 @@
 #define XXH_STATIC_LINKING_ONLY
 #include <xxhash.h>
 
+#if defined(__SWITCH__)
+// No WAL (compiled out: no mmap) and no on-disk rollback journal: Horizon's filesystem fails
+// SQLite's journal fsync/fstat sequence with EIO ("disk I/O error"), while an in-memory journal
+// works. A cache only risks losing its newest entries on a crash.
+constexpr const char* kCachePragmas = "PRAGMA journal_mode=MEMORY; PRAGMA synchronous=OFF;";
+#else
+constexpr const char* kCachePragmas = "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;";
+#endif
+
+
 namespace aurora::webgpu {
 static Module Log("aurora::gpu::cache");
 
@@ -147,7 +157,7 @@ static bool cache_init_core() {
   }
 
   // WAL mode + NORMAL = no need for disk syncs, consistent but not durable is fine.
-  ret = sqlite::exec(db, "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;");
+  ret = sqlite::exec(db, kCachePragmas);
   if (ret != SQLITE_OK) {
     Log.error("Failed to set pragmas: {}", sqlite3_errmsg(db));
     return false;
@@ -172,7 +182,7 @@ static bool cache_init_core() {
       Log.error("Failed to recreate database: {}", sqlite3_errmsg(db));
       return false;
     }
-    ret = sqlite::exec(db, "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;");
+    ret = sqlite::exec(db, kCachePragmas);
     if (ret != SQLITE_OK) {
       Log.error("Failed to set pragmas: {}", sqlite3_errmsg(db));
       return false;

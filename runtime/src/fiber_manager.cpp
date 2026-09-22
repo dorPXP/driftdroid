@@ -328,7 +328,15 @@ bool GuestFiberManager::CreateGuestFiber(uint32_t guestThreadAddr, uint32_t entr
 #else
     // libco's co_create() entry point takes no argument; SwitchToThread() stages guestThreadAddr
     // into s_pendingFiberArg immediately before the co_switch that first activates this handle.
+#if defined(__SWITCH__)
+    // Guest draws reach Dawn's GL backend synchronously, and switch-mesa compiles GLSL on the
+    // calling stack (deeply recursive AST->IR passes). 64 KiB overflowed into the neighbouring
+    // heap chunk and surfaced later as data aborts inside _malloc_r. There is no guard page on a
+    // libco stack here, so size generously.
+    constexpr unsigned int kHostStackSize = 2 * 1024 * 1024;
+#else
     constexpr unsigned int kHostStackSize = 64 * 1024;
+#endif
     gf.fiber = co_create(kHostStackSize, &FiberProcTrampoline);
 
     if (!gf.fiber) {

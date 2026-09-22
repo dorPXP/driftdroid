@@ -1,5 +1,8 @@
 #include "input.hpp"
 #include "internal.hpp"
+#if defined(__SWITCH__)
+#include "switch/input_switch.hpp"
+#endif
 
 #include "magic_enum.hpp"
 
@@ -508,6 +511,9 @@ void initialize() noexcept {
    * as expected */
   ASSERT(SDL_Init(SDL_INIT_HAPTIC | SDL_INIT_JOYSTICK | SDL_INIT_GAMEPAD), "Failed to initialize SDL subsystems: {}",
          SDL_GetError());
+#if defined(__SWITCH__)
+  switch_pad::attach();
+#endif
 }
 
 struct MouseScrollStatus {

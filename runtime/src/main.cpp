@@ -4,6 +4,7 @@
 #include <chrono>
 #include <csignal>
 #include <utility>
+#include <cstdarg>
 #include <cstdio>
 #include <cstdlib>
 #include <cmath>
@@ -38,6 +39,15 @@
 #include <windows.h>
 #include <mmsystem.h>
 #include <dbghelp.h>
+#elif defined(__SWITCH__)
+// Horizon's newlib has no <ucontext.h> and no <sched.h> affinity API, and libnx reports faults
+// through its own exception handler rather than POSIX signals - see the __SWITCH__ branches
+// further down.
+#include <cerrno>
+#include <signal.h>
+#include <unistd.h>
+#include <switch.h>
+#include <unwind.h>
 #else
 #include <cerrno>
 #include <sched.h>
@@ -71,6 +81,437 @@ extern std::atomic_bool g_auroraFrameActive;
 extern "C" int g_gxFrameCount;
 extern "C" const char* DVDResolveHostPathForTest(const char* dvdPath);
 bool OS_HLE_InterruptsEnabled() noexcept;
+
+#if defined(__SWITCH__)
+// hbloader runs every homebrew .nro inside its own process, so an unhandled CPU fault produces
+// no Atmosphere crash report naming this module - libnx hands it to __libnx_exception_handler
+// instead, and whatever that writes is the only record of the crash. stdout/stderr are already
+// pointed at the SD card by RuntimeMain, so plain stdio is the right sink here.
+//
+// Every address is printed module-relative ("+0x..."), because the NRO is loaded at a different
+// randomised base on every launch; `aarch64-none-elf-addr2line -e WiiCompiled.elf <offset>`
+// resolves these directly against the unstripped ELF next to the .nro.
+void SwitchCrashWrite(const char* format, ...) {
+    std::va_list args;
+    va_start(args, format);
+    std::vfprintf(stderr, format, args);
+    va_end(args);
+    std::fflush(stderr);
+}
+
+// `__start__` is an absolute symbol that stays 0 at runtime, so it cannot give the load base of a
+// position-independent NRO (a first attempt using it printed raw 0xea... addresses). Ask the
+// kernel instead: the code region that contains one of our own functions starts at the module
+// base, which is exactly what addr2line needs subtracted.
+u64 SwitchModuleBase() {
+    static const u64 base = [] {
+        MemoryInfo info{};
+        u32 pageInfo = 0;
+        if (R_FAILED(svcQueryMemory(&info, &pageInfo, reinterpret_cast<u64>(&SwitchModuleBase)))) {
+            return u64{0};
+        }
+        return info.addr;
+    }();
+    return base;
+}
+
+u64 SwitchModuleOffset(u64 address) {
+    const u64 base = SwitchModuleBase();
+    return address >= base ? address - base : address;
+}
+
+// runtime/CMakeLists.txt links with `-Wl,--wrap=__syscall_thread_create`, which redirects every
+// newlib/libnx thread creation here. libnx defaults a std::thread to a 128 KiB stack, which Tint's
+// resolver overflows on aurora's pipeline compilation workers; this raises the floor to 2 MiB for
+// every thread the C++ runtime spawns.
+//
+// Only when the caller let libnx allocate the stack (stack_addr == nullptr). If a caller supplied
+// its own buffer, growing the size it declares would run the thread off the end of that buffer.
+//
+// This must exist whenever that link option does: with --wrap and no __wrap_ symbol, thread
+// creation resolves to nothing and every std::thread constructor fails with ENOSYS, which is
+// exactly what killed gfx::initialize() after this file's Switch code was lost on 2026-09-17.
+extern "C" int __real___syscall_thread_create(void** thread, void* entry, void* arg, void* stackAddr,
+                                              size_t stackSize);
+
+// The core the guest/emulation thread runs on, recorded by RuntimeMain. -1 until then, which
+// leaves libnx's own placement alone for anything created before that point.
+std::atomic<int> g_switchGuestCore{-1};
+std::atomic<uint32_t> g_switchHelperCoreCursor{0};
+
+// libnx creates every thread with ideal core -2 (the process default) and the full process core
+// mask, so the GX worker, frame worker, pipeline worker and audio mixer all prefer the same core
+// as the guest thread. Offloading work to a thread that contends for the guest's own core buys
+// nothing - measured on 2026-09-20, threaded GX gave 13.1 vs 12.75 FPS with this missing.
+//
+// So give each helper an ideal core drawn round-robin from the cores the guest is NOT on. The
+// mask stays every non-guest core rather than a single one: that biases placement without hard
+// pinning, so a helper can still migrate instead of stalling behind a busy core.
+void SwitchSpreadHelperThread(u32 handle) noexcept {
+    const int guestCore = g_switchGuestCore.load(std::memory_order_relaxed);
+    if (guestCore < 0) {
+        return;
+    }
+    u64 processMask = 0;
+    if (R_FAILED(svcGetInfo(&processMask, InfoType_CoreMask, CUR_PROCESS_HANDLE, 0))) {
+        return;
+    }
+    const u64 helperMask = processMask & ~(1ull << static_cast<unsigned>(guestCore));
+    if (helperMask == 0) {
+        return;  // single-core budget: nothing to spread onto
+    }
+    // Round-robin over the set bits of helperMask.
+    const uint32_t slot = g_switchHelperCoreCursor.fetch_add(1, std::memory_order_relaxed);
+    const int available = __builtin_popcountll(helperMask);
+    int target = static_cast<int>(slot % static_cast<uint32_t>(available));
+    int ideal = -1;
+    for (int core = 0; core < 64; ++core) {
+        if ((helperMask & (1ull << core)) == 0) {
+            continue;
+        }
+        if (target-- == 0) {
+            ideal = core;
+            break;
+        }
+    }
+    if (ideal >= 0) {
+        svcSetThreadCoreMask(handle, ideal, helperMask);
+    }
+}
+
+extern "C" int __wrap___syscall_thread_create(void** thread, void* entry, void* arg, void* stackAddr,
+                                              size_t stackSize) {
+    constexpr size_t kMinimumThreadStack = 2u * 1024u * 1024u;
+    if (stackAddr == nullptr && stackSize < kMinimumThreadStack) {
+        stackSize = kMinimumThreadStack;  // 4 KiB aligned, as libnx requires
+    }
+    const int result = __real___syscall_thread_create(thread, entry, arg, stackAddr, stackSize);
+    if (result == 0 && thread != nullptr && *thread != nullptr) {
+        // libnx stores the thread Handle as the first word of the object it hands back - confirmed
+        // by disassembling __syscall_thread_create, which does `ldr w0,[x21]` and feeds exactly
+        // that to svcSetThreadCoreMask a few instructions later.
+        SwitchSpreadHelperThread(*static_cast<const u32*>(*thread));
+    }
+    return result;
+}
+
+extern "C" void __libnx_exception_handler(ThreadExceptionDump* ctx) {
+    SwitchCrashWrite("[switch-crash] exception desc=0x%x pc=+0x%llx lr=+0x%llx sp=0x%llx far=0x%llx\n",
+                     ctx->error_desc, SwitchModuleOffset(ctx->pc.x), SwitchModuleOffset(ctx->lr.x), ctx->sp.x,
+                     ctx->far.x);
+    for (int reg = 0; reg < 29; reg += 4) {
+        SwitchCrashWrite("[switch-crash] x%02d %016llx %016llx %016llx %016llx\n", reg, ctx->cpu_gprs[reg].x,
+                         reg + 1 < 29 ? ctx->cpu_gprs[reg + 1].x : 0, reg + 2 < 29 ? ctx->cpu_gprs[reg + 2].x : 0,
+                         reg + 3 < 29 ? ctx->cpu_gprs[reg + 3].x : 0);
+    }
+    // Frame-pointer walk. Guest fibers run on libco stacks that the compiler's frame chain still
+    // threads correctly, so this reaches back through the runtime even from translated code; the
+    // bounds check just stops a corrupted frame from looping forever.
+    u64 fp = ctx->fp.x;
+    for (int frame = 0; frame < 32 && fp != 0 && (fp & 0xF) == 0; ++frame) {
+        const auto* entry = reinterpret_cast<const u64*>(fp);
+        const u64 next = entry[0];
+        const u64 lr = entry[1];
+        if (lr == 0) {
+            break;
+        }
+        SwitchCrashWrite("[switch-crash] #%02d +0x%llx\n", frame, SwitchModuleOffset(lr));
+        if (next <= fp) {
+            break;  // frame pointers must grow towards the stack base
+        }
+        fp = next;
+    }
+    SwitchCrashWrite("[switch-crash] end\n");
+    // hbloader unmaps this module's code while the crashing thread's siblings are still live, so
+    // returning (or exiting normally) faults again inside the unmapped text. Leave immediately.
+    svcExitProcess();
+}
+
+// Guest-code sampling profiler. Horizon has no perf/simpleperf and the Atmosphere GDB stub is far
+// too slow to sample at any useful rate, so sample in-process: the Switch build keeps the current
+// translated guest PC in a plain global (recomp_mod_loader.h), and the generated symbol table is
+// already linked in for crash reports. A thread reads that PC, folds it to its enclosing guest
+// function and histograms it.
+//
+// Enabled only when `sdmc:/switch/WiiCompiled/profile.flag` exists, so a normal run pays nothing.
+extern "C" {
+extern const uint32_t kGuestMapSymbolCount;
+extern const uint32_t kGuestMapSymbolAddresses[];
+extern const char* const kGuestMapSymbolNames[];
+}
+
+constexpr size_t kProfileSlots = 8192;  // power of two, open addressed, never resized
+struct ProfileSlot {
+    uint32_t symbol;
+    uint64_t hits;
+};
+ProfileSlot g_profileSlots[kProfileSlots]{};
+uint64_t g_profileSamples = 0;
+uint64_t g_profileOutsideGuest = 0;
+
+// Floor lookup over the sorted guest symbol table: folds a PC to the start of the function that
+// contains it, so samples aggregate per function rather than per instruction.
+uint32_t ProfileSymbolFor(uint32_t address) {
+    uint32_t lo = 0;
+    uint32_t hi = kGuestMapSymbolCount;
+    while (lo < hi) {
+        const uint32_t mid = lo + (hi - lo) / 2;
+        if (kGuestMapSymbolAddresses[mid] <= address) {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    if (lo == 0 || address - kGuestMapSymbolAddresses[lo - 1] >= 0x10000u) {
+        return 0;
+    }
+    return kGuestMapSymbolAddresses[lo - 1];
+}
+
+const char* ProfileNameFor(uint32_t symbol) {
+    uint32_t lo = 0;
+    uint32_t hi = kGuestMapSymbolCount;
+    while (lo < hi) {
+        const uint32_t mid = lo + (hi - lo) / 2;
+        if (kGuestMapSymbolAddresses[mid] < symbol) {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    return (lo < kGuestMapSymbolCount && kGuestMapSymbolAddresses[lo] == symbol) ? kGuestMapSymbolNames[lo] : "?";
+}
+
+void ProfileRecord(uint32_t symbol) {
+    size_t slot = (symbol * 2654435761u) & (kProfileSlots - 1);
+    for (size_t probe = 0; probe < kProfileSlots; ++probe) {
+        ProfileSlot& entry = g_profileSlots[slot];
+        if (entry.hits == 0) {
+            entry.symbol = symbol;
+            entry.hits = 1;
+            return;
+        }
+        if (entry.symbol == symbol) {
+            ++entry.hits;
+            return;
+        }
+        slot = (slot + 1) & (kProfileSlots - 1);
+    }
+}
+
+void ProfileWriteReport() {
+    std::vector<ProfileSlot> ranked;
+    ranked.reserve(256);
+    for (const auto& entry : g_profileSlots) {
+        if (entry.hits != 0) {
+            ranked.push_back(entry);
+        }
+    }
+    std::sort(ranked.begin(), ranked.end(), [](const ProfileSlot& a, const ProfileSlot& b) { return a.hits > b.hits; });
+
+    // Written fresh and closed each time: a file held open reports size 0 over the SD card.
+    FILE* out = std::fopen("sdmc:/switch/WiiCompiled/profile.txt", "w");
+    if (out == nullptr) {
+        return;
+    }
+    const uint64_t total = g_profileSamples;
+    std::fprintf(out, "samples=%llu outside_guest=%llu (%.1f%%) distinct_functions=%zu\n",
+                 static_cast<unsigned long long>(total),
+                 static_cast<unsigned long long>(g_profileOutsideGuest),
+                 total ? 100.0 * static_cast<double>(g_profileOutsideGuest) / static_cast<double>(total) : 0.0,
+                 ranked.size());
+    const size_t shown = std::min<size_t>(ranked.size(), 50);
+    for (size_t i = 0; i < shown; ++i) {
+        std::fprintf(out, "%6.2f%%  %8llu  0x%08X  %s\n",
+                     total ? 100.0 * static_cast<double>(ranked[i].hits) / static_cast<double>(total) : 0.0,
+                     static_cast<unsigned long long>(ranked[i].hits), ranked[i].symbol,
+                     ProfileNameFor(ranked[i].symbol));
+    }
+    std::fclose(out);
+}
+
+// Host-PC sampling, alongside the guest-PC histogram above.
+//
+// The guest PC global is only written at *indirect* dispatch boundaries - the generated-to-
+// generated direct-call fast path in DispatchKnownTranslatedCpuTargetStatic deliberately skips it
+// to save a store. So profile.txt is inclusive call-subtree time rooted at each indirect dispatch,
+// not self time, and it silently bills every native HLE/aurora call to its guest caller
+// (outside_guest is therefore always 0.0%). Reading it as self time is how a 16-instruction
+// function like nw4r::ef::DrawBillboardStrategy::Draw appeared to cost 3 ms a frame.
+//
+// Sampling the guest thread's real ARM64 PC fixes both problems at once and needs no change to the
+// 43 MB of generated code: svcGetThreadContext3 on the guest thread gives the true PC, module-
+// relative addresses are symbolised offline against the ELF, and host frames simply resolve to
+// host symbols. Raw offsets are histogrammed here - no symbol table is consulted on-console.
+// Power of two, open addressed, never resized. At 16384 slots and 4-byte PC granularity the table
+// saturated partway through a race and silently dropped every newly-seen PC after that - one
+// 105 s window lost ~45% of its samples. 64K slots plus 64-byte bucketing (16 instructions, well
+// under a typical function) gives ~16x the headroom for the same fidelity at function level.
+constexpr size_t kHostProfileSlots = 65536;
+constexpr uint64_t kHostProfileBucketMask = ~uint64_t{63};
+struct HostProfileSlot {
+    uint64_t offset;  // module-relative PC, bucketed to 4 bytes
+    uint64_t hits;
+};
+HostProfileSlot g_hostProfileSlots[kHostProfileSlots]{};
+uint64_t g_hostProfileSamples = 0;
+uint64_t g_hostProfileFailures = 0;
+uint64_t g_hostProfileOffModule = 0;
+uint64_t g_hostProfileDropped = 0;
+Result g_hostProfileLastError = 0;
+Handle g_profiledThreadHandle = INVALID_HANDLE;
+
+void HostProfileRecord(uint64_t offset) {
+    size_t slot = static_cast<size_t>((offset * 1099511628211ull) >> 20) & (kHostProfileSlots - 1);
+    for (size_t probe = 0; probe < kHostProfileSlots; ++probe) {
+        HostProfileSlot& entry = g_hostProfileSlots[slot];
+        if (entry.hits == 0) {
+            entry.offset = offset;
+            entry.hits = 1;
+            return;
+        }
+        if (entry.offset == offset) {
+            ++entry.hits;
+            return;
+        }
+        slot = (slot + 1) & (kHostProfileSlots - 1);
+    }
+    ++g_hostProfileDropped;  // table full: this PC is not counted at all, so report it
+}
+
+void HostProfileWriteReport() {
+    std::vector<HostProfileSlot> ranked;
+    ranked.reserve(4096);
+    for (const auto& entry : g_hostProfileSlots) {
+        if (entry.hits != 0) {
+            ranked.push_back(entry);
+        }
+    }
+    std::sort(ranked.begin(), ranked.end(),
+              [](const HostProfileSlot& a, const HostProfileSlot& b) { return a.hits > b.hits; });
+
+    FILE* out = std::fopen("sdmc:/switch/WiiCompiled/profile_host.txt", "w");
+    if (out == nullptr) {
+        return;
+    }
+    // module_base is recorded so a run can still be symbolised if the raw PCs are ever dumped;
+    // every offset below is already module-relative and feeds aarch64-none-elf-addr2line directly.
+    std::fprintf(out,
+                 "host_samples=%llu failures=%llu (last rc 0x%x) off_module=%llu dropped_table_full=%llu distinct_pcs=%zu module_base=0x%llx\n",
+                 static_cast<unsigned long long>(g_hostProfileSamples),
+                 static_cast<unsigned long long>(g_hostProfileFailures),
+                 static_cast<unsigned int>(g_hostProfileLastError),
+                 static_cast<unsigned long long>(g_hostProfileOffModule),
+                 static_cast<unsigned long long>(g_hostProfileDropped), ranked.size(),
+                 static_cast<unsigned long long>(SwitchModuleBase()));
+    const size_t shown = std::min<size_t>(ranked.size(), 4000);
+    for (size_t i = 0; i < shown; ++i) {
+        std::fprintf(out, "%8llu 0x%llx\n", static_cast<unsigned long long>(ranked[i].hits),
+                     static_cast<unsigned long long>(ranked[i].offset));
+    }
+    std::fclose(out);
+}
+
+void StartSwitchGuestProfiler() {
+    FILE* flag = std::fopen("sdmc:/switch/WiiCompiled/profile.flag", "r");
+    if (flag == nullptr) {
+        return;
+    }
+    std::fclose(flag);
+    RT_LOGF(RT_TAG_RUNTIME, "guest sampling profiler enabled (1 kHz -> profile.txt)\n");
+
+    // This function runs on the thread that goes on to host the guest fibers, so that is the
+    // thread to sample. svcGetThreadContext3 needs a real handle, and the only real handle we can
+    // name from another thread is the main thread's, so confirm by thread id rather than assume.
+    {
+        u64 selfId = 0;
+        u64 mainId = 0;
+        const Handle mainHandle = envGetMainThreadHandle();
+        if (R_SUCCEEDED(svcGetThreadId(&selfId, CUR_THREAD_HANDLE)) &&
+            R_SUCCEEDED(svcGetThreadId(&mainId, mainHandle)) && selfId == mainId) {
+            g_profiledThreadHandle = mainHandle;
+            RT_LOGF(RT_TAG_RUNTIME, "host PC sampling enabled (-> profile_host.txt, module base 0x%llx)\n",
+                    static_cast<unsigned long long>(SwitchModuleBase()));
+        } else {
+            RT_LOGF(RT_TAG_RUNTIME,
+                    "host PC sampling unavailable: guest runs on thread %llu, not main thread %llu\n",
+                    static_cast<unsigned long long>(selfId), static_cast<unsigned long long>(mainId));
+        }
+    }
+
+    // Deliberately leaked rather than detached: devkitA64's newlib returns ENOSYS from
+    // pthread_detach, so std::thread::detach() throws, and unwinding then runs ~thread() on a
+    // still-joinable thread, which calls std::terminate(). See [switch-no-pthread-detach].
+    new std::thread([] {
+        // Let the first frames settle before sampling; nothing here is urgent.
+        std::this_thread::sleep_for(std::chrono::seconds(3));
+        int sinceReport = 0;
+        for (;;) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            const uint32_t pc = __atomic_load_n(&RecompMod::g_currentTranslatedExecutionAddress, __ATOMIC_RELAXED);
+            ++g_profileSamples;
+            if (pc == 0) {
+                ++g_profileOutsideGuest;
+            } else {
+                const uint32_t symbol = ProfileSymbolFor(pc);
+                if (symbol != 0) {
+                    ProfileRecord(symbol);
+                }
+            }
+            if (g_profiledThreadHandle != INVALID_HANDLE) {
+                ThreadContext ctx{};
+                ++g_hostProfileSamples;
+                // svcGetThreadContext3 only dumps registers for a thread that is *paused*; on a
+                // running thread it fails outright (the first attempt at this failed 135000 of
+                // 135000 samples). Pause, read, resume - a few microseconds of guest stall per
+                // sample, which is why a profiled run reports a lower frame rate than a clean one.
+                const Result pauseRc =
+                    svcSetThreadActivity(g_profiledThreadHandle, ThreadActivity_Paused);
+                const Result ctxRc =
+                    R_SUCCEEDED(pauseRc) ? svcGetThreadContext3(&ctx, g_profiledThreadHandle) : pauseRc;
+                if (R_SUCCEEDED(pauseRc)) {
+                    svcSetThreadActivity(g_profiledThreadHandle, ThreadActivity_Runnable);
+                }
+                if (R_FAILED(ctxRc)) {
+                    ++g_hostProfileFailures;
+                    g_hostProfileLastError = ctxRc;
+                } else {
+                    const u64 base = SwitchModuleBase();
+                    const u64 hostPc = ctx.pc.x;
+                    if (base != 0 && hostPc >= base) {
+                        HostProfileRecord((hostPc - base) & kHostProfileBucketMask);
+                    } else {
+                        ++g_hostProfileOffModule;
+                    }
+                }
+            }
+            if (++sinceReport >= 15000) {  // ~15 s of samples
+                sinceReport = 0;
+                ProfileWriteReport();
+                if (g_profiledThreadHandle != INVALID_HANDLE) {
+                    HostProfileWriteReport();
+                }
+            }
+        }
+    });
+}
+
+#if defined(MKW_PGO_GENERATE)
+extern "C" void __gcov_dump(void);
+
+// A PGO run ends by closing the console, never by returning from main, so the counters would
+// never be flushed. Dump them on a timer instead and accept the duplicate work.
+void StartSwitchGcovDumpTimer() {
+    // Leaked, not detached: pthread_detach is ENOSYS on devkitA64 (see StartSwitchGuestProfiler).
+    new std::thread([] {
+        for (;;) {
+            std::this_thread::sleep_for(std::chrono::seconds(180));
+            __gcov_dump();
+        }
+    });
+}
+#endif
+#endif // __SWITCH__
 
 namespace {
 
@@ -327,6 +768,16 @@ void CloseFileDescriptor(int fd) {
 #endif
 
 bool InstallTranscriptPipe(int& outReadFd, int& outWriteFd, int targetFd) {
+#if defined(__SWITCH__)
+    // Horizon's newlib has no pipe(), and the transcript would be redundant anyway: RuntimeMain
+    // already reopens stdout/stderr onto the SD card (log.txt / stderr.txt), and nxlink takes
+    // over those descriptors when the build is launched from the network loader. Reporting
+    // failure here makes InitializeProcessTranscript unwind cleanly and leave stdio alone.
+    (void)outReadFd;
+    (void)outWriteFd;
+    (void)targetFd;
+    return false;
+#else
 #if defined(_WIN32)
     int pipeFds[2]{-1, -1};
     if (_pipe(pipeFds, 8192, _O_BINARY) != 0) {
@@ -355,6 +806,7 @@ bool InstallTranscriptPipe(int& outReadFd, int& outWriteFd, int targetFd) {
         return false;
     }
     return true;
+#endif // !__SWITCH__
 }
 
 #if defined(_WIN32)
@@ -657,6 +1109,51 @@ std::string FormatHostStackTrace(unsigned framesToSkip) {
         out << ")\n";
     }
     return out.str();
+#elif defined(__SWITCH__)
+    // libnx has no backtrace API and devkitA64's newlib has no execinfo.h, but libgcc's DWARF
+    // unwinder is linked in regardless (C++ exceptions need it), and it works whether or not the
+    // optimiser kept a frame pointer. Addresses are module-relative so
+    // `aarch64-none-elf-addr2line -e WiiCompiled.elf <offset>` resolves them against the
+    // unstripped ELF that sits next to the .nro - same convention as __libnx_exception_handler.
+    struct UnwindState {
+        unsigned skip;
+        unsigned emitted;
+        std::ostringstream* out;
+    };
+    UnwindState state{framesToSkip + 1, 0, nullptr};
+    std::ostringstream out;
+    state.out = &out;
+    _Unwind_Backtrace(
+        [](_Unwind_Context* context, void* arg) -> _Unwind_Reason_Code {
+            auto* st = static_cast<UnwindState*>(arg);
+            if (st->skip > 0) {
+                --st->skip;
+                return _URC_NO_REASON;
+            }
+            if (st->emitted >= 48) {
+                return _URC_END_OF_STACK;
+            }
+            const auto pc = static_cast<uintptr_t>(_Unwind_GetIP(context));
+            if (pc == 0) {
+                return _URC_END_OF_STACK;
+            }
+            char line[64];
+            // _Unwind_GetIP gives the return address; step back into the call itself so
+            // addr2line lands on the calling line rather than the one after it.
+            std::snprintf(line, sizeof(line), "[runtime]   #%02u +0x%llx\n", st->emitted,
+                          static_cast<unsigned long long>(SwitchModuleOffset(pc - 4)));
+            *st->out << line;
+            ++st->emitted;
+            return _URC_NO_REASON;
+        },
+        &state);
+    if (state.emitted == 0) {
+        return "[runtime] host stack trace unavailable (unwinder produced no frames)\n";
+    }
+    char header[96];
+    std::snprintf(header, sizeof(header), "[runtime] host stack trace (module base 0x%llx):\n",
+                  static_cast<unsigned long long>(SwitchModuleBase()));
+    return std::string(header) + out.str();
 #else
     (void)framesToSkip;
     return {};
@@ -726,6 +1223,15 @@ namespace {
 
 void DumpHostStackTrace() {
 #if defined(_WIN32)
+    static std::atomic_flag s_inProgress = ATOMIC_FLAG_INIT;
+    if (s_inProgress.test_and_set()) {
+        return;
+    }
+    const std::string trace = FormatHostStackTrace(1);
+    std::fputs(trace.c_str(), stderr);
+    std::fflush(stderr);
+    s_inProgress.clear();
+#elif defined(__SWITCH__)
     static std::atomic_flag s_inProgress = ATOMIC_FLAG_INIT;
     if (s_inProgress.test_and_set()) {
         return;
@@ -823,6 +1329,7 @@ void WriteCrashArtifacts(std::string_view reason, std::string_view extraDetails,
 }
 
 } // namespace RuntimeCrash
+
 
 
 namespace {
@@ -1086,6 +1593,11 @@ struct sigaction g_previousSigbusAction {};
 // instead of chaining. So this is the single SIGSEGV/SIGBUS handler for the whole process, and it
 // owns checking GuestFlat's fault-interception logic first, exactly mirroring the order SehLogger
 // already uses on Windows.
+
+// Horizon delivers CPU faults through libnx's __libnx_exception_handler (defined above), not
+// through POSIX signals, and newlib has no sigaction at all - so none of the signal-handling
+// machinery below exists on Switch.
+#if !defined(__SWITCH__)
 void ReportUnhandledSignalFault(int sig, void* faultAddress) {
     RT_LOG(RT_TAG_RUNTIME) << "Signal " << sig << " (fault address 0x" << std::hex
               << reinterpret_cast<uintptr_t>(faultAddress) << std::dec << ")";
@@ -1100,7 +1612,7 @@ void ReportUnhandledSignalFault(int sig, void* faultAddress) {
     std::cerr.flush();
 }
 
-#if defined(__aarch64__)
+#if defined(__aarch64__) && !defined(__SWITCH__)
 // arm64's uc_mcontext (struct sigcontext) has no direct ESR field the way x86's gregs[REG_ERR]
 // does - the ESR value lives in a variable-length list of tagged extension records packed into
 // sigcontext::__reserved (fpsimd_context always first, then optionally esr_context, sve_context,
@@ -1155,7 +1667,7 @@ void PosixMemoryFaultHandler(int sig, siginfo_t* info, void* ucontextVoid) {
         auto* uc = static_cast<ucontext_t*>(ucontextVoid);
         isWrite = (uc->uc_mcontext.gregs[REG_ERR] & 0x2) != 0;
     }
-#elif defined(__aarch64__)
+#elif defined(__aarch64__) && !defined(__SWITCH__)
     // sigcontext::fault_address duplicates info->si_addr on arm64 (kept as the primary source
     // above for parity with the x86 branch and because it's populated even when info is null).
     // ESR_ELx.ISS bit 6 (WnR - "Write not Read") is the arm64 equivalent of x86's REG_ERR bit 1:
@@ -1275,6 +1787,7 @@ void InstallPosixMemoryFaultHandler() {
     sigaction(SIGBUS, &action, nullptr);
 #endif
 }
+#endif // !__SWITCH__
 
 #if defined(ANDROID)
 // Bumping this thread's nice value (SDLActivity.java's THREAD_PRIORITY_URGENT_DISPLAY) is only a
@@ -1441,6 +1954,28 @@ static void TerminateHandler() {
 }
 
 int RuntimeMain(int argc, char** argv) {
+#if defined(__SWITCH__)
+    // There is no libnx text console here - the framebuffer belongs to aurora/deko3d - and an
+    // hbmenu launch has nowhere to stream stdio to, so put both streams on the SD card before
+    // anything else can print. Unbuffered, because a crash must not lose the lines that explain
+    // it. An nxlink launch overrides these descriptors again later, which is intentional.
+    std::freopen("sdmc:/switch/WiiCompiled/log.txt", "w", stdout);
+    std::freopen("sdmc:/switch/WiiCompiled/stderr.txt", "w", stderr);
+    std::setvbuf(stdout, nullptr, _IONBF, 0);
+    std::setvbuf(stderr, nullptr, _IONBF, 0);
+    // The guest runs on this thread, so every helper thread created from here on should prefer a
+    // different core (see SwitchSpreadHelperThread).
+    g_switchGuestCore.store(static_cast<int>(svcGetCurrentProcessorNumber()), std::memory_order_relaxed);
+    RT_LOGF(RT_TAG_RUNTIME, "guest thread on core %d\n",
+            g_switchGuestCore.load(std::memory_order_relaxed));
+#if defined(MKW_PGO_GENERATE)
+    // gcov writes its .gcda files next to the compile-time object paths, which do not exist on
+    // the console; redirect the whole tree onto the SD card and strip the build-machine prefix.
+    ::setenv("GCOV_PREFIX", "sdmc:/switch/WiiCompiled/Cache/gcov", 1);
+    ::setenv("GCOV_PREFIX_STRIP", "0", 1);
+    StartSwitchGcovDumpTimer();
+#endif
+#endif
     // Must run before the transcript duplicates stdout/stderr: it decides what
     // those descriptors are mirrored to now that the products are GUI-subsystem.
     AttachParentConsoleForDiagnostics();
@@ -1448,6 +1983,8 @@ int RuntimeMain(int argc, char** argv) {
     ConfigureWindowsFatalDialogBehavior();
     InstallSehLogger();
     WindowsTimerResolutionGuard timerResolutionGuard;
+#elif defined(__SWITCH__)
+    // Faults arrive through __libnx_exception_handler instead; nothing to install.
 #else
     InstallPosixMemoryFaultHandler();
 #if defined(ANDROID)
@@ -1579,6 +2116,11 @@ int RuntimeMain(int argc, char** argv) {
                       << backendDisplayName(auroraInfo.backend)
                       << "\". See the [aurora::gpu] lines above for the reason." << std::endl;
         } else {
+#if defined(__SWITCH__)
+            // Started here rather than at the top of RuntimeMain: sampling before the runtime is
+            // fully up aborted the process inside libnx before guest memory was even reserved.
+            StartSwitchGuestProfiler();
+#endif
             RT_LOG(RT_TAG_RUNTIME) << "graphics backend: " << backendDisplayName(auroraInfo.backend)
                       << std::endl;
         }

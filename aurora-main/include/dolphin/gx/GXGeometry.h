@@ -21,10 +21,14 @@ void GXSetLineWidth(u8 width, GXTexOffset texOffsets);
 void GXSetPointSize(u8 pointSize, GXTexOffset texOffsets);
 void GXEnableTexOffsets(GXTexCoordID coord, GXBool line_enable, GXBool point_enable);
 #ifdef TARGET_PC
-void GXSetArray(GXAttr attr, const void* data, u32 size, u8 stride, bool le);
-static inline void GXSetArray(GXAttr attr, const void* data, u32 size, u8 stride) {
-  GXSetArray(attr, data, size, stride, false);
-}
+// A single extern "C" declaration with a default argument, not two overloaded declarations of
+// the same name - C linkage does not support overloading (two same-named extern "C" decls with
+// different signatures is a genuine conflict), which GCC (devkitA64/Switch) correctly rejects but
+// Clang (every other platform this project has targeted) has historically been more lenient
+// about. A default argument is resolved at the call site in C++ source, not part of the C ABI,
+// so it carries no such restriction - real 4-arg callers (e.g. runtime/src/hle/gx/gx_dl.cpp) and
+// explicit 5-arg callers both keep working unchanged.
+void GXSetArray(GXAttr attr, const void* data, u32 size, u8 stride, bool le = false);
 #define GXSETARRAY(attr, data, size, stride, le) GXSetArray((attr), (data), (size), (stride), (le))
 #else
 void GXSetArray(GXAttr attr, const void* data, u8 stride);

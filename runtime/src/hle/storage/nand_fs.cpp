@@ -2,6 +2,7 @@
 // <nand_root>\title\00010004\524d4350\data\rksys.dat on the host.
 
 #include "nand_internal.h"
+#include "host_file_copy.h"
 
 #include "isa/big_endian.h"
 #include "hle/storage/riivolution.h"
@@ -111,7 +112,7 @@ static std::string BuildHostNandPath(std::string wiiPathStr) {
     if (!wiiPathStr.empty() && (wiiPathStr[0] == '\\' || wiiPathStr[0] == '/')) {
         hostPath += wiiPathStr;
     } else {
-        hostPath += "\\";
+        hostPath += '/';
         hostPath += wiiPathStr;
     }
     return hostPath;
@@ -207,7 +208,7 @@ static void CloneRiivolutionSaveIfNeeded(const std::string& sourceHostPath,
     CreateParentDirectories(redirectedHostPath);
 
     std::error_code ec;
-    std::filesystem::copy_file(sourceHostPath, redirectedHostPath,
+    HostFileCopy::CopyFile(sourceHostPath, redirectedHostPath,
                                std::filesystem::copy_options::skip_existing, ec);
     if (ec) {
         LogNandWarning("RiivolutionSave", "WARNING: failed to clone '%s' -> '%s': %s",

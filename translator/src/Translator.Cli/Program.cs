@@ -1010,8 +1010,8 @@ int RunTranslateRecursive(string[] argsTail)
                         !localGuestAbiContracts[address].HasFullSynchronizationFence &&
                         GuestStateLivenessAnalyzer.CanDeconstructWithoutContext(canonicalGuestFunctions[address]) &&
                         (!directlyCalledGuestFunctions.Contains(address) ||
-                         (StateFreeInputValueCount(PlannedStateFreeContract(address)) <= 4 &&
-                          StateFreeOutputValueCount(PlannedStateFreeContract(address)) <= 2)))
+                         (StateFreeInputValueCount(PlannedStateFreeContract(address)) <= 8 &&
+                          StateFreeOutputValueCount(PlannedStateFreeContract(address)) <= 4)))
                 })
                 .Where(static item => item.eligible)
                 .Select(static item => item.index)

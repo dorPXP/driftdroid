@@ -32,7 +32,23 @@ endif ()
 
 if (AURORA_ENABLE_GX)
     target_compile_definitions(aurora_core PUBLIC AURORA_ENABLE_GX WEBGPU_DAWN)
-    target_sources(aurora_core PRIVATE lib/webgpu/gpu.cpp lib/webgpu/gpu_cache.cpp lib/dawn/BackendBinding.cpp)
+    # BackendBinding.cpp does platform surface setup specifically for Dawn's own backend
+    # selection (X11/Wayland/Win32/Cocoa) - no Switch equivalent, genuinely excluded.
+    # gpu.cpp turns out to be almost entirely portable wgpu:: C++ calls already - only one small
+    # block (inside initialize(), already gated `#if defined(WEBGPU_DAWN) && !defined(__MINGW32__)`)
+    # touches dawn/native/DawnNative.h directly (for a Dawn-specific instance-descriptor tweak);
+    # that block now also excludes __SWITCH__ (see the guard in gpu.cpp itself), so the file
+    # compiles for Switch unmodified otherwise - confirmed by re-including it here (see
+    # [[switch-port-effort]] memory, Phase 3b continuation). gpu_cache.cpp stays unconditional -
+    # it's a generic SQLite blob cache with zero direct wgpu::/dawn:: dependency, reusable by any
+    # backend including deko3d's future uam-shader cache.
+    target_sources(aurora_core PRIVATE lib/webgpu/gpu_cache.cpp lib/webgpu/gpu.cpp)
+    if (CMAKE_SYSTEM_NAME STREQUAL "NintendoSwitch")
+        target_sources(aurora_core PRIVATE lib/switch/surface_switch.cpp lib/switch/gl_proc_table.c
+            lib/switch/input_switch.cpp lib/switch/deko3d_selftest.cpp)
+    else ()
+        target_sources(aurora_core PRIVATE lib/dawn/BackendBinding.cpp)
+    endif ()
     target_link_libraries(aurora_core PRIVATE dawn::webgpu_dawn)
     if (DAWN_ENABLE_VULKAN)
         target_compile_definitions(aurora_core PRIVATE DAWN_ENABLE_BACKEND_VULKAN)

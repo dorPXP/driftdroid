@@ -26,6 +26,10 @@
 #include <windows.h>
 #endif
 
+#if defined(__SWITCH__)
+#include <switch.h>
+#endif
+
 #if defined(SDL_PLATFORM_ANDROID)
 #include <jni.h>
 extern "C" void Android_LockActivityMutex(void);
@@ -53,6 +57,10 @@ int g_presentAspectHeight = 0;
 AuroraWindowSize g_windowSize;
 std::vector<AuroraEvent> g_events;
 std::atomic_bool g_backgrounded = false;
+#if defined(__SWITCH__)
+// Set from pump_events() when Horizon asks the title to quit; turned into an AURORA_EXIT event.
+std::atomic_bool g_appletExitRequested = false;
+#endif
 std::atomic_bool g_nativeResizePending = false;
 #if defined(__ANDROID__)
 int g_androidRealGamepadCount = 0;
@@ -160,6 +168,12 @@ bool query_native_client_size(uint32_t& width, uint32_t& height) noexcept {
       return true;
     }
   }
+#elif defined(__SWITCH__)
+  // SDL's offscreen window reports its fake 1024x768 size; the real surface is always 1280x720
+  // (see get_window_size), and a 4:3 answer here pillarboxes the whole presentation.
+  width = 1280;
+  height = 720;
+  return true;
 #else
   (void)width;
   (void)height;
@@ -394,6 +408,13 @@ const AuroraEvent* poll_events() {
   while (SDL_PollEvent(&event)) {
     process_event(event);
   }
+#if defined(__SWITCH__)
+  if (g_appletExitRequested.load(std::memory_order_acquire)) {
+    g_events.push_back(AuroraEvent{
+        .type = AURORA_EXIT,
+    });
+  }
+#endif
   g_events.push_back(AuroraEvent{
       .type = AURORA_NONE,
   });
@@ -406,9 +427,13 @@ bool create_window(AuroraBackend backend) {
   flags |= SDL_WINDOW_FULLSCREEN;
 #else
   flags |= SDL_WINDOW_HIDDEN | SDL_WINDOW_RESIZABLE;
+#if !defined(__SWITCH__)
+  // Not on Switch: SDL's offscreen driver would snap a fullscreen window to its fake 1024x768
+  // display mode; the real screen is always nwindowGetDefault()'s 1280x720.
   if (g_config.startFullscreen) {
     flags |= SDL_WINDOW_FULLSCREEN;
   }
+#endif
 #endif
   switch (backend) {
 #ifdef AURORA_ENABLE_GX
@@ -422,9 +447,11 @@ bool create_window(AuroraBackend backend) {
     flags |= SDL_WINDOW_METAL;
     break;
 #endif
-#if defined(DAWN_ENABLE_BACKEND_OPENGL) && !defined(__ANDROID__)
-  // Not on Android: Dawn creates its own EGL display and context against the ANativeWindow, and
-  // SDL_WINDOW_OPENGL would have SDL make a competing one.
+#if defined(DAWN_ENABLE_BACKEND_OPENGL) && !defined(__SWITCH__) && !defined(__ANDROID__)
+  // Not on Switch: SDL's offscreen video driver would try to create its own EGL context for an
+  // OpenGL window, while Dawn owns the only EGL display/context (on nwindowGetDefault()).
+  // Not on Android either, for the same reason: Dawn creates its own EGL display and context
+  // against the ANativeWindow, and SDL_WINDOW_OPENGL would have SDL make a competing one.
   case BACKEND_OPENGL:
   case BACKEND_OPENGLES:
     flags |= SDL_WINDOW_OPENGL;
@@ -520,6 +547,13 @@ bool initialize() {
   /* We don't want to initialize anything input related here, otherwise the add events will get lost to the void */
   TRY(SDL_SetHint(SDL_HINT_ORIENTATIONS, "LandscapeLeft LandscapeRight"), "Error setting {}: {}", SDL_HINT_ORIENTATIONS,
       SDL_GetError());
+#if defined(__SWITCH__)
+  // SDL3 has no Switch video backend. Presentation goes through deko3d on nwindowGetDefault()
+  // regardless, so SDL only needs to supply a window object and event loop; its offscreen driver
+  // does that, but SDL never auto-selects it without this hint ("No available video device").
+  TRY(SDL_SetHint(SDL_HINT_VIDEO_DRIVER, "offscreen"), "Error setting {}: {}", SDL_HINT_VIDEO_DRIVER,
+      SDL_GetError());
+#endif
   TRY(SDL_InitSubSystem(SDL_INIT_EVENTS | SDL_INIT_VIDEO), "Error initializing SDL: {}", SDL_GetError());
 
 #if !defined(_WIN32) && !defined(__APPLE__)
@@ -560,6 +594,12 @@ AuroraWindowSize get_window_size() {
   ASSERT(SDL_GetWindowSize(g_window, &width, &height), "Failed to get window size: {}", SDL_GetError());
   ASSERT(SDL_GetWindowSizeInPixels(g_window, &native_fb_w, &native_fb_h), "Failed to get window size in pixels: {}",
          SDL_GetError());
+#if defined(__SWITCH__)
+  // The offscreen SDL video driver clamps windows to its 1024x768 fake display; the real surface is
+  // the 1280x720 default NWindow, so a 4:3 size here would stretch everything to 16:9.
+  width = native_fb_w = 1280;
+  height = native_fb_h = 720;
+#endif
 
   int fb_w = native_fb_w;
   int fb_h = native_fb_h;
@@ -628,6 +668,16 @@ bool is_presentable() noexcept {
 }
 
 void pump_events() noexcept {
+#if defined(__SWITCH__)
+  // SDL's offscreen driver never talks to the applet layer, so nothing answers Horizon's
+  // messages (sleep, wake, focus, docked/handheld). An unanswered sleep request kills the
+  // system's operation-mode manager (omm crash, 2165-0001), taking the console down with it.
+  if (!appletMainLoop()) {
+    // The system asked the title to exit (HOME close, sleep-related teardown).
+    Log.info("applet requested exit");
+    g_appletExitRequested.store(true, std::memory_order_release);
+  }
+#endif
   if (g_window != nullptr) {
     SDL_SyncWindow(g_window);
   }

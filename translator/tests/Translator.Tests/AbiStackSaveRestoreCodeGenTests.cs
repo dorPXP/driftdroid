@@ -328,7 +328,7 @@ public class ResidentAbiCodeGenTests
         Assert.Contains("state_free_results_native(", variant, StringComparison.Ordinal);
         Assert.Contains("PPC_FPR native_f1", variant, StringComparison.Ordinal);
         Assert.Contains("PPC_FPR native_f2", variant, StringComparison.Ordinal);
-        Assert.Contains("return { static_cast<uint64_t>(cached_r3), cached_f1.raw };", variant, StringComparison.Ordinal);
+        Assert.Contains("return MkwStateFreeResult2{ static_cast<uint64_t>(cached_r3), cached_f1.raw };", variant, StringComparison.Ordinal);
         Assert.DoesNotContain("ctx->", variant, StringComparison.Ordinal);
     }
 

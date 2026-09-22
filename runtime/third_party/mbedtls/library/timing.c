@@ -13,9 +13,14 @@
 
 #if !defined(MBEDTLS_TIMING_ALT)
 
-#if !defined(_WIN32) && !defined(MBEDTLS_PLATFORM_IS_UNIXLIKE)
+#if !defined(_WIN32) && !defined(MBEDTLS_PLATFORM_IS_UNIXLIKE) && !defined(__SWITCH__)
 #error "This module only works on Unix and Windows, see MBEDTLS_TIMING_C in mbedtls_config.h"
 #endif
+// __SWITCH__: this file only calls gettimeofday() (no setitimer()/SIGALRM/signal() - devkitA64
+// has no real POSIX signal support, confirmed via CMake's own `sigaction` check failing during
+// configure), and devkitA64's newlib does provide a real gettimeofday(), so no MBEDTLS_TIMING_ALT
+// override is needed here - narrower fix than defining MBEDTLS_PLATFORM_IS_UNIXLIKE broadly, same
+// reasoning as net_sockets.c's patch above.
 
 #if defined(_WIN32) && !defined(EFIX64) && !defined(EFI32)
 
