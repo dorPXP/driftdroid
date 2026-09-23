@@ -30,6 +30,7 @@
 static aurora::Module Log("aurora::gx");
 
 namespace aurora::gx {
+bool UseReversedZ = true;
 using webgpu::g_device;
 using webgpu::g_graphicsConfig;
 

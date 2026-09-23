@@ -99,7 +99,9 @@ fn sample_copy(uv: vec2f) -> vec4f {
 }
 )"sv;
 
-static const std::string DepthShaderPreamble = R"(
+// A function, not a static: gx::UseReversedZ is chosen per backend after static initialisation.
+static std::string depth_shader_preamble() {
+  return R"(
 @group(0) @binding(0) var src: texture_depth_2d;
 
 struct UVTransform {
@@ -186,6 +188,7 @@ fn sample_depth_copy(uv: vec2f) -> vec4u {
     return vec4u(filtered, 255u);
 }
 )"s;
+}
 
 // Passthrough blit (for scaling)
 static constexpr std::string_view FragPassthrough = R"(
@@ -497,7 +500,7 @@ void initialize() {
     }
   }
   for (const auto& conv : DepthConvPipelines) {
-    g_pipelines[conv.fmt] = create_pipeline(conv, DepthShaderPreamble, g_depthBindGroupLayout);
+    g_pipelines[conv.fmt] = create_pipeline(conv, depth_shader_preamble(), g_depthBindGroupLayout);
     if (conv.outputFormat != to_wgpu(conv.fmt)) {
       Log.fatal("Output format mismatch for {}", conv.fmt);
     }

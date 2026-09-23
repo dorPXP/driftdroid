@@ -49,7 +49,12 @@ constexpr float GX_LARGE_NUMBER = -1048576.0f;
 
 namespace aurora::gx {
 constexpr bool UsePerPixelLighting = false;
-constexpr bool UseReversedZ = true;
+// Chosen per backend by webgpu::initialize, before any pipeline is built. Reversed Z buys float
+// depth precision only where clip space is [0,1] end to end. Tint's GLSL output rewrites
+// gl_Position.z = 2z - w for OpenGL's [-1,1] clip space, and in that sum the tiny depths reversed Z
+// gives distant geometry cancel against w - distant surfaces z-fight. OpenGL/GLES therefore render
+// forward Z. (deko3d emits GLSL too, but with deko3d_conventions and a [0,1] device, so no rewrite.)
+extern bool UseReversedZ;
 
 constexpr u32 MaxTextures = GX_MAX_TEXMAP;
 constexpr u32 MaxTluts = 20;

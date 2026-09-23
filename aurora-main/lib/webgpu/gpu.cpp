@@ -53,6 +53,7 @@ extern "C" void (*aurora_switch_gl_get_proc(const char* name))(void);
 
 namespace aurora::gx {
 void clear_display_copy_cache() noexcept;
+extern bool UseReversedZ;
 } // namespace aurora::gx
 namespace aurora::gfx {
 void clear_offscreen_cache();
@@ -637,6 +638,9 @@ bool initialize(AuroraBackend auroraBackend) {
   }
   g_adapter.GetInfo(&g_adapterInfo);
   g_backendType = g_adapterInfo.backendType;
+  // See gx::UseReversedZ: GL's [-1,1] clip-space rewrite destroys reversed Z's precision.
+  gx::UseReversedZ =
+      g_backendType != wgpu::BackendType::OpenGL && g_backendType != wgpu::BackendType::OpenGLES;
   const auto backendName = magic_enum::enum_name(g_backendType);
   auto adapterName = g_adapterInfo.device;
   if (adapterName.IsUndefined()) {

@@ -200,8 +200,12 @@ uint8_t ReadAramByteSlow(uint32_t addr);
 
 bool ResolveAramWindow(uint32_t addr, AramWindow& window);
 
-inline uint8_t ReadAramByte(uint32_t addr) {
+inline AramWindow& CurrentAramWindow() {
     static thread_local AramWindow window{};
+    return window;
+}
+
+inline uint8_t ReadAramByte(uint32_t addr, AramWindow& window) {
     if (addr >= window.begin && addr < window.end &&
         window.generation == g_aramWindowGeneration.load(std::memory_order_relaxed)) {
         return window.host[addr - window.begin];
@@ -611,8 +615,8 @@ public:
         return value;
     }
 
-    static uint8_t ReadAram8(uint32_t addr) {
-        return ReadAramByte(addr);
+    uint8_t ReadAram8(uint32_t addr) const {
+        return ReadAramByte(addr, m_aramWindow);
     }
 
 private:
@@ -636,6 +640,9 @@ private:
         return 0;
     }
 
+    // ProcessVoice owns this accelerator on one thread. Resolve TLS once per
+    // voice, retaining the same per-thread cache and per-read generation guard.
+    AramWindow& m_aramWindow = CurrentAramWindow();
     AXPBWii* m_pb = nullptr;
     uint32_t m_start = 0;
     uint32_t m_end = 0;
