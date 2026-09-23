@@ -1345,6 +1345,7 @@ void InitializeRuntimeSettings() noexcept {
     aurora_set_disable_copy_filter(g_disableCopyFilter);
     AuroraSetConstantMatrixIndexing(g_constantMatrixIndexing);
     AuroraSetThreadedGx(g_threadedGx);
+    aurora_set_overlap_frame_encode(RuntimeConfigFile::OverlapFrameEncode(true));
     ThermalQuality::SetEnabled(g_thermalAutoQuality);
 #if defined(__ANDROID__)
     AndroidSetSettingsButtonHidden(g_hideSettingsButton);

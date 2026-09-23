@@ -80,6 +80,9 @@ uint32_t aurora_get_queued_pipeline_count();
 
 // Controls whether display copies bypass the Wii's vertical copy filter.
 void aurora_set_disable_copy_filter(bool disabled);
+// Encode each finished frame without the renderer mutex, so the producer records the next frame
+// meanwhile. Interpolated frames always overlap; this extends it to ordinary ones.
+void aurora_set_overlap_frame_encode(bool enabled);
 // Thermal quality scaling: multiplies the render resolution on top of the user's setting (1.0 = off).
 void aurora_set_thermal_render_factor(float factor);bool aurora_get_disable_copy_filter();
 

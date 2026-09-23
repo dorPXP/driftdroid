@@ -294,6 +294,8 @@ bool frame_worker_requested() noexcept {
 // Returns false when a stop request was observed mid-cycle.
 bool run_frame_worker_cycle(gfx::SealedFrame& sealedFrame) noexcept;
 #endif
+// See aurora_set_overlap_frame_encode.
+std::atomic_bool g_overlapFrameEncode{true};
 
 void frame_worker_main() noexcept {
   // Encode/submit/present are latency-critical, same as the presenter thread - keep this thread
@@ -1616,7 +1618,11 @@ bool run_frame_worker_cycle(gfx::SealedFrame& sealedFrame) noexcept {
   {
     std::lock_guard gpuLock(g_rendererGpuMutex);
     seal_frame_locked(sealedFrame, ctx);
-    overlapEncode = ctx.interpolationActive;
+    // The encode reads only `ctx` and the sealed passes, so it is safe outside the mutex whether or
+    // not interpolation inserted slots. Holding the mutex through it made the producer's first drain
+    // of the next frame wait out the whole encode: on Switch, where the encode is CPU work on the
+    // same four cores, that serialised the two threads for a fifth of every frame.
+    overlapEncode = ctx.interpolationActive || g_overlapFrameEncode.load(std::memory_order_relaxed);
     if (!overlapEncode) {
       presentationJobs = encode_sealed_frame(sealedFrame, ctx);
     }
@@ -1971,6 +1977,9 @@ const AuroraBackend* aurora_get_available_backends(size_t* count) {
 void aurora_set_log_level(AuroraLogLevel level) { aurora::g_config.logLevel = level; }
 void aurora_set_pause_on_focus_lost(bool value) { aurora::g_config.pauseOnFocusLost = value; }
 void aurora_set_disable_copy_filter(bool disabled) { aurora::g_config.disableCopyFilter = disabled; }
+void aurora_set_overlap_frame_encode(bool enabled) {
+  aurora::g_overlapFrameEncode.store(enabled, std::memory_order_relaxed);
+}
 void aurora_set_thermal_render_factor(float factor) { aurora::window::set_thermal_render_factor(factor); }
 bool aurora_get_disable_copy_filter() { return aurora::g_config.disableCopyFilter; }
 void aurora_set_background_input(bool value) {

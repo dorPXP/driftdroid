@@ -17,9 +17,6 @@
 #include <dolphin/thp.h>
 
 #include <cstdint>
-#include <cstdio>
-#include <algorithm>
-#include <cstdlib>
 
 namespace {
 
@@ -38,47 +35,39 @@ void* GuestPtr(uint32_t addr) {
     }
 }
 
+// Bytes one decoded plane occupies: aurora writes 8x4 I8 tiles, a whole tile per partial edge.
+uint32_t TiledPlaneBytes(uint32_t width, uint32_t height) {
+    return ((width + 7u) / 8u) * ((height + 3u) / 4u) * 32u;
+}
+
 } // namespace
+
+// Defined in gx_objects.cpp: the entry point for host writes into guest RAM that no DC flush covers.
+extern "C" void GxNotifyGuestRamDmaWrite(uint32_t addr, uint32_t size);
 
 extern "C" uint32_t THP__VideoDecode_801b3bac(uint32_t fileAddr, uint32_t tileYAddr, uint32_t tileUAddr,
                                               uint32_t tileVAddr, uint32_t workAddr) {
-    // Chroma came out neutral grey on hardware while luma was perfect, which means the U/V writes
-    // are not landing where the game reads them. Log the first few calls so the guest-side buffer
-    // addresses and the decoder's verdict are visible instead of guessed at.
-    // Sample well into the movie, not the opening frames: those are a white title card, where
-    // neutral 0x80 chroma is the *correct* answer and proves nothing.
-    static int s_calls = 0;
-    const int callIndex = s_calls++;
-    const bool logThis = (callIndex % 60) == 0 && callIndex < 1800;
     // Pass nulls straight through rather than short-circuiting: aurora returns kNoInput for a null
     // file and kNoOutput for a null tile, whereas returning 0 here would tell the game the frame
     // decoded fine and leave it presenting stale tile memory.
     // `work` is unused by aurora's decoder, but pass it through so the signature keeps matching.
-    const uint32_t result = static_cast<uint32_t>(THPVideoDecode(GuestPtr(fileAddr), GuestPtr(tileYAddr),
-                                                                 GuestPtr(tileUAddr), GuestPtr(tileVAddr),
-                                                                 GuestPtr(workAddr)));
-    if (logThis) {
-        // RT_LOGF output never reached the SD card on Switch (console.log held only its header),
-        // so write straight to a file the way the sampling profiler does - reopened and closed each
-        // time, because a held-open file reports size 0 over the SD card.
-        if (FILE* out = std::fopen("sdmc:/switch/WiiCompiled/thp_debug.txt", "a")) {
-            const auto* u = static_cast<const unsigned char*>(GuestPtr(tileUAddr));
-            const auto* v = static_cast<const unsigned char*>(GuestPtr(tileVAddr));
-            const auto* y = static_cast<const unsigned char*>(GuestPtr(tileYAddr));
-            // Spread over the whole plane, not just byte 0: report how far chroma strays from
-            // neutral 0x80. A genuinely colourful frame must show a non-trivial deviation.
-            long uDev = 0, vDev = 0, yMin = 255, yMax = 0;
-            const int kSamples = 16384;
-            for (int i = 0; i < kSamples; ++i) {
-                if (u) uDev += std::abs(static_cast<int>(u[i]) - 128);
-                if (v) vDev += std::abs(static_cast<int>(v[i]) - 128);
-                if (y) { yMin = std::min<long>(yMin, y[i]); yMax = std::max<long>(yMax, y[i]); }
-            }
-            std::fprintf(out, "call=%d y=%08X u=%08X v=%08X -> %d  uDev=%ld vDev=%ld  yRange=%ld..%ld\n",
-                         callIndex, tileYAddr, tileUAddr, tileVAddr, static_cast<int>(result),
-                         uDev / kSamples, vDev / kSamples, yMin, yMax);
-            std::fclose(out);
-        }
+    const void* file = GuestPtr(fileAddr);
+    const uint32_t result = static_cast<uint32_t>(
+        THPVideoDecode(file, GuestPtr(tileYAddr), GuestPtr(tileUAddr), GuestPtr(tileVAddr), GuestPtr(workAddr)));
+
+    // The guest decoder wrote its output through the locked cache, whose DMA the runtime reports
+    // to the GX texture caches. A native decoder writes behind their back, so they kept serving the
+    // first frame's planes wherever no other write happened to share a 64 KiB granule - movies
+    // came out with live luma over the opening title card's neutral chroma: greyscale. Report
+    // exactly what was written.
+    u16 width = 0;
+    u16 height = 0;
+    if (THPVideoFrameSize(file, &width, &height)) {
+        const uint32_t chromaWidth = (width + 1u) / 2u;
+        const uint32_t chromaHeight = (height + 1u) / 2u;
+        GxNotifyGuestRamDmaWrite(tileYAddr, TiledPlaneBytes(width, height));
+        GxNotifyGuestRamDmaWrite(tileUAddr, TiledPlaneBytes(chromaWidth, chromaHeight));
+        GxNotifyGuestRamDmaWrite(tileVAddr, TiledPlaneBytes(chromaWidth, chromaHeight));
     }
     return result;
 }

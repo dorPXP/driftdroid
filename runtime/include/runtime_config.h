@@ -42,6 +42,7 @@ struct RuntimeUserConfig {
     std::optional<bool> disableCopyFilter;
     std::optional<bool> constantMatrixIndexing;
     std::optional<bool> threadedGx;
+    std::optional<bool> overlapFrameEncode;
     std::optional<bool> thermalAutoQuality;
     std::optional<bool> showShaderCompilation;
     std::optional<bool> hideSettingsButton;
@@ -455,6 +456,7 @@ inline RuntimeUserConfig ParseConfigDocument(const toml::value& document) {
     config.disableCopyFilter = FindConfigValue<bool>(document, "video", "disable_copy_filter");
     config.constantMatrixIndexing = FindConfigValue<bool>(document, "video", "constant_matrix_indexing");
     config.threadedGx = FindConfigValue<bool>(document, "video", "threaded_gx");
+    config.overlapFrameEncode = FindConfigValue<bool>(document, "video", "overlap_frame_encode");
     config.thermalAutoQuality = FindConfigValue<bool>(document, "video", "thermal_auto_quality");
     config.showShaderCompilation = FindConfigValue<bool>(document, "video", "show_shader_compilation");
     config.hideSettingsButton = FindConfigValue<bool>(document, "video", "hide_settings_button");
@@ -847,6 +849,11 @@ inline bool ThermalAutoQuality(bool fallback = false) {
 
 inline bool ThreadedGx(bool fallback = false) {
     return Get().threadedGx.value_or(fallback);
+}
+
+// No settings-menu entry: an escape hatch for the always-overlapped frame encode, read at startup.
+inline bool OverlapFrameEncode(bool fallback = true) {
+    return Get().overlapFrameEncode.value_or(fallback);
 }
 
 inline bool ConstantMatrixIndexing(bool fallback = false) {

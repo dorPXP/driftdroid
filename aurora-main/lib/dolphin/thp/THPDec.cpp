@@ -541,6 +541,23 @@ bool decode_and_write_block(BitReader& reader, DecodeContext& context, size_t co
 extern "C" {
 BOOL THPInit(void) { return TRUE; }
 
+BOOL THPVideoFrameSize(const void* file, u16* width, u16* height) {
+  if (file == nullptr) {
+    return FALSE;
+  }
+  DecodeContext context{};
+  if (parse_headers(file, context) != 0) {
+    return FALSE;
+  }
+  if (width != nullptr) {
+    *width = context.width;
+  }
+  if (height != nullptr) {
+    *height = context.height;
+  }
+  return TRUE;
+}
+
 s32 THPVideoDecode(const void* file, void* tileY, void* tileU, void* tileV, void*) {
   if (file == nullptr) {
     return kNoInput;

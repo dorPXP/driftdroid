@@ -1,6 +1,6 @@
 --- a/CMakeLists.txt
 +++ b/CMakeLists.txt
-@@ -3315,6 +3315,42 @@
+@@ -3315,6 +3315,52 @@
      "${SDL3_SOURCE_DIR}/src/io/n3ds/*.h"
    )
  
@@ -125,7 +125,7 @@
          if (localTime) {
 --- a/src/thread/pthread/SDL_systhread.c
 +++ b/src/thread/pthread/SDL_systhread.c
-@@ -161,12 +161,14 @@
+@@ -161,10 +161,15 @@
      }
  
 -#ifdef HAVE_SIGNAL_H
@@ -144,7 +144,7 @@
  #endif
 --- a/src/filesystem/dummy/SDL_sysfilesystem.c
 +++ b/src/filesystem/dummy/SDL_sysfilesystem.c
-@@ -45,6 +45,14 @@
+@@ -45,12 +45,20 @@
  
 +#if !defined(SDL_FSOPS_POSIX)
 +// posix/SDL_sysfsops.c already defines a real SDL_SYS_GetCurrentDirectory (via getcwd()) whenever
