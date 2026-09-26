@@ -108,9 +108,29 @@ extern "C" uint32_t g_dvdFstReservedBase;
 extern "C" uint32_t g_dvdFstReservedSize;
 
 // Byte-wise copy into guest RAM plus the DMA notification the GX caches need.
+// Byte-for-byte this is Memory::Write8 over the range, which the movie streamer made a visible
+// cost (every THP frame is a DVD read). Each executable-write-guard sub-page is copied with one
+// memcpy when both of its end bytes take Write8's native fast path and map contiguously; the
+// guard and the writable bias are per sub-page, so the bytes between share that answer. Anything
+// else - executable pages, MMIO, unmapped holes - still goes through Write8 one byte at a time.
 static void CopyToGuestAsDma(uint32_t dest, const uint8_t* data, size_t size) {
-    for (size_t i = 0; i < size; ++i) {
-        Memory::Write8(dest + static_cast<uint32_t>(i), data[i]);
+    constexpr uint32_t kSubPage = 1u << RecompMod::kExecutableWriteGuardPageShift;
+    size_t done = 0;
+    while (done < size) {
+        const uint32_t addr = dest + static_cast<uint32_t>(done);
+        const size_t chunk = std::min<size_t>(size - done, kSubPage - (addr & (kSubPage - 1u)));
+        const uint32_t last = addr + static_cast<uint32_t>(chunk - 1);
+        uint8_t* first = nullptr;
+        uint8_t* end = nullptr;
+        if (MemoryInline::TryGetWritablePointerFast(addr, 1, first) &&
+            MemoryInline::TryGetWritablePointerFast(last, 1, end) && end == first + (chunk - 1)) {
+            std::memcpy(first, data + done, chunk);
+        } else {
+            for (size_t i = 0; i < chunk; ++i) {
+                Memory::Write8(addr + static_cast<uint32_t>(i), data[done + i]);
+            }
+        }
+        done += chunk;
     }
     GxNotifyGuestRamDmaWrite(dest, static_cast<uint32_t>(size));
 }

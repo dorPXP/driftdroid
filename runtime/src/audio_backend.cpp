@@ -37,6 +37,10 @@ void AudioBackend::SetMuted(bool muted) {
     ApplyGainLocked();
 }
 
+#if defined(__SWITCH__)
+extern "C" void SwitchRaiseAudioOutputThread();  // runtime/src/main.cpp
+#endif
+
 bool AudioBackend::EnsureInitializedLocked(uint32_t sampleRate, uint32_t channels) {
     if (m_initialized && m_sampleRate == sampleRate && m_channels == channels) {
         return true;
@@ -73,6 +77,25 @@ bool AudioBackend::EnsureInitializedLocked(uint32_t sampleRate, uint32_t channel
         SDL_DestroyAudioStream(stream);
         return false;
     }
+
+#if defined(__SWITCH__)
+    // SDL's device thread keeps audout's buffer queue topped up (see the Switch driver in
+    // aurora-main/cmake/patches/sdl3-nintendo-switch-platform.patch). As a plain std::thread it runs
+    // at libnx's time-sliced 0x3B, below the GX worker and AX mix worker, and when it misses its
+    // slot the queue runs dry and the audio stutters. SDL's thread-priority hint is a no-op on
+    // Switch, so raise it from the postmix callback, which SDL invokes on that very thread. The
+    // callback leaves the samples untouched and the thread's work per buffer is tiny.
+    SDL_SetAudioPostmixCallback(
+        SDL_GetAudioStreamDevice(stream),
+        [](void*, const SDL_AudioSpec*, float*, int) {
+            static thread_local bool raised = false;
+            if (!raised) {
+                raised = true;
+                SwitchRaiseAudioOutputThread();
+            }
+        },
+        nullptr);
+#endif
 
     if (!SDL_SetAudioStreamGain(stream, EffectiveGainLocked())) {
         RT_LOG(RT_TAG_AUDIO) << "SDL_SetAudioStreamGain failed: " << SDL_GetError() << std::endl;

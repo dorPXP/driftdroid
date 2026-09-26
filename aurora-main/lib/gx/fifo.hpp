@@ -3,6 +3,7 @@
 #include "../internal.hpp"
 
 #include <cstring>
+#include <functional>
 
 namespace aurora::gx::fifo {
 
@@ -98,6 +99,24 @@ void sync();
 // style). The worker may lag within a frame; every drain()/sync() point catches it up.
 void set_threaded(bool enabled);
 bool threaded();
+
+// Queue `fn` to run on the GX worker at this point in the command stream, instead of syncing
+// with the worker and running it on the game thread. For GX calls that change decoder-owned
+// state (g_gxState) or record renderer work outside process(): in stream order they see exactly
+// the state the game set up before them. Only valid while threaded() and not recording a display
+// list; callers keep their synchronous path otherwise.
+void run_in_stream(std::function<void()> fn);
+// Worker side: runs the oldest queued closure (the GX_LOAD_AURORA_RUN_DEFERRED handler).
+void run_next_deferred();
+
+// Cumulative count and duration of sync()/drain() calls that actually waited for the GX worker,
+// and the same per calling site (a return address). Returns how many sites were written.
+struct SyncSiteStat {
+  uintptr_t site;
+  uint64_t waits;
+  uint64_t nanos;
+};
+size_t sync_stats(uint64_t* totalWaits, uint64_t* totalNanos, SyncSiteStat* sites, size_t maxSites);
 
 // Internal buffer inspection
 const uint8_t* get_buffer_data();

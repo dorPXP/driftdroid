@@ -9,6 +9,7 @@
 #include <switch.h>
 
 #include <cstdint>
+#include <iterator>
 
 namespace aurora::input::switch_pad {
 namespace {
@@ -55,27 +56,45 @@ Sint16 clamp_axis(s32 value) {
   return static_cast<Sint16>(value);
 }
 
+// SDL's virtual joystick keeps the last value it was given, and every SDL_SetJoystickVirtual*
+// call looks the joystick up under SDL's object rwlock. Sending all 21 inputs on every update was
+// ~0.9% of a race frame in lock traffic, so only send the ones that changed.
+constexpr size_t kSentAxisCount = 6;
+bool g_sentButtons[std::size(kButtons)]{};
+Sint16 g_sentAxes[kSentAxisCount]{};
+bool g_sentAny = false;
+
+void set_axis(size_t slot, SDL_GamepadAxis axis, Sint16 value) {
+  if (!g_sentAny || g_sentAxes[slot] != value) {
+    g_sentAxes[slot] = value;
+    SDL_SetJoystickVirtualAxis(g_joystick, axis, value);
+  }
+}
+
 void SDLCALL update(void*) {
   if (g_joystick == nullptr) {
     return;
   }
   padUpdate(&g_pad);
   const u64 held = padGetButtons(&g_pad);
-  for (const auto& button : kButtons) {
-    SDL_SetJoystickVirtualButton(g_joystick, button.sdl, (held & button.hid) != 0);
+  for (size_t i = 0; i < std::size(kButtons); ++i) {
+    const bool down = (held & kButtons[i].hid) != 0;
+    if (!g_sentAny || g_sentButtons[i] != down) {
+      g_sentButtons[i] = down;
+      SDL_SetJoystickVirtualButton(g_joystick, kButtons[i].sdl, down);
+    }
   }
   const HidAnalogStickState left = padGetStickPos(&g_pad, 0);
   const HidAnalogStickState right = padGetStickPos(&g_pad, 1);
   // libnx sticks are +Y up; SDL gamepad axes are +Y down.
-  SDL_SetJoystickVirtualAxis(g_joystick, SDL_GAMEPAD_AXIS_LEFTX, clamp_axis(left.x));
-  SDL_SetJoystickVirtualAxis(g_joystick, SDL_GAMEPAD_AXIS_LEFTY, clamp_axis(-left.y));
-  SDL_SetJoystickVirtualAxis(g_joystick, SDL_GAMEPAD_AXIS_RIGHTX, clamp_axis(right.x));
-  SDL_SetJoystickVirtualAxis(g_joystick, SDL_GAMEPAD_AXIS_RIGHTY, clamp_axis(-right.y));
+  set_axis(0, SDL_GAMEPAD_AXIS_LEFTX, clamp_axis(left.x));
+  set_axis(1, SDL_GAMEPAD_AXIS_LEFTY, clamp_axis(-left.y));
+  set_axis(2, SDL_GAMEPAD_AXIS_RIGHTX, clamp_axis(right.x));
+  set_axis(3, SDL_GAMEPAD_AXIS_RIGHTY, clamp_axis(-right.y));
   // ZL/ZR are digital on every Switch controller.
-  SDL_SetJoystickVirtualAxis(g_joystick, SDL_GAMEPAD_AXIS_LEFT_TRIGGER,
-                             (held & HidNpadButton_ZL) != 0 ? SDL_JOYSTICK_AXIS_MAX : 0);
-  SDL_SetJoystickVirtualAxis(g_joystick, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER,
-                             (held & HidNpadButton_ZR) != 0 ? SDL_JOYSTICK_AXIS_MAX : 0);
+  set_axis(4, SDL_GAMEPAD_AXIS_LEFT_TRIGGER, (held & HidNpadButton_ZL) != 0 ? SDL_JOYSTICK_AXIS_MAX : 0);
+  set_axis(5, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER, (held & HidNpadButton_ZR) != 0 ? SDL_JOYSTICK_AXIS_MAX : 0);
+  g_sentAny = true;
 }
 
 } // namespace
@@ -104,6 +123,7 @@ void attach() noexcept {
     return;
   }
   g_joystick = SDL_OpenJoystick(g_joystickId);
+  g_sentAny = false;  // a fresh joystick has none of the cached values yet
 }
 
 void detach() noexcept {

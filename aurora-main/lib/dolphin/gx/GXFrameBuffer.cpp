@@ -304,6 +304,15 @@ GXRenderModeObj GXMpal480IntDf = {
     {8, 8, 10, 12, 10, 8, 8},
 };
 
+// Texture-copy state and GXCopyTex itself live in decoder-owned g_gxState. With the GX worker
+// running, touching it here meant a full sync with the worker for every copy (GXDrawDone +
+// setters, ~1.5 ms of a 12-kart race frame). Queue them into the command stream instead: the
+// worker applies them in order, so a copy still sees every draw and setter issued before it,
+// and every reader of the copy results (texture resolution, copy eviction) is in-stream too.
+static bool copy_state_in_stream() noexcept {
+  return aurora::gx::fifo::threaded() && !aurora::gx::fifo::in_display_list();
+}
+
 void GXAdjustForOverscan(GXRenderModeObj* rmin, GXRenderModeObj* rmout, u16 hor, u16 ver) {
   *rmout = *rmin;
   const auto renderSize = aurora::gfx::get_render_target_size();
@@ -322,6 +331,13 @@ void GXSetDispCopySrc(u16 left, u16 top, u16 wd, u16 ht) {
 }
 
 void GXSetTexCopySrc(u16 left, u16 top, u16 wd, u16 ht) {
+  if (copy_state_in_stream()) {
+    aurora::gx::fifo::run_in_stream([=] {
+      g_gxState.texCopySrc = {left, top, wd, ht};
+      g_gxState.texCopySrcRenderSpace = false;
+    });
+    return;
+  }
   // Direct GX state access: catch up the GX worker first.
   aurora::gx::fifo::sync();
   g_gxState.texCopySrc = {left, top, wd, ht};
@@ -337,6 +353,15 @@ void GXSetDispCopyDst(u16 wd, u16 ht) {
 }
 
 void GXSetTexCopyDst(u16 wd, u16 ht, GXTexFmt fmt, GXBool mipmap) {
+  if (copy_state_in_stream()) {
+    aurora::gx::fifo::run_in_stream([=] {
+      g_gxState.texCopyFmt = fmt;
+      g_gxState.texCopyDstWidth = wd;
+      g_gxState.texCopyDstHeight = ht;
+      g_gxState.texCopyHalfScale = mipmap != GX_FALSE;
+    });
+    return;
+  }
   // Direct GX state access: catch up the GX worker first.
   aurora::gx::fifo::sync();
   g_gxState.texCopyFmt = fmt;
@@ -352,6 +377,11 @@ void GXSetDispCopyFrame2Field(u32 mode) {
 }
 
 void GXSetCopyClamp(GXFBClamp clamp) {
+  if (copy_state_in_stream()) {
+    aurora::gx::fifo::run_in_stream(
+        [=] { g_gxState.copyClamp = static_cast<GXFBClamp>(static_cast<u32>(clamp) & 3); });
+    return;
+  }
   // Direct GX state access: catch up the GX worker first.
   aurora::gx::fifo::sync();
   g_gxState.copyClamp = static_cast<GXFBClamp>(static_cast<u32>(clamp) & 3);
@@ -391,6 +421,30 @@ void GXSetCopyClear(GXColor color, u32 depth) {
 }
 
 void GXSetCopyFilter(GXBool aa, u8 sample_pattern[12][2], GXBool vf, u8 vfilter[7]) {
+  // With the GX worker running, the BP 0x01-0x04/0x53/0x54 writes below are decoded by the command
+  // processor into the same g_gxState fields (and the aa/vf flags re-derived), overwriting any
+  // direct write. When the arguments fully determine the values, build them locally and skip the
+  // worker sync (~0.2 ms/frame in races); only a call that keeps the previous pattern needs it.
+  if (aurora::gx::fifo::threaded() && (sample_pattern != nullptr || !aa) && (vfilter != nullptr || !vf)) {
+    std::array<std::array<u8, 2>, 12> pattern{};
+    std::array<u8, 7> vfilt{0, 0, 21, 22, 21, 0, 0};
+    for (size_t i = 0; i < pattern.size(); ++i) {
+      pattern[i] = aa ? std::array<u8, 2>{sample_pattern[i][0], sample_pattern[i][1]} : std::array<u8, 2>{6, 6};
+    }
+    if (vf) {
+      for (size_t i = 0; i < vfilt.size(); ++i) {
+        vfilt[i] = vfilter[i];
+      }
+    }
+    GX_WRITE_RAS_REG(pack_copy_filter_samples(0x01, pattern, 0));
+    GX_WRITE_RAS_REG(pack_copy_filter_samples(0x02, pattern, 6));
+    GX_WRITE_RAS_REG(pack_copy_filter_samples(0x03, pattern, 12));
+    GX_WRITE_RAS_REG(pack_copy_filter_samples(0x04, pattern, 18));
+    GX_WRITE_RAS_REG(pack_copy_filter0(vfilt));
+    GX_WRITE_RAS_REG(pack_copy_filter1(vfilt));
+    __gx->bpSent = 0;
+    return;
+  }
   // Direct GX state access: catch up the GX worker first.
   aurora::gx::fifo::sync();
   g_gxState.copyFilterAa = aa;
@@ -467,11 +521,23 @@ void GXCopyDisp(void* dest, GXBool clear) {
   aurora::gx::set_display_copy_present_source();
 }
 
+static void copy_tex_now(void* dest, GXBool clear);
+
 void GXCopyTex(void* dest, GXBool clear) {
+  if (copy_state_in_stream()) {
+    aurora::gx::fifo::run_in_stream([=] { copy_tex_now(dest, clear); });
+    return;
+  }
   // Texture copies must see all earlier draws and state changes.
   if (aurora::gx::fifo::get_buffer_size() != 0 || aurora::gx::fifo::threaded()) {
     aurora::gx::fifo::drain();
   }
+  copy_tex_now(dest, clear);
+}
+
+// Runs where the copy's position in the command stream is current: inline after a drain, or on
+// the GX worker via run_in_stream. Must not drain (the worker cannot wait for itself).
+static void copy_tex_now(void* dest, GXBool clear) {
   const auto sourceRect = map_texture_copy_source(g_gxState.texCopySrc, g_gxState.texCopySrcRenderSpace);
   const auto rect = sourceRect.clearRect;
   // Keep guest dimensions for cache identity while preserving scaled GPU detail.

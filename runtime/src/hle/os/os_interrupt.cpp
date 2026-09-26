@@ -50,16 +50,29 @@ inline void UpdateCurrentContextInterruptFlag(bool enabled)
 } // namespace
 
 // Minimal, host-side replacements for early OS interrupt/exception helpers.
+// Only the guest thread writes g_interrupts_enabled (other threads just read it, with acquire), so
+// a relaxed load plus a release store gives readers the same guarantees as the old seq_cst
+// exchange, which on the Switch's ARMv8.0 cores is an exclusive-monitor retry loop. nw4r::snd calls
+// these pairs thousands of times a second.
+static inline bool SwapInterruptsEnabled(bool enabled) noexcept
+{
+    const bool previous = g_interrupts_enabled.load(std::memory_order_relaxed);
+    if (previous != enabled) {
+        g_interrupts_enabled.store(enabled, std::memory_order_release);
+    }
+    return previous;
+}
+
 extern "C" int32_t OS__DisableInterrupts_801a65ac()
 {
-    const bool previous = g_interrupts_enabled.exchange(false);
+    const bool previous = SwapInterruptsEnabled(false);
     UpdateCurrentContextInterruptFlag(false);
     return previous ? 1 : 0;
 }
 
 extern "C" int32_t OS__RestoreInterrupts_801a65d4(int32_t level)
 {
-    const bool prev = g_interrupts_enabled.exchange(level != 0);
+    const bool prev = SwapInterruptsEnabled(level != 0);
     UpdateCurrentContextInterruptFlag(level != 0);
     return prev ? 1 : 0;
 }

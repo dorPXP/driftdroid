@@ -39,6 +39,19 @@ void GXInsertDebugMarker(const char* label) {
 }
 
 void AuroraSetThreadedGx(bool enabled) { aurora::gx::fifo::set_threaded(enabled); }
+bool AuroraIsThreadedGx() { return aurora::gx::fifo::threaded(); }
+u32 AuroraGetGxSyncStats(u64* totalWaits, u64* totalNanos, AuroraGxSyncSite* sites, u32 maxSites) {
+  aurora::gx::fifo::SyncSiteStat raw[64];
+  uint64_t waits = 0;
+  uint64_t nanos = 0;
+  const size_t count = aurora::gx::fifo::sync_stats(&waits, &nanos, raw, std::min<size_t>(maxSites, 64));
+  *totalWaits = waits;
+  *totalNanos = nanos;
+  for (size_t i = 0; i < count; ++i) {
+    sites[i] = {static_cast<u64>(raw[i].site), raw[i].waits, raw[i].nanos};
+  }
+  return static_cast<u32>(count);
+}
 
 void AuroraSetConstantMatrixIndexing(bool enabled) {
   aurora::gx::g_constantMatrixIndexing.store(enabled, std::memory_order_relaxed);
@@ -170,6 +183,14 @@ void GXRestoreViewportScissorRender() {
 }
 
 void GXSetTexCopySrcRender(u16 left, u16 top, u16 wd, u16 ht) {
+  if (aurora::gx::fifo::threaded() && !aurora::gx::fifo::in_display_list()) {
+    // In stream order with the copy it configures (see GXFrameBuffer.cpp copy_state_in_stream).
+    aurora::gx::fifo::run_in_stream([=] {
+      aurora::gx::g_gxState.texCopySrc = {left, top, wd, ht};
+      aurora::gx::g_gxState.texCopySrcRenderSpace = true;
+    });
+    return;
+  }
   // Direct GX state access: catch up the GX worker first.
   aurora::gx::fifo::sync();
   aurora::gx::g_gxState.texCopySrc = {left, top, wd, ht};

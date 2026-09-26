@@ -64,6 +64,12 @@ extern "C" {
 #define GX_LOAD_AURORA_INVALIDATE_TEX_ALL 0x0035
 
 /**
+ * Internal: run the next closure queued by aurora::gx::fifo::run_in_stream on the GX worker, in
+ * stream order. No payload.
+ */
+#define GX_LOAD_AURORA_RUN_DEFERRED 0x0036
+
+/**
  * Sets the source vertex description of one attribute (GXSetSourceVtxDesc).
  * Must be followed by a u8 attribute and a u8 GXAttrType.
  */
@@ -107,6 +113,16 @@ void AuroraSetViewportPolicy(AuroraViewportPolicy policy);
 void AuroraSetConstantMatrixIndexing(bool enabled);
 // Experimental: decode GX commands on a dedicated worker thread. Call before rendering starts.
 void AuroraSetThreadedGx(bool enabled);
+// True while GX commands are decoded on the worker thread (AuroraSetThreadedGx took effect).
+bool AuroraIsThreadedGx(void);
+// Diagnostics for threaded GX: cumulative waits of the game thread on the GX worker, in total and
+// per calling site (a code address). Returns how many sites were written to `sites`.
+typedef struct {
+  u64 site;
+  u64 waits;
+  u64 nanos;
+} AuroraGxSyncSite;
+u32 AuroraGetGxSyncStats(u64* totalWaits, u64* totalNanos, AuroraGxSyncSite* sites, u32 maxSites);
 
 /**
  * Retrieves the current content framebuffer size.

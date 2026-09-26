@@ -69,7 +69,10 @@ public:
     {
         g_currentCpuContext = ctx;
 
-        savedMxcsr_ = MkwReadHostFpControl();
+        // Only the outermost scope restores the raw register (a nested one re-applies the
+        // previous context's mode instead), so only it needs the read.
+        if (previous_ == nullptr)
+            savedMxcsr_ = MkwReadHostFpControl();
         if (ctx != nullptr)
             MkwApplyHostNiMode(ctx->fpscr);
     }

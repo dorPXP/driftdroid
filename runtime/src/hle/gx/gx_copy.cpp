@@ -155,8 +155,12 @@ PPC_NATIVE_OVERRIDE_VOID(8016fc38, GX__CopyDisp_8016fc38, (uint32_t da, uint32_t
 
 extern "C" void GX__CopyTex_8016fd74(uint32_t da, uint32_t c) {
     EnsureAuroraFrameActive();
-    // Match GX FIFO ordering: texture copies observe all prior draws.
-    GXDrawDone();
+    // Match GX FIFO ordering: texture copies observe all prior draws. With threaded GX the copy
+    // and its setters are queued into the command stream (aurora GXFrameBuffer.cpp), which gives
+    // the same ordering without stalling this thread until the worker is idle.
+    if (!AuroraIsThreadedGx()) {
+        GXDrawDone();
+    }
     const uint16_t rawSrcLeft = g_texCopyState.srcLeft;
     const uint16_t rawSrcTop = g_texCopyState.srcTop;
     const uint16_t rawSrcWidth = g_texCopyState.srcWidth;

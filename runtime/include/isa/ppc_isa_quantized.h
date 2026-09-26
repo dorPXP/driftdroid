@@ -99,17 +99,42 @@ inline __m128i PpcStorePairPsqFloatBitsLanesInline(__m128i lanes)
 // host -> packed FPR double, guard already proven by the caller.
 inline double PpcLoadPairPsqFloatFromHostInline(const uint8_t* host)
 {
+#if defined(__aarch64__)
+    // [ps0 BE][ps1 BE] in memory, byte-reversed as one 64-bit unit, is exactly the packed layout
+    // (high word ps0, low word ps1): one REV64 instead of sse2neon's table load + TBL. Then the
+    // same lane-local sNaN quieting as the SSE path.
+    const uint32x2_t lanes = vreinterpret_u32_u8(vrev64_u8(vld1_u8(host)));
+    const uint32x2_t isNan =
+        vcgt_u32(vand_u32(lanes, vdup_n_u32(0x7FFFFFFFu)), vdup_n_u32(0x7F800000u));
+    return vget_lane_f64(vreinterpret_f64_u32(
+        vorr_u32(lanes, vand_u32(isNan, vdup_n_u32(0x00400000u)))), 0);
+#else
     const __m128i raw = _mm_loadl_epi64(reinterpret_cast<const __m128i*>(host));
     return PpcM128ToPsInline(_mm_castsi128_ps(
         PpcLoadPairPsqFloatBitsLanesInline(PpcPsqSwapPairBytesInline(raw))));
+#endif
 }
 
 // packed FPR double -> host, guard already proven by the caller.
 inline void PpcStorePairPsqFloatToHostInline(uint8_t* host, double value)
 {
+#if defined(__aarch64__)
+    // Native 2-lane form of PpcStorePairPsqFloatBitsLanesInline (denormal flush to signed zero,
+    // sNaN quieting), then one REV64 back to [ps0 BE][ps1 BE].
+    const uint32x2_t lanes = vreinterpret_u32_f64(vdup_n_f64(value));
+    const uint32x2_t expMask = vdup_n_u32(0x7F800000u);
+    const uint32x2_t magnitude = vand_u32(lanes, vdup_n_u32(0x7FFFFFFFu));
+    const uint32x2_t isNan = vcgt_u32(magnitude, expMask);
+    const uint32x2_t isSubnormal = vceq_u32(vand_u32(lanes, expMask), vdup_n_u32(0));
+    const uint32x2_t quieted = vorr_u32(lanes, vand_u32(isNan, vdup_n_u32(0x00400000u)));
+    const uint32x2_t result =
+        vbsl_u32(isSubnormal, vand_u32(lanes, vdup_n_u32(0x80000000u)), quieted);
+    vst1_u8(host, vrev64_u8(vreinterpret_u8_u32(result)));
+#else
     const __m128i lanes = PpcStorePairPsqFloatBitsLanesInline(
         _mm_castps_si128(PpcPsToM128Inline(value)));
     _mm_storel_epi64(reinterpret_cast<__m128i*>(host), PpcPsqSwapPairBytesInline(lanes));
+#endif
 }
 
 template <typename SignedType>

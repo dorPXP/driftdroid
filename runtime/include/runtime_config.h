@@ -36,6 +36,9 @@ struct RuntimeUserConfig {
     std::optional<uint32_t> windowHeight;
     std::optional<float> resolutionMultiplier;
     std::optional<std::string> graphicsApi;
+    // Android custom Vulkan driver, written by the launcher (android_gpu_driver.cpp).
+    std::optional<std::string> gpuDriverDir;
+    std::optional<std::string> gpuDriverLib;
     std::optional<std::string> displayMode;
     std::optional<uint32_t> frameInterpolationFps;
     std::optional<bool> skipUnreadyPipelines;
@@ -442,6 +445,8 @@ inline RuntimeUserConfig ParseConfigDocument(const toml::value& document) {
                       << "\", using the automatic backend" << std::endl;
         }
     }
+    config.gpuDriverDir = FindConfigValue<std::string>(document, "video", "gpu_driver_dir");
+    config.gpuDriverLib = FindConfigValue<std::string>(document, "video", "gpu_driver_lib");
     if (auto value = FindConfigValue<std::string>(document, "video", "display_mode");
         value && IsSupportedDisplayMode(*value)) {
         config.displayMode = *value;
@@ -892,6 +897,14 @@ inline uint32_t DisabledPostProcessingPaths(uint32_t fallback = 0) {
 
 inline std::string GraphicsApi(std::string fallback = "auto") {
     return Get().graphicsApi.value_or(std::move(fallback));
+}
+
+inline std::string GpuDriverDir(std::string fallback = "") {
+    return Get().gpuDriverDir.value_or(std::move(fallback));
+}
+
+inline std::string GpuDriverLib(std::string fallback = "") {
+    return Get().gpuDriverLib.value_or(std::move(fallback));
 }
 
 inline std::string DisplayMode(std::string fallback = "borderless") {

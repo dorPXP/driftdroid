@@ -28,6 +28,11 @@
 #include <string>
 #include <thread>
 
+
+#ifdef __SWITCH__
+extern "C" void SwitchConfigureAudioMixThread() __attribute__((weak));
+#endif
+
 namespace AxDspHle {
 namespace {
 
@@ -1370,6 +1375,13 @@ private:
 
     void MixWorkerMain() {
         t_onMixWorker = true;
+#ifdef __SWITCH__
+        // Supplied by main.cpp: the guest joins this worker every audio block, so it must not
+        // queue behind the frame worker at the time-sliced priority.
+        if (SwitchConfigureAudioMixThread != nullptr) {
+            SwitchConfigureAudioMixThread();
+        }
+#endif
         for (;;) {
             {
                 std::unique_lock<std::mutex> lock(m_mixMutex);

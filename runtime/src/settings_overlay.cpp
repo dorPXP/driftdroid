@@ -768,10 +768,12 @@ void DrawGraphicsSettings() {
         AuroraSetThreadedGx(g_threadedGx);
         RuntimeConfigFile::SetThreadedGx(g_threadedGx);
     }
+#if !defined(__SWITCH__)
     if (ImGui::Checkbox("Fix missing characters (some Adreno GPUs)", &g_constantMatrixIndexing)) {
         AuroraSetConstantMatrixIndexing(g_constantMatrixIndexing);
         RuntimeConfigFile::SetConstantMatrixIndexing(g_constantMatrixIndexing);
     }
+#endif
     if (ImGui::Checkbox("Skip draws while shaders compile", &g_skipUnreadyPipelines)) {
         aurora_set_skip_unready_pipelines(g_skipUnreadyPipelines);
         RuntimeConfigFile::SetSkipUnreadyPipelines(g_skipUnreadyPipelines);
@@ -1299,6 +1301,13 @@ void InitializeRuntimeSettings() noexcept {
     g_skipUnreadyPipelines = RuntimeConfigFile::SkipUnreadyPipelines(true);
     g_disableCopyFilter = RuntimeConfigFile::DisableCopyFilter(true);
     g_constantMatrixIndexing = RuntimeConfigFile::ConstantMatrixIndexing(false);
+#if defined(__SWITCH__)
+    // An Adreno driver workaround with no purpose on the Switch's GPU, and a harmful one: with it
+    // on, item boxes rendered as opaque black/grey cubes instead of translucent rainbow ones
+    // (2026-09-26, confirmed by toggling it on hardware). A config written by an older build or
+    // the settings checkbox must not bring it back.
+    g_constantMatrixIndexing = false;
+#endif
     if (aurora_get_backend() == BACKEND_OPENGLES && !g_constantMatrixIndexing) {
         // Not optional on this backend. Dynamically indexed matrices make Qualcomm's GLSL
         // compiler segfault outright rather than merely miscompile: confirmed by a debuggerd

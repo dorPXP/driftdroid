@@ -45,6 +45,7 @@
 // further down.
 #include <cerrno>
 #include <signal.h>
+#include <sys/stat.h>
 #include <unistd.h>
 #include <switch.h>
 #include <unwind.h>
@@ -57,6 +58,7 @@
 #endif
 
 #include "abi_bridge.h"
+#include "android_gpu_driver.h"
 #include "guest_flat_memory.h"
 #include "gx_guest_write.h"
 #include "memory.h"
@@ -177,6 +179,70 @@ void SwitchSpreadHelperThread(u32 handle) noexcept {
     if (ideal >= 0) {
         svcSetThreadCoreMask(handle, ideal, helperMask);
     }
+}
+
+// Called by aurora's GX worker when it starts (see aurora-main/lib/gx/fifo.cpp). The worker is on
+// the game thread's critical path - every sync point waits for it - but as an ordinary std::thread
+// it ran at libnx's time-sliced priority 0x3B and could share a core with the frame worker or the
+// audio mixer. Pin it to the first non-guest core at the guest thread's own priority; the other
+// helpers keep both non-guest cores in their masks, so they can move off it when it is busy.
+// Recorded for the profiler's window files, which are the one log reliably read back from the card.
+std::atomic<int> g_switchGxWorkerCore{-1};
+std::atomic<int> g_switchAudioMixCore{-1};
+
+extern "C" void SwitchConfigureGxWorkerThread() {
+    const int guestCore = g_switchGuestCore.load(std::memory_order_relaxed);
+    u64 processMask = 0;
+    if (guestCore < 0 || R_FAILED(svcGetInfo(&processMask, InfoType_CoreMask, CUR_PROCESS_HANDLE, 0))) {
+        return;
+    }
+    const u64 helperMask = processMask & ~(1ull << static_cast<unsigned>(guestCore));
+    if (helperMask == 0) {
+        return;
+    }
+    const int core = __builtin_ctzll(helperMask);
+    const Result maskRc = svcSetThreadCoreMask(CUR_THREAD_HANDLE, core, 1ull << core);
+    const Result prioRc = svcSetThreadPriority(CUR_THREAD_HANDLE, 0x2C);
+    if (R_SUCCEEDED(maskRc) && R_SUCCEEDED(prioRc)) {
+        g_switchGxWorkerCore.store(core, std::memory_order_relaxed);
+    }
+    RT_LOGF(RT_TAG_RUNTIME, "GX worker pinned to core %d (rc 0x%x), priority 0x2C (rc 0x%x)\n", core,
+            static_cast<unsigned>(maskRc), static_cast<unsigned>(prioRc));
+}
+
+// Called by the AX mix worker when it starts (runtime/src/hle/audio/ax_mix.cpp). The guest thread
+// joins it every audio block (~2.5% of a race frame was that join), so it prefers the non-guest
+// core the GX worker is NOT pinned to. Its mask keeps every non-guest core so it can still run
+// elsewhere when that core is busy.
+extern "C" void SwitchConfigureAudioMixThread() {
+    const int guestCore = g_switchGuestCore.load(std::memory_order_relaxed);
+    u64 processMask = 0;
+    if (guestCore < 0 || R_FAILED(svcGetInfo(&processMask, InfoType_CoreMask, CUR_PROCESS_HANDLE, 0))) {
+        return;
+    }
+    const u64 helperMask = processMask & ~(1ull << static_cast<unsigned>(guestCore));
+    if (helperMask == 0) {
+        return;
+    }
+    const int core = 63 - __builtin_clzll(helperMask);  // highest helper core; GX takes the lowest
+    // 0x2D, below the GX worker. Safe only because SDL's audio output thread is raised above both
+    // (SwitchRaiseAudioOutputThread): without that, raising this worker starved the output thread
+    // and audout's buffer queue ran dry (audible stutter).
+    const Result maskRc = svcSetThreadCoreMask(CUR_THREAD_HANDLE, core, helperMask);
+    const Result prioRc = svcSetThreadPriority(CUR_THREAD_HANDLE, 0x2D);
+    if (R_SUCCEEDED(maskRc) && R_SUCCEEDED(prioRc)) {
+        g_switchAudioMixCore.store(core, std::memory_order_relaxed);
+    }
+    RT_LOGF(RT_TAG_RUNTIME, "AX mix worker prefers core %d (rc 0x%x), priority 0x2D (rc 0x%x)\n", core,
+            static_cast<unsigned>(maskRc), static_cast<unsigned>(prioRc));
+}
+
+// Called once on SDL's audio device thread (audio_backend.cpp postmix callback). Highest of the
+// helper priorities: it only copies a mixed buffer to audout, but it must never miss its turn.
+std::atomic<int> g_switchAudioOutputPriorityRc{-1};
+extern "C" void SwitchRaiseAudioOutputThread() {
+    const Result rc = svcSetThreadPriority(CUR_THREAD_HANDLE, 0x2B);
+    g_switchAudioOutputPriorityRc.store(static_cast<int>(rc), std::memory_order_relaxed);
 }
 
 extern "C" int __wrap___syscall_thread_create(void** thread, void* entry, void* arg, void* stackAddr,
@@ -379,6 +445,71 @@ void HostProfileRecord(uint64_t offset) {
     ++g_hostProfileDropped;  // table full: this PC is not counted at all, so report it
 }
 
+// (PC bucket, call chain) for the current window only, so a leaf like memmove or a libnx wait SVC
+// can be attributed to whoever is really waiting. frames[0] is LR; the rest come from walking the
+// saved frame-pointer chain while the thread is paused. Cleared after each window is written.
+constexpr size_t kHostStackSlots = 32768;
+constexpr int kHostStackFrames = 6;
+struct HostStackSlot {
+    uint64_t pc;
+    uint64_t frames[kHostStackFrames];
+    uint64_t hits;
+};
+HostStackSlot g_hostStackSlots[kHostStackSlots]{};
+
+void HostStackRecord(uint64_t pc, const uint64_t (&frames)[kHostStackFrames]) {
+    uint64_t hash = pc * 1099511628211ull;
+    for (uint64_t frame : frames) {
+        hash = (hash ^ frame) * 1099511628211ull;
+    }
+    size_t slot = static_cast<size_t>(hash >> 20) & (kHostStackSlots - 1);
+    for (size_t probe = 0; probe < 64; ++probe) {
+        HostStackSlot& entry = g_hostStackSlots[slot];
+        if (entry.hits == 0) {
+            entry.pc = pc;
+            std::memcpy(entry.frames, frames, sizeof(frames));
+            entry.hits = 1;
+            return;
+        }
+        if (entry.pc == pc && std::memcmp(entry.frames, frames, sizeof(frames)) == 0) {
+            ++entry.hits;
+            return;
+        }
+        slot = (slot + 1) & (kHostStackSlots - 1);
+    }
+}
+
+// Walks the paused thread's frame-pointer chain. Every read is bounds-checked against the one
+// mapping that holds the stack pointer (the thread stack, or the heap block of a guest fiber
+// stack), and frames must move strictly upward, so a garbage FP ends the walk instead of faulting.
+void WalkPausedStack(const ThreadContext& ctx, u64 base, uint64_t (&frames)[kHostStackFrames]) {
+    auto rel = [base](u64 addr) -> uint64_t { return addr >= base ? addr - base : 0; };
+    frames[0] = rel(ctx.lr);
+    for (int i = 1; i < kHostStackFrames; ++i) {
+        frames[i] = 0;
+    }
+    MemoryInfo info{};
+    u32 pageInfo = 0;
+    if (R_FAILED(svcQueryMemory(&info, &pageInfo, ctx.sp)) || (info.perm & Perm_R) == 0) {
+        return;
+    }
+    const u64 lo = info.addr;
+    const u64 hi = info.addr + info.size;
+    u64 fp = ctx.fp;
+    for (int i = 1; i < kHostStackFrames; ++i) {
+        if (fp < lo || fp + 16 > hi || (fp & 7) != 0) {
+            return;
+        }
+        const u64* record = reinterpret_cast<const u64*>(fp);
+        const u64 nextFp = record[0];
+        frames[i] = rel(record[1]);
+        if (nextFp <= fp) {
+            return;
+        }
+        fp = nextFp;
+    }
+}
+
 void HostProfileWriteReport() {
     std::vector<HostProfileSlot> ranked;
     ranked.reserve(4096);
@@ -410,6 +541,143 @@ void HostProfileWriteReport() {
                      static_cast<unsigned long long>(ranked[i].offset));
     }
     std::fclose(out);
+}
+
+// The reports above are cumulative since launch, so a session that spent ten minutes in movie
+// menus drowns out the race that followed. Each ~15 s window is also written on its own - the
+// hits since the previous window - next to the frames presented in it, so one race yields a clean
+// race-only profile with its frame rate attached. Windows cycle through kHostProfileWindowFiles
+// files; index.txt lists every window in order.
+// Defined in hle/gx/gx_dl.cpp; guest-thread-only counters, read here without a lock because a torn
+// read only skews one diagnostic window.
+struct DlScanCacheCounters {
+    uint64_t calls = 0;
+    uint64_t hits = 0;
+    uint64_t digests = 0;
+    uint64_t scans = 0;
+    uint64_t clears = 0;
+};
+extern DlScanCacheCounters g_dlScanCacheCounters;
+
+constexpr unsigned kHostProfileWindowFiles = 80;
+uint64_t g_hostProfilePrevHits[kHostProfileSlots]{};
+uint64_t g_hostProfilePrevSamples = 0;
+uint64_t g_hostProfilePrevPresents = 0;
+unsigned g_hostProfileWindow = 0;
+
+void HostProfileWriteWindow(double seconds) {
+    AuroraPresentTiming timing{};
+    aurora_get_present_timing(&timing);
+    const uint64_t presents = timing.totalPresentCount - g_hostProfilePrevPresents;
+    g_hostProfilePrevPresents = timing.totalPresentCount;
+    const uint64_t samples = g_hostProfileSamples - g_hostProfilePrevSamples;
+    g_hostProfilePrevSamples = g_hostProfileSamples;
+
+    std::vector<HostProfileSlot> ranked;
+    ranked.reserve(4096);
+    for (size_t i = 0; i < kHostProfileSlots; ++i) {
+        const HostProfileSlot& entry = g_hostProfileSlots[i];
+        const uint64_t delta = entry.hits - g_hostProfilePrevHits[i];
+        g_hostProfilePrevHits[i] = entry.hits;
+        if (delta != 0) {
+            ranked.push_back({entry.offset, delta});
+        }
+    }
+    std::sort(ranked.begin(), ranked.end(),
+              [](const HostProfileSlot& a, const HostProfileSlot& b) { return a.hits > b.hits; });
+
+    const unsigned window = g_hostProfileWindow++;
+    const double fps = seconds > 0.0 ? static_cast<double>(presents) / seconds : 0.0;
+    mkdir("sdmc:/switch/WiiCompiled/profile_windows", 0777);
+    char path[96];
+    std::snprintf(path, sizeof(path), "sdmc:/switch/WiiCompiled/profile_windows/w%02u.txt",
+                  window % kHostProfileWindowFiles);
+    if (FILE* out = std::fopen(path, "w")) {
+        std::fprintf(out,
+                     "host_samples=%llu window=%u seconds=%.1f presents=%llu fps=%.2f module_base=0x%llx\n",
+                     static_cast<unsigned long long>(samples), window, seconds,
+                     static_cast<unsigned long long>(presents), fps,
+                     static_cast<unsigned long long>(SwitchModuleBase()));
+        // Game-thread waits on the threaded-GX worker in this window, per calling site. Lines start
+        // with '#' so tools reading the PC histogram below can skip them.
+        {
+            static std::unordered_map<u64, std::pair<u64, u64>> previousSites;
+            static u64 previousWaits = 0;
+            static u64 previousNanos = 0;
+            AuroraGxSyncSite sites[64];
+            u64 waits = 0;
+            u64 nanos = 0;
+            const u32 count = AuroraGetGxSyncStats(&waits, &nanos, sites, 64);
+            std::fprintf(out, "# threads guest_core=%d gx_worker_core=%d audio_mix_core=%d audio_out_prio_rc=%d\n",
+                         g_switchGuestCore.load(std::memory_order_relaxed),
+                         g_switchGxWorkerCore.load(std::memory_order_relaxed),
+                         g_switchAudioMixCore.load(std::memory_order_relaxed),
+                         g_switchAudioOutputPriorityRc.load(std::memory_order_relaxed));
+            std::fprintf(out, "# gx_sync waits=%llu ms=%.2f\n",
+                         static_cast<unsigned long long>(waits - previousWaits),
+                         static_cast<double>(nanos - previousNanos) / 1e6);
+            previousWaits = waits;
+            previousNanos = nanos;
+            const u64 base = SwitchModuleBase();
+            for (u32 i = 0; i < count; ++i) {
+                auto& previous = previousSites[sites[i].site];
+                const u64 siteWaits = sites[i].waits - previous.first;
+                const u64 siteNanos = sites[i].nanos - previous.second;
+                previous = {sites[i].waits, sites[i].nanos};
+                if (siteWaits != 0) {
+                    std::fprintf(out, "# gx_sync_site 0x%llx waits=%llu ms=%.2f\n",
+                                 static_cast<unsigned long long>(sites[i].site - base),
+                                 static_cast<unsigned long long>(siteWaits),
+                                 static_cast<double>(siteNanos) / 1e6);
+                }
+            }
+        }
+        {
+            static DlScanCacheCounters previous{};
+            const DlScanCacheCounters now = g_dlScanCacheCounters;
+            std::fprintf(out, "# dl_scan_cache calls=%llu hits=%llu digests=%llu scans=%llu clears=%llu\n",
+                         static_cast<unsigned long long>(now.calls - previous.calls),
+                         static_cast<unsigned long long>(now.hits - previous.hits),
+                         static_cast<unsigned long long>(now.digests - previous.digests),
+                         static_cast<unsigned long long>(now.scans - previous.scans),
+                         static_cast<unsigned long long>(now.clears - previous.clears));
+            previous = now;
+        }
+        {
+            std::vector<const HostStackSlot*> stacks;
+            stacks.reserve(8192);
+            for (const auto& entry : g_hostStackSlots) {
+                if (entry.hits != 0) {
+                    stacks.push_back(&entry);
+                }
+            }
+            std::sort(stacks.begin(), stacks.end(),
+                      [](const HostStackSlot* a, const HostStackSlot* b) { return a->hits > b->hits; });
+            const size_t shownStacks = std::min<size_t>(stacks.size(), 32768);
+            for (size_t i = 0; i < shownStacks; ++i) {
+                const HostStackSlot& entry = *stacks[i];
+                std::fprintf(out, "#stack %llu 0x%llx", static_cast<unsigned long long>(entry.hits),
+                             static_cast<unsigned long long>(entry.pc));
+                for (uint64_t frame : entry.frames) {
+                    std::fprintf(out, " 0x%llx", static_cast<unsigned long long>(frame));
+                }
+                std::fputc('\n', out);
+            }
+            std::memset(g_hostStackSlots, 0, sizeof(g_hostStackSlots));
+        }
+        const size_t shown = std::min<size_t>(ranked.size(), 60000);
+        for (size_t i = 0; i < shown; ++i) {
+            std::fprintf(out, "%8llu 0x%llx\n", static_cast<unsigned long long>(ranked[i].hits),
+                         static_cast<unsigned long long>(ranked[i].offset));
+        }
+        std::fclose(out);
+    }
+    if (FILE* index = std::fopen("sdmc:/switch/WiiCompiled/profile_windows/index.txt", "a")) {
+        std::fprintf(index, "window=%u file=w%02u.txt seconds=%.1f fps=%.2f samples=%llu\n", window,
+                     window % kHostProfileWindowFiles, seconds, fps,
+                     static_cast<unsigned long long>(samples));
+        std::fclose(index);
+    }
 }
 
 void StartSwitchGuestProfiler() {
@@ -446,6 +714,9 @@ void StartSwitchGuestProfiler() {
         // Let the first frames settle before sampling; nothing here is urgent.
         std::this_thread::sleep_for(std::chrono::seconds(3));
         int sinceReport = 0;
+        auto windowStart = std::chrono::steady_clock::now();
+        // A fresh index per launch, so windows from an older run are never read as this one's.
+        std::remove("sdmc:/switch/WiiCompiled/profile_windows/index.txt");
         for (;;) {
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
             const uint32_t pc = __atomic_load_n(&RecompMod::g_currentTranslatedExecutionAddress, __ATOMIC_RELAXED);
@@ -469,6 +740,11 @@ void StartSwitchGuestProfiler() {
                     svcSetThreadActivity(g_profiledThreadHandle, ThreadActivity_Paused);
                 const Result ctxRc =
                     R_SUCCEEDED(pauseRc) ? svcGetThreadContext3(&ctx, g_profiledThreadHandle) : pauseRc;
+                // The stack is only stable while the thread is paused, so walk it before resuming.
+                uint64_t frames[kHostStackFrames]{};
+                if (R_SUCCEEDED(ctxRc) && SwitchModuleBase() != 0) {
+                    WalkPausedStack(ctx, SwitchModuleBase(), frames);
+                }
                 if (R_SUCCEEDED(pauseRc)) {
                     svcSetThreadActivity(g_profiledThreadHandle, ThreadActivity_Runnable);
                 }
@@ -480,6 +756,7 @@ void StartSwitchGuestProfiler() {
                     const u64 hostPc = ctx.pc.x;
                     if (base != 0 && hostPc >= base) {
                         HostProfileRecord((hostPc - base) & kHostProfileBucketMask);
+                        HostStackRecord((hostPc - base) & kHostProfileBucketMask, frames);
                     } else {
                         ++g_hostProfileOffModule;
                     }
@@ -490,6 +767,9 @@ void StartSwitchGuestProfiler() {
                 ProfileWriteReport();
                 if (g_profiledThreadHandle != INVALID_HANDLE) {
                     HostProfileWriteReport();
+                    const auto now = std::chrono::steady_clock::now();
+                    HostProfileWriteWindow(std::chrono::duration<double>(now - windowStart).count());
+                    windowStart = now;
                 }
             }
         }
@@ -498,15 +778,35 @@ void StartSwitchGuestProfiler() {
 
 #if defined(MKW_PGO_GENERATE)
 extern "C" void __gcov_dump(void);
+extern "C" void __gcov_reset(void);
+
+// The first PGO recording build showed a black screen and never reached RuntimeMain's log
+// redirection. Append-and-close markers survive any hang, so the next run names the stage.
+void SwitchPgoBootTrace(const char* stage) {
+    if (FILE* f = std::fopen("sdmc:/switch/WiiCompiled/pgo_boot_trace.txt", "a")) {
+        std::fprintf(f, "%llu ms %s\n",
+                     static_cast<unsigned long long>(armTicksToNs(armGetSystemTick()) / 1000000ull), stage);
+        std::fclose(f);
+    }
+}
+
+__attribute__((constructor(101))) static void SwitchPgoBootTraceStaticInit() {
+    SwitchPgoBootTrace("static init begins");
+}
 
 // A PGO run ends by closing the console, never by returning from main, so the counters would
-// never be flushed. Dump them on a timer instead and accept the duplicate work.
+// never be flushed. Dump them on a timer instead. libgcov MERGES each dump into the .gcda already
+// on disk, and the in-memory counters are cumulative, so without the reset every dump would add
+// the whole run so far again and the first minutes (boot, menus) would be counted many times.
 void StartSwitchGcovDumpTimer() {
     // Leaked, not detached: pthread_detach is ENOSYS on devkitA64 (see StartSwitchGuestProfiler).
     new std::thread([] {
         for (;;) {
-            std::this_thread::sleep_for(std::chrono::seconds(180));
+            std::this_thread::sleep_for(std::chrono::seconds(60));
+            SwitchPgoBootTrace("gcov dump begins");
             __gcov_dump();
+            __gcov_reset();
+            SwitchPgoBootTrace("gcov dump done");
         }
     });
 }
@@ -1973,6 +2273,7 @@ int RuntimeMain(int argc, char** argv) {
     // the console; redirect the whole tree onto the SD card and strip the build-machine prefix.
     ::setenv("GCOV_PREFIX", "sdmc:/switch/WiiCompiled/Cache/gcov", 1);
     ::setenv("GCOV_PREFIX_STRIP", "0", 1);
+    SwitchPgoBootTrace("logs redirected, starting gcov timer");
     StartSwitchGcovDumpTimer();
 #endif
 #endif
@@ -2086,6 +2387,10 @@ int RuntimeMain(int argc, char** argv) {
             }
         }
         const AuroraBackend requestedBackend = auroraConfig.desiredBackend;
+        if (requestedBackend != BACKEND_OPENGLES) {
+            // Only Dawn's Vulkan backend consults it; must precede the Vulkan instance.
+            LoadAndroidCustomGpuDriver();
+        }
 
         const AuroraInfo auroraInfo = aurora_initialize(0, nullptr, &auroraConfig);
 #if defined(ANDROID)
@@ -2126,6 +2431,14 @@ int RuntimeMain(int argc, char** argv) {
         }
         aurora_set_frame_worker_wait_callback(ServiceGuestTimingDuringAuroraFrameWait);
         GxGuestWrite::InstallAuroraHooks();
+#if defined(__SWITCH__)
+        if (FILE* flag = std::fopen("sdmc:/switch/WiiCompiled/no_write_tracking.flag", "r")) {
+            std::fclose(flag);
+            GxGuestWrite::g_trackingDisabled = true;
+            RT_LOG(RT_TAG_GX) << "write tracking disabled by no_write_tracking.flag: every GX cache "
+                                 "re-digests on every use" << std::endl;
+        }
+#endif
         UpdateMkwDynamicAspectSurface(auroraInfo.windowSize.native_fb_width,
                                       auroraInfo.windowSize.native_fb_height);
         settings_overlay::InitializeRuntimeSettings();
@@ -2202,6 +2515,9 @@ int RuntimeMain(int argc, char** argv) {
 }
 
 int main(int argc, char** argv) {
+#if defined(__SWITCH__) && defined(MKW_PGO_GENERATE)
+    SwitchPgoBootTrace("main entered");
+#endif
     return RuntimeMain(argc, argv);
 }
 extern "C" bool g_dynamicAspectRatioEnabled = false;

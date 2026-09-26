@@ -720,9 +720,19 @@ static uint32_t ApplyFifoPacketsDirect(const uint8_t* data, uint32_t sizeBytes) 
             const uint16_t countWords = ReadBE16(packet + 1);
             const uint32_t packetBytes = 1u + 4u + (static_cast<uint32_t>(countWords) + 1u) * 4u;
             if (avail < packetBytes) break;
-            GXCallDisplayList(packet, packetBytes);
+            // Aurora parses consecutive XF loads in one pass. Keep the batch inside this burst so
+            // CP/BP writes and any later HLE call retain their original order. (KartPad b435655.)
+            uint32_t batchBytes = packetBytes;
+            while (avail - batchBytes >= 5u) {
+                const uint8_t* next = packet + batchBytes;
+                if ((next[0] & GX_OPCODE_MASK_CMD) != GX_LOAD_XF_REG_CMD) break;
+                const uint32_t nextBytes = 5u + (static_cast<uint32_t>(ReadBE16(next + 1)) + 1u) * 4u;
+                if (avail - batchBytes < nextBytes) break;
+                batchBytes += nextBytes;
+            }
+            GXCallDisplayList(packet, batchBytes);
             GXMarkFrameWork();
-            offset += packetBytes;
+            offset += batchBytes;
             continue;
         }
 

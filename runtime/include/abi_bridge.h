@@ -311,6 +311,14 @@ struct KnownTypedNativeCpuCall {
 // working set while staying L1/L2 resident, unlike 4096 which would thrash L2. Must stay a
 // power of two, the index masks with (size - 1).
 inline constexpr size_t kIndirectDispatchCacheEntries = 512;
+// Fibonacci hash: the multiply mixes every address bit into the HIGH bits of the product, so the
+// index must come from the top. Masking the low bits (as this used to) made the memo a plain
+// direct-mapped cache on address bits 2-10, where call targets 2 KiB apart always collide.
+MKW_PPC_FORCE_INLINE constexpr size_t IndirectDispatchCacheIndex(uint32_t address) noexcept {
+    return static_cast<size_t>(((address >> 2) * 2654435761u) >> 23);
+}
+static_assert(kIndirectDispatchCacheEntries == (size_t{1} << (32 - 23)),
+              "IndirectDispatchCacheIndex's shift must match the memo size");
 
 // Namespace-scope `inline thread_local`, not function-local `static thread_local`, to avoid a
 // thread-static init epoch check on every bctrl (same as g_currentCpuContext in ppc_runtime.h).
@@ -363,7 +371,7 @@ public:
         }
 
         auto& cached = g_indirectResolvedDispatchMemo[
-            ((address >> 2) * 2654435761u) & (kIndirectDispatchCacheEntries - 1)];
+            IndirectDispatchCacheIndex(address)];
         if (cached.valid && cached.address == address) {
             return cached.info;
         }
@@ -383,7 +391,7 @@ public:
         }
 
         auto& cached = g_indirectRawDispatchMemo[
-            ((address >> 2) * 2654435761u) & (kIndirectDispatchCacheEntries - 1)];
+            IndirectDispatchCacheIndex(address)];
         if (cached.valid && cached.address == address) {
             return cached.record;
         }

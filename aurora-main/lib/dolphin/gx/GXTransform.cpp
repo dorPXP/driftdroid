@@ -207,10 +207,14 @@ void GXSetZScaleOffset(f32 scale, f32 offset) {
 }
 
 void GXSetScissorBoxOffset(s32 x_off, s32 y_off) {
-  // Direct GX state access: catch up the GX worker first.
-  aurora::gx::fifo::sync();
-  g_gxState.scissorOffsetX = x_off;
-  g_gxState.scissorOffsetY = y_off;
+  // The BP 0x59 write below is decoded by the command processor into both offsets (and re-applies
+  // the logical scissor), overwriting anything set here. With the GX worker running, the direct
+  // write only forced a full sync (~0.3 ms/frame in races) to set a value the worker replaces a
+  // moment later, so leave the state to the stream.
+  if (!aurora::gx::fifo::threaded()) {
+    g_gxState.scissorOffsetX = x_off;
+    g_gxState.scissorOffsetY = y_off;
+  }
 
   const u32 reg = 0x59000000u | (((static_cast<u32>(y_off + 0x156) * 0x200u) & 0x000ffc00u)) |
                   ((static_cast<u32>(x_off + 0x156) >> 1) & 0x000003ffu);

@@ -107,6 +107,12 @@ target_compile_definitions(mkw_runtime_common PRIVATE
 target_link_libraries(mkw_runtime_common PRIVATE
     aurora::gx aurora::pad aurora::si aurora::vi aurora::mtx aurora::thp TracyClient)
 target_link_libraries(mkw_runtime_common PRIVATE mkw::pugixml mkw::toml11 mkw::cryptopp mkw::mbedtls)
+if(TARGET adrenotools)
+    # Custom Vulkan driver loading (android_gpu_driver.cpp). Scoped to this target so the define
+    # does not touch the translated shards' compile lines.
+    target_link_libraries(mkw_runtime_common PRIVATE adrenotools)
+    target_compile_definitions(mkw_runtime_common PRIVATE MKW_HAVE_ADRENOTOOLS)
+endif()
 if(WIN32)
     target_link_libraries(mkw_runtime_common PRIVATE shell32 windowsapp)
 else()
@@ -282,6 +288,12 @@ function(mkw_configure_product target)
         # vulkan: the NDK's libvulkan.so loader stub - verified present for every API level this
         # NDK ships (checked API 24 through 35 in the r27c sysroot).
         target_link_libraries(${target} PRIVATE log android EGL GLESv2 vulkan)
+        if(TARGET adrenotools)
+            target_link_libraries(${target} PRIVATE adrenotools)
+            # adrenotools loads these from nativeLibraryDir at runtime; build them with the product
+            # so they are always there to copy into jniLibs beside it.
+            add_dependencies(${target} main_hook file_redirect_hook gsl_alloc_hook)
+        endif()
         # Bind calls between functions defined in this library directly instead of through the
         # PLT. Nothing interposes on these symbols (Java finds its JNI entry points by name, which
         # this doesn't affect), and profiling showed ~5% of the game thread in @plt stubs.

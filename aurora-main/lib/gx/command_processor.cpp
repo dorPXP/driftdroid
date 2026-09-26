@@ -2144,6 +2144,30 @@ bool submit_raw_draw(GXPrimitive prim, GXVtxFmt fmt, const uint8_t* vertices, ui
   return true;
 }
 
+// Same draw as submit_raw_draw, but written into the command stream as an ordinary GX draw packet
+// instead of synchronising with the GX worker and bypassing process(). Only for callers that have
+// already published a vertex layout matching `vertices` through the stream (GXSetVtxDesc /
+// GXSetVtxAttrFmt) and that never needed submit_raw_draw's size-mismatch fallback: a wrong size
+// here would desynchronise the stream rather than fail. nw4r::lyt quads (runtime gx_dl.cpp
+// SubmitLytDrawDirect) were ~2.5% of a race frame waiting in submit_raw_draw's drain().
+bool submit_draw_in_stream(GXPrimitive prim, GXVtxFmt fmt, const uint8_t* vertices, uint16_t vtxCount,
+                           uint32_t vertexBytes) {
+  if (!fifo::threaded() || fifo::in_display_list()) {
+    return submit_raw_draw(prim, fmt, vertices, vtxCount, vertexBytes);
+  }
+  if (vertices == nullptr || vtxCount == 0 || vertexBytes == 0) {
+    return false;
+  }
+  if (__gx->dirtyState != 0) UNLIKELY {
+    __GXSetDirtyState();
+  }
+  fifo::write_u8(static_cast<u8>(prim) | static_cast<u8>(fmt));
+  fifo::write_u16(vtxCount);
+  fifo::write_data(vertices, vertexBytes);
+  fifo::drain_async();
+  return true;
+}
+
 static bool handle_draw(u8 cmd, const u8* data, u32& pos, u32 size, bool bigEndian) {
   ZoneScoped;
   GXVtxFmt fmt = static_cast<GXVtxFmt>(cmd & CP_VAT_MASK);
@@ -2454,6 +2478,8 @@ bool handle_aurora(const u8* data, u32& pos, u32 size, bool bigEndian) {
     pos += 8;
   } else if (subCmd == GX_LOAD_AURORA_INVALIDATE_TEX_ALL) {
     invalidate_static_texture_cache();
+  } else if (subCmd == GX_LOAD_AURORA_RUN_DEFERRED) {
+    run_next_deferred();
   } else if (subCmd == GX_LOAD_AURORA_DEBUG_GROUP_PUSH) {
     auto label = read_string(data, pos, size, bigEndian);
     gfx::push_debug_group(std::move(label));

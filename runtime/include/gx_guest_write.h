@@ -56,11 +56,16 @@ inline constexpr uint64_t kUntracked = ~0ull;
 // x86 and a missed-by-a-hair ordering only delays a re-digest by one call.
 inline std::array<std::atomic<uint32_t>, kGranuleCount> g_generations{};
 
+// Diagnostic switch: when set, every range reads as untracked, so every GX cache re-digests its
+// data on every use instead of trusting DC-flush notifications. Slower, but it tells a cache that
+// misses a guest write (stale texture, palette or display list) apart from any other bug.
+inline bool g_trackingDisabled = false;
+
 // Monotone fold of every granule counter covering [addr, addr + nbytes).
 // Counters only ever increase, so the sum changes whenever any covered granule
 // is bumped and can never alias back to a previously observed value.
 inline uint64_t GenerationForRange(uint32_t addr, uint32_t nbytes) noexcept {
-    if (nbytes == 0) {
+    if (nbytes == 0 || g_trackingDisabled) {
         return kUntracked;
     }
     const uint64_t start = static_cast<uint64_t>(CanonicalizeGxMainRamAddress(addr));

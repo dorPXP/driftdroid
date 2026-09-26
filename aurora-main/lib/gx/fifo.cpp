@@ -14,7 +14,13 @@
 #include <thread>
 #include <vector>
 
+#include "dolphin/gx/GXAurora.h"
+#include "dolphin/gx/GXCommandList.h"
 #include "tracy/Tracy.hpp"
+
+#ifdef __SWITCH__
+extern "C" void SwitchConfigureGxWorkerThread() __attribute__((weak));
+#endif
 
 namespace aurora::gx::fifo {
 static Module Log("aurora::gx::fifo");
@@ -109,6 +115,12 @@ std::atomic<std::thread::id> sWorkerId{};
 void worker_main() {
   sWorkerId.store(std::this_thread::get_id(), std::memory_order_release);
   aurora::pin_calling_thread_to_core_tier(aurora::CoreTier::Fast);
+#ifdef __SWITCH__
+  // Supplied by the Switch runtime (main.cpp): dedicated core and raised priority.
+  if (SwitchConfigureGxWorkerThread != nullptr) {
+    SwitchConfigureGxWorkerThread();
+  }
+#endif
   // GXEnd drains after every primitive, so batches arrive in the thousands per frame. Take the
   // whole queue per wakeup: one lock round-trip and one frame-worker join for the lot.
   std::vector<Batch> batches;
@@ -212,7 +224,37 @@ void drain_inline() {
 }
 } // namespace
 
-void sync() {
+namespace {
+// Which game-thread call sites force a catch-up with the GX worker, and how long each one stands
+// the game thread still. Only calls that actually had to wait are counted. Read by the Switch
+// profiler; a handful of atomics per real wait is noise next to the wait itself.
+constexpr size_t kSyncSiteSlots = 64;
+struct SyncSiteSlot {
+  std::atomic<uintptr_t> site{0};
+  std::atomic<uint64_t> waits{0};
+  std::atomic<uint64_t> nanos{0};
+};
+SyncSiteSlot sSyncSites[kSyncSiteSlots];
+std::atomic<uint64_t> sSyncWaits{0};
+std::atomic<uint64_t> sSyncNanos{0};
+
+void note_sync_site(uintptr_t site, uint64_t nanos) noexcept {
+  sSyncWaits.fetch_add(1, std::memory_order_relaxed);
+  sSyncNanos.fetch_add(nanos, std::memory_order_relaxed);
+  for (size_t i = 0; i < kSyncSiteSlots; ++i) {
+    SyncSiteSlot& slot = sSyncSites[(site / 4 + i) % kSyncSiteSlots];
+    uintptr_t expected = 0;
+    if (slot.site.load(std::memory_order_relaxed) == site ||
+        slot.site.compare_exchange_strong(expected, site, std::memory_order_relaxed) ||
+        expected == site) {
+      slot.waits.fetch_add(1, std::memory_order_relaxed);
+      slot.nanos.fetch_add(nanos, std::memory_order_relaxed);
+      return;
+    }
+  }
+}
+
+[[gnu::noinline]] void sync_from(uintptr_t site) {
   if (!sPending.load(std::memory_order_acquire)) {
     return;
   }
@@ -222,8 +264,11 @@ void sync() {
   }
   ZoneScopedN("GX worker sync");
   constexpr auto kServiceInterval = std::chrono::milliseconds(1);
+  const auto start = std::chrono::steady_clock::now();
+  bool waited = false;
   std::unique_lock lock(sMutex);
   while (!sQueue.empty() || sWorkerBusy) {
+    waited = true;
     if (!sIdleCv.wait_for(lock, kServiceInterval, [] { return sQueue.empty() && !sWorkerBusy; })) {
       // Keep the guest's alarm/retrace pump alive, as the inline drain's frame-worker wait does.
       lock.unlock();
@@ -231,15 +276,37 @@ void sync() {
       lock.lock();
     }
   }
+  if (waited) {
+    note_sync_site(site, static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                             std::chrono::steady_clock::now() - start)
+                             .count()));
+  }
 }
+} // namespace
 
-void drain() {
+[[gnu::noinline]] void sync() { sync_from(reinterpret_cast<uintptr_t>(__builtin_return_address(0))); }
+
+[[gnu::noinline]] void drain() {
   if (!sThreaded.load(std::memory_order_relaxed)) {
     drain_inline();
     return;
   }
   flush_buffer_to_worker();
-  sync();
+  sync_from(reinterpret_cast<uintptr_t>(__builtin_return_address(0)));
+}
+
+size_t sync_stats(uint64_t* totalWaits, uint64_t* totalNanos, SyncSiteStat* sites, size_t maxSites) {
+  *totalWaits = sSyncWaits.load(std::memory_order_relaxed);
+  *totalNanos = sSyncNanos.load(std::memory_order_relaxed);
+  size_t count = 0;
+  for (const auto& slot : sSyncSites) {
+    const uintptr_t site = slot.site.load(std::memory_order_relaxed);
+    if (site != 0 && count < maxSites) {
+      sites[count++] = {site, slot.waits.load(std::memory_order_relaxed),
+                        slot.nanos.load(std::memory_order_relaxed)};
+    }
+  }
+  return count;
 }
 
 void drain_async() {
@@ -261,6 +328,23 @@ void submit_stream(const uint8_t* data, uint32_t size, bool bigEndian) {
   if (!sThreaded.load(std::memory_order_relaxed)) {
     drain_inline();
     process(data, size, bigEndian);
+    return;
+  }
+  if (bigEndian && !detail::sInDisplayList) LIKELY {
+    // A race frame calls ~1150 display lists. Handing each to the worker on its own cost a queue
+    // lock, a pooled-batch copy and often a futex wake per list, and every wake handed the queue
+    // mutex to the time-sliced worker. The producer buffer is already a big-endian command
+    // stream, so append the list to it and let the usual 32 KiB threshold and sync points hand it
+    // over: same bytes, same order, far fewer hand-offs.
+    if (detail::sBufferSize + size <= detail::sBufferCapacity) LIKELY {
+      std::memcpy(detail::sBufferData + detail::sBufferSize, data, size);
+      detail::sBufferSize += size;
+    } else {
+      write_data_grow(data, size);
+    }
+    if (detail::sBufferSize >= kAsyncFlushThresholdBytes) {
+      flush_buffer_to_worker();
+    }
     return;
   }
   bool wake;
@@ -318,6 +402,36 @@ void set_threaded(bool enabled) {
 }
 
 bool threaded() { return sThreaded.load(std::memory_order_relaxed); }
+
+namespace {
+std::mutex sDeferredMutex;
+std::deque<std::function<void()>> sDeferred;
+} // namespace
+
+void run_in_stream(std::function<void()> fn) {
+  {
+    std::lock_guard lock(sDeferredMutex);
+    sDeferred.push_back(std::move(fn));
+  }
+  // Written after the push, so the worker can never reach the marker before its closure exists.
+  write_u8(GX_LOAD_AURORA);
+  write_u16(GX_LOAD_AURORA_RUN_DEFERRED);
+  drain_async();
+}
+
+void run_next_deferred() {
+  std::function<void()> fn;
+  {
+    std::lock_guard lock(sDeferredMutex);
+    if (sDeferred.empty()) {
+      Log.warn("GX_LOAD_AURORA_RUN_DEFERRED with no queued closure");
+      return;
+    }
+    fn = std::move(sDeferred.front());
+    sDeferred.pop_front();
+  }
+  fn();
+}
 
 const uint8_t* get_buffer_data() { return detail::sBufferData; }
 uint32_t get_buffer_size() { return detail::sBufferSize; }

@@ -3,14 +3,18 @@
 #include "isa/big_endian.h"
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <limits>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -287,52 +291,171 @@ inline constexpr const char* Describe(HostReadFailure failure) noexcept {
 // Read into private storage first and publish it only after the complete host
 // range has been obtained. Callers can therefore leave a guest DMA destination
 // untouched for every failure, including a host file truncated after indexing.
+// Disc files are read-only for the whole run, and the game streams from them constantly - a THP
+// movie reads a chunk every frame. Opening the file for each read cost an open, a size query, a
+// seek and a close on top of the read itself; on Switch every one of those is an IPC round trip to
+// the FS service, and together they had the game thread blocked for a quarter of every frame on
+// movie-heavy menus. So keep a small set of handles open and reuse them.
+class HostReadHandleCache {
+public:
+    struct Handle {
+        std::FILE* file = nullptr;
+        uint64_t size = 0;
+        // Read-ahead window: the bytes [windowStart, windowStart + window.size()) of the file.
+        // Disc files never change while the game runs, so a window never goes stale.
+        std::vector<uint8_t> window;
+        uint64_t windowStart = 0;
+    };
+
+    // Returns an open handle for `hostPath`, opening it if needed. Caller holds mutex().
+    Handle* Acquire(const std::filesystem::path& hostPath) {
+        const std::string key = hostPath.string();
+        for (auto& entry : m_entries) {
+            if (entry.handle.file != nullptr && entry.path == key) {
+                entry.lastUse = ++m_clock;
+                return &entry.handle;
+            }
+        }
+        std::FILE* file = std::fopen(key.c_str(), "rb");
+        if (file == nullptr) {
+            return nullptr;
+        }
+        if (std::fseek(file, 0, SEEK_END) != 0) {
+            std::fclose(file);
+            return nullptr;
+        }
+        const long end = std::ftell(file);
+        if (end < 0) {
+            std::fclose(file);
+            return nullptr;
+        }
+        Entry* victim = &m_entries[0];
+        for (auto& entry : m_entries) {
+            if (entry.handle.file == nullptr) {
+                victim = &entry;
+                break;
+            }
+            if (entry.lastUse < victim->lastUse) {
+                victim = &entry;
+            }
+        }
+        if (victim->handle.file != nullptr) {
+            std::fclose(victim->handle.file);
+        }
+        victim->path = key;
+        victim->handle = {file, static_cast<uint64_t>(end), {}, 0};
+        victim->lastUse = ++m_clock;
+        return &victim->handle;
+    }
+
+    // Drops a handle whose read failed, so the next attempt reopens the file from scratch.
+    void Evict(const Handle* handle) {
+        for (auto& entry : m_entries) {
+            if (&entry.handle == handle && entry.handle.file != nullptr) {
+                std::fclose(entry.handle.file);
+                entry = {};
+            }
+        }
+    }
+
+    std::mutex& mutex() { return m_mutex; }
+
+    static HostReadHandleCache& Instance() {
+        static HostReadHandleCache cache;
+        return cache;
+    }
+
+private:
+    struct Entry {
+        std::string path;
+        Handle handle;
+        uint64_t lastUse = 0;
+    };
+    std::array<Entry, 16> m_entries{};
+    uint64_t m_clock = 0;
+    std::mutex m_mutex;
+};
+
+inline bool ReadExactFromHandle(HostReadHandleCache::Handle& handle,
+                                uint64_t offset,
+                                uint32_t length,
+                                std::vector<uint8_t>& destination,
+                                HostReadFailure& failure) {
+    if (offset >= handle.size) {
+        failure = HostReadFailure::BadOffset;
+        return false;
+    }
+    if (static_cast<uint64_t>(length) > handle.size - offset) {
+        failure = HostReadFailure::ShortRead;
+        return false;
+    }
+    // Each host read is a filesystem-service round trip (an IPC on Switch), and streamed media -
+    // THP movies, music - reads a small chunk every frame. Small reads therefore fill a 512 KiB
+    // window with one host read and are served from it until they walk past its end.
+    constexpr uint64_t kReadAheadBytes = 512u * 1024u;
+    auto seekAndRead = [&](uint8_t* out, uint64_t at, uint64_t bytes) {
+        if (at > static_cast<uint64_t>(std::numeric_limits<long>::max()) ||
+            std::fseek(handle.file, static_cast<long>(at), SEEK_SET) != 0) {
+            failure = HostReadFailure::BadOffset;
+            return false;
+        }
+        if (std::fread(out, 1, bytes, handle.file) != bytes) {
+            failure = HostReadFailure::ShortRead;
+            return false;
+        }
+        return true;
+    };
+    std::vector<uint8_t> staged(length);
+    if (length != 0) {
+        const uint64_t windowEnd = handle.windowStart + handle.window.size();
+        if (offset >= handle.windowStart && offset + length <= windowEnd) {
+            std::memcpy(staged.data(), handle.window.data() + (offset - handle.windowStart), length);
+        } else if (length >= kReadAheadBytes / 2) {
+            if (!seekAndRead(staged.data(), offset, length)) {
+                return false;
+            }
+        } else {
+            const uint64_t fill = std::min<uint64_t>(kReadAheadBytes, handle.size - offset);
+            handle.window.resize(fill);
+            if (!seekAndRead(handle.window.data(), offset, fill)) {
+                handle.window.clear();
+                handle.windowStart = 0;
+                return false;
+            }
+            handle.windowStart = offset;
+            std::memcpy(staged.data(), handle.window.data(), length);
+        }
+    }
+    destination = std::move(staged);
+    return true;
+}
+
 inline bool ReadExact(const std::filesystem::path& hostPath,
                       uint64_t offset,
                       uint32_t length,
                       std::vector<uint8_t>& destination,
                       HostReadFailure& failure) {
     failure = HostReadFailure::None;
-
-    std::ifstream file(hostPath, std::ios::binary);
-    if (!file.is_open()) {
+    auto& cache = HostReadHandleCache::Instance();
+    std::lock_guard lock(cache.mutex());
+    HostReadHandleCache::Handle* handle = cache.Acquire(hostPath);
+    if (handle == nullptr) {
         failure = HostReadFailure::MissingFile;
         return false;
     }
-
-    file.seekg(0, std::ios::end);
-    const std::streamoff fileSize = file.tellg();
-    if (fileSize < 0 ||
-        offset > static_cast<uint64_t>(std::numeric_limits<std::streamoff>::max()) ||
-        offset >= static_cast<uint64_t>(fileSize)) {
-        failure = HostReadFailure::BadOffset;
+    if (ReadExactFromHandle(*handle, offset, length, destination, failure)) {
+        return true;
+    }
+    // A failure may come from a stale handle rather than the request; retry once on a fresh one
+    // before reporting it, so a transient error cannot become permanent.
+    cache.Evict(handle);
+    handle = cache.Acquire(hostPath);
+    if (handle == nullptr) {
+        failure = HostReadFailure::MissingFile;
         return false;
     }
-
-    const uint64_t remaining = static_cast<uint64_t>(fileSize) - offset;
-    if (static_cast<uint64_t>(length) > remaining) {
-        failure = HostReadFailure::ShortRead;
-        return false;
-    }
-
-    std::vector<uint8_t> staged(length);
-    file.seekg(static_cast<std::streamoff>(offset), std::ios::beg);
-    if (!file) {
-        failure = HostReadFailure::BadOffset;
-        return false;
-    }
-
-    if (length != 0) {
-        file.read(reinterpret_cast<char*>(staged.data()),
-                  static_cast<std::streamsize>(length));
-        if (file.gcount() != static_cast<std::streamsize>(length)) {
-            failure = HostReadFailure::ShortRead;
-            return false;
-        }
-    }
-
-    destination = std::move(staged);
-    return true;
+    failure = HostReadFailure::None;
+    return ReadExactFromHandle(*handle, offset, length, destination, failure);
 }
 
 } // namespace DvdReadContract

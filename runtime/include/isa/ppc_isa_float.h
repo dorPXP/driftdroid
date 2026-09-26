@@ -91,6 +91,33 @@ inline double PpcM128ToPsInline(__m128 value)
     return _mm_cvtsd_f64(_mm_castps_pd(value));
 }
 
+#if defined(__aarch64__)
+// Native 64-bit NEON view of a paired-single FPR, same lane layout as the SSE view (lane 0 == ps1,
+// lane 1 == ps0). A double already lives in a D register, so both casts compile to nothing; the
+// __m128 forms above go through sse2neon as 128-bit ops plus an upper-half clear (fmov d, d) per
+// operand, and its shuffles become a constant-table load plus TBL.
+inline float32x2_t PpcPsToF32x2Inline(double value)
+{
+    return vreinterpret_f32_f64(vdup_n_f64(value));
+}
+
+inline double PpcF32x2ToPsInline(float32x2_t value)
+{
+    return vget_lane_f64(vreinterpret_f64_f32(value), 0);
+}
+
+// PpcNegateNonNanLanesInline for the native view. The NaN test is done on the integer bits so it
+// means the same under -ffast-math (runtime TUs, which fold a float self-compare to "ordered") as
+// under the translated shards' -fno-fast-math.
+inline float32x2_t PpcNegateNonNanF32x2Inline(float32x2_t value)
+{
+    const uint32x2_t bits = vreinterpret_u32_f32(value);
+    const uint32x2_t isNan =
+        vcgt_u32(vand_u32(bits, vdup_n_u32(0x7FFFFFFFu)), vdup_n_u32(0x7F800000u));
+    return vbsl_f32(isNan, value, vneg_f32(value));
+}
+#endif
+
 inline __m128 PpcBroadcastPs0Inline(double value)
 {
     const __m128 lanes = PpcPsToM128Inline(value);
@@ -166,13 +193,14 @@ inline bool MkwHostNiActiveInline() noexcept
 #if defined(__aarch64__)
 inline float PpcForceSingleValueInline(double value)
 {
-    // Scalar form of the SSE mask below: sse2neon widens every scalar-lane op to 128-bit NEON
-    // plus lane extraction, on every float store. Same answer: |value| < threshold keeps only
-    // the sign bit (subnormals flush with or without FZ treating them as zero), NaN compares
-    // false and passes through.
-    const uint64_t bits = PpcBitCastToU64Inline(value);
-    const uint64_t flush = std::fabs(value) < g_mkwNiFlushThreshold ? 0x7FFFFFFFFFFFFFFFull : 0;
-    return static_cast<float>(PpcBitCastToDoubleInline(bits & ~flush));
+    // FPCR.FZ is set exactly while guest FPSCR[NI] is (MkwApplyHostNiMode), and FCVT honours it:
+    // a double input that is subnormal, or a result that is subnormal after rounding to single,
+    // becomes a signed zero - NI's flush - with NaNs passing through. The one difference from the
+    // software pre-round check this replaces is an exact value within half a single ulp below
+    // FLT_MIN, which rounds up to FLT_MIN here instead of flushing: the same class of deviation
+    // ppc_isa_fpenv.h already accepts. That check (fabs, fcmpe, csel, a global load and two
+    // moves) ran on every single-precision result and store, ~2-3% of a Switch race frame.
+    return static_cast<float>(value);
 }
 #else
 inline float PpcForceSingleValueInline(double value)
@@ -503,13 +531,21 @@ inline double PpcFnmsubsInline(double a, double c, double b)
 
 inline double PPC_PsMulInline(double lhs, double rhs)
 {
+#if defined(__aarch64__)
+    return PpcF32x2ToPsInline(vmul_f32(PpcPsToF32x2Inline(lhs), PpcPsToF32x2Inline(rhs)));
+#else
     return PpcFlushPairedForNiInline(
         PpcM128ToPsInline(_mm_mul_ps(PpcPsToM128Inline(lhs), PpcPsToM128Inline(rhs))));
+#endif
 }
 
 inline double PPC_PsMulNoNiInline(double lhs, double rhs)
 {
+#if defined(__aarch64__)
+    return PpcF32x2ToPsInline(vmul_f32(PpcPsToF32x2Inline(lhs), PpcPsToF32x2Inline(rhs)));
+#else
     return PpcM128ToPsInline(_mm_mul_ps(PpcPsToM128Inline(lhs), PpcPsToM128Inline(rhs)));
+#endif
 }
 
 // The paired madd family lowers to one hardware FMA. Semantics match the scalar lanes exactly: a
@@ -520,8 +556,12 @@ inline double PPC_PsMulNoNiInline(double lhs, double rhs)
 
 inline double PPC_PsMsubInline(double multiplicand, double multiplier, double subtractor)
 {
+#if defined(__aarch64__)
+    return PpcF32x2ToPsInline(vfma_f32(vneg_f32(PpcPsToF32x2Inline(subtractor)), PpcPsToF32x2Inline(multiplicand), PpcPsToF32x2Inline(multiplier)));
+#else
     return PpcM128ToPsInline(_mm_fmsub_ps(
         PpcPsToM128Inline(multiplicand), PpcPsToM128Inline(multiplier), PpcPsToM128Inline(subtractor)));
+#endif
 }
 
 inline double PPC_PsMsubNoNiInline(double multiplicand, double multiplier, double subtractor)
@@ -531,8 +571,12 @@ inline double PPC_PsMsubNoNiInline(double multiplicand, double multiplier, doubl
 
 inline double PPC_PsMaddInline(double multiplicand, double multiplier, double addend)
 {
+#if defined(__aarch64__)
+    return PpcF32x2ToPsInline(vfma_f32(PpcPsToF32x2Inline(addend), PpcPsToF32x2Inline(multiplicand), PpcPsToF32x2Inline(multiplier)));
+#else
     return PpcM128ToPsInline(_mm_fmadd_ps(
         PpcPsToM128Inline(multiplicand), PpcPsToM128Inline(multiplier), PpcPsToM128Inline(addend)));
+#endif
 }
 
 inline double PPC_PsMaddNoNiInline(double multiplicand, double multiplier, double addend)
@@ -542,20 +586,33 @@ inline double PPC_PsMaddNoNiInline(double multiplicand, double multiplier, doubl
 
 inline double PPC_PsMadds0Inline(double multiplicand, double multiplier, double addend)
 {
+#if defined(__aarch64__)
+    return PpcF32x2ToPsInline(vfma_lane_f32(PpcPsToF32x2Inline(addend), PpcPsToF32x2Inline(multiplicand), PpcPsToF32x2Inline(multiplier), 1));
+#else
     return PpcM128ToPsInline(_mm_fmadd_ps(
         PpcPsToM128Inline(multiplicand), PpcBroadcastPs0Inline(multiplier), PpcPsToM128Inline(addend)));
+#endif
 }
 
 inline double PPC_PsMadds1Inline(double multiplicand, double multiplier, double addend)
 {
+#if defined(__aarch64__)
+    return PpcF32x2ToPsInline(vfma_lane_f32(PpcPsToF32x2Inline(addend), PpcPsToF32x2Inline(multiplicand), PpcPsToF32x2Inline(multiplier), 0));
+#else
     return PpcM128ToPsInline(_mm_fmadd_ps(
         PpcPsToM128Inline(multiplicand), PpcBroadcastPs1Inline(multiplier), PpcPsToM128Inline(addend)));
+#endif
 }
 
 inline double PPC_PsNmsubInline(double multiplicand, double multiplier, double subtractor)
 {
+#if defined(__aarch64__)
+    return PpcF32x2ToPsInline(PpcNegateNonNanF32x2Inline(
+        vfma_f32(vneg_f32(PpcPsToF32x2Inline(subtractor)), PpcPsToF32x2Inline(multiplicand), PpcPsToF32x2Inline(multiplier))));
+#else
     return PpcM128ToPsInline(PpcNegateNonNanLanesInline(_mm_fmsub_ps(
         PpcPsToM128Inline(multiplicand), PpcPsToM128Inline(multiplier), PpcPsToM128Inline(subtractor))));
+#endif
 }
 
 inline double PPC_PsNmsubNoNiInline(double multiplicand, double multiplier, double subtractor)
@@ -565,38 +622,59 @@ inline double PPC_PsNmsubNoNiInline(double multiplicand, double multiplier, doub
 
 inline double PPC_PsNmaddInline(double multiplicand, double multiplier, double addend)
 {
+#if defined(__aarch64__)
+    return PpcF32x2ToPsInline(PpcNegateNonNanF32x2Inline(
+        vfma_f32(PpcPsToF32x2Inline(addend), PpcPsToF32x2Inline(multiplicand), PpcPsToF32x2Inline(multiplier))));
+#else
     return PpcM128ToPsInline(PpcNegateNonNanLanesInline(_mm_fmadd_ps(
         PpcPsToM128Inline(multiplicand), PpcPsToM128Inline(multiplier), PpcPsToM128Inline(addend))));
+#endif
 }
 
 inline double PPC_PsMuls0Inline(double aValue, double cValue)
 {
+#if defined(__aarch64__)
+    return PpcF32x2ToPsInline(vmul_lane_f32(PpcPsToF32x2Inline(aValue), PpcPsToF32x2Inline(cValue), 1));
+#else
     return PpcFlushPairedForNiInline(PpcM128ToPsInline(
         _mm_mul_ps(PpcPsToM128Inline(aValue), PpcBroadcastPs0Inline(cValue))));
+#endif
 }
 
 inline double PPC_PsMuls1Inline(double aValue, double cValue)
 {
+#if defined(__aarch64__)
+    return PpcF32x2ToPsInline(vmul_lane_f32(PpcPsToF32x2Inline(aValue), PpcPsToF32x2Inline(cValue), 0));
+#else
     return PpcFlushPairedForNiInline(PpcM128ToPsInline(
         _mm_mul_ps(PpcPsToM128Inline(aValue), PpcBroadcastPs1Inline(cValue))));
+#endif
 }
 
 inline PPC_FPR PpcMakePairedResultInline(float ps0, float ps1);
 
 inline double PPC_PsFromScalarInline(double value)
 {
+#if defined(__aarch64__)
+    return PpcF32x2ToPsInline(vdup_n_f32(static_cast<float>(value)));
+#else
     // Representation conversion, not an architectural operation: Gekko has no
     // "scalar to paired" instruction, so there is no NI rounding point here.
     // If the scalar is a single-denormal it stays one; MXCSR.DAZ flushes it as
     // an input at the next real arithmetic op, exactly like the hardware.
     const float single = static_cast<float>(value);
     return PpcPackPairedInline(single, single);
+#endif
 }
 
 inline double PPC_PsFromScalarNoNiInline(double value)
 {
+#if defined(__aarch64__)
+    return PpcF32x2ToPsInline(vdup_n_f32(static_cast<float>(value)));
+#else
     const float single = static_cast<float>(value);
     return PpcPackPairedInline(single, single);
+#endif
 }
 
 inline double PPC_PsToScalarInline(double value)
@@ -609,45 +687,73 @@ inline double PPC_PsToScalarInline(double value)
 // through the pack helper.
 inline double PPC_PsMerge00Inline(double aValue, double bValue)
 {
+#if defined(__aarch64__)
+    // lane0 = b.ps0 (b lane 1), lane1 = a.ps0 (a lane 1)
+    return PpcF32x2ToPsInline(vzip2_f32(PpcPsToF32x2Inline(bValue), PpcPsToF32x2Inline(aValue)));
+#else
     // lane0 = b.ps0 (b lane 1), lane1 = a.ps0 (a lane 1)
     const __m128 gathered = _mm_shuffle_ps(
         PpcPsToM128Inline(bValue), PpcPsToM128Inline(aValue), _MM_SHUFFLE(1, 1, 1, 1));
     return PpcM128ToPsInline(_mm_shuffle_ps(gathered, gathered, _MM_SHUFFLE(0, 0, 2, 0)));
+#endif
 }
 
 inline double PPC_PsMerge01Inline(double aValue, double bValue)
 {
+#if defined(__aarch64__)
+    // lane0 = b.ps1 (b lane 0), lane1 = a.ps0 (a lane 1)
+    return PpcF32x2ToPsInline(vcopy_lane_f32(PpcPsToF32x2Inline(bValue), 1, PpcPsToF32x2Inline(aValue), 1));
+#else
     // lane0 = b.ps1 (b lane 0), lane1 = a.ps0 (a lane 1)
     const __m128 gathered = _mm_shuffle_ps(
         PpcPsToM128Inline(bValue), PpcPsToM128Inline(aValue), _MM_SHUFFLE(1, 1, 0, 0));
     return PpcM128ToPsInline(_mm_shuffle_ps(gathered, gathered, _MM_SHUFFLE(0, 0, 2, 0)));
+#endif
 }
 
 inline double PPC_PsMerge10Inline(double aValue, double bValue)
 {
+#if defined(__aarch64__)
+    // lane0 = b.ps0 (b lane 1), lane1 = a.ps1 (a lane 0)
+    return PpcF32x2ToPsInline(vext_f32(PpcPsToF32x2Inline(bValue), PpcPsToF32x2Inline(aValue), 1));
+#else
     // lane0 = b.ps0 (b lane 1), lane1 = a.ps1 (a lane 0)
     const __m128 gathered = _mm_shuffle_ps(
         PpcPsToM128Inline(bValue), PpcPsToM128Inline(aValue), _MM_SHUFFLE(0, 0, 1, 1));
     return PpcM128ToPsInline(_mm_shuffle_ps(gathered, gathered, _MM_SHUFFLE(0, 0, 2, 0)));
+#endif
 }
 
 inline double PPC_PsMerge11Inline(double aValue, double bValue)
 {
+#if defined(__aarch64__)
+    // lane0 = b.ps1 (b lane 0), lane1 = a.ps1 (a lane 0)
+    return PpcF32x2ToPsInline(vzip1_f32(PpcPsToF32x2Inline(bValue), PpcPsToF32x2Inline(aValue)));
+#else
     // lane0 = b.ps1 (b lane 0), lane1 = a.ps1 (a lane 0): plain unpcklps.
     return PpcM128ToPsInline(
         _mm_unpacklo_ps(PpcPsToM128Inline(bValue), PpcPsToM128Inline(aValue)));
+#endif
 }
 
 inline double PPC_PsAddInline(double aValue, double bValue)
 {
+#if defined(__aarch64__)
+    return PpcF32x2ToPsInline(vadd_f32(PpcPsToF32x2Inline(aValue), PpcPsToF32x2Inline(bValue)));
+#else
     return PpcFlushPairedForNiInline(
         PpcM128ToPsInline(_mm_add_ps(PpcPsToM128Inline(aValue), PpcPsToM128Inline(bValue))));
+#endif
 }
 
 inline double PPC_PsAddNoNiInline(double aValue, double bValue)
 {
+#if defined(__aarch64__)
+    return PpcF32x2ToPsInline(vadd_f32(PpcPsToF32x2Inline(aValue), PpcPsToF32x2Inline(bValue)));
+#else
     return PpcM128ToPsInline(
         _mm_add_ps(PpcPsToM128Inline(aValue), PpcPsToM128Inline(bValue)));
+#endif
 }
 
 inline double PPC_PsSelInline(double lhsValue, double controlValue, double rhsValue)
@@ -665,30 +771,51 @@ inline double PPC_PsSelInline(double lhsValue, double controlValue, double rhsVa
 
 inline double PPC_PsSubInline(double aValue, double bValue)
 {
+#if defined(__aarch64__)
+    return PpcF32x2ToPsInline(vsub_f32(PpcPsToF32x2Inline(aValue), PpcPsToF32x2Inline(bValue)));
+#else
     return PpcFlushPairedForNiInline(
         PpcM128ToPsInline(_mm_sub_ps(PpcPsToM128Inline(aValue), PpcPsToM128Inline(bValue))));
+#endif
 }
 
 inline double PPC_PsSubNoNiInline(double aValue, double bValue)
 {
+#if defined(__aarch64__)
+    return PpcF32x2ToPsInline(vsub_f32(PpcPsToF32x2Inline(aValue), PpcPsToF32x2Inline(bValue)));
+#else
     return PpcM128ToPsInline(
         _mm_sub_ps(PpcPsToM128Inline(aValue), PpcPsToM128Inline(bValue)));
+#endif
 }
 
 inline double PPC_PsDivInline(double aValue, double bValue)
 {
+#if defined(__aarch64__)
+    return PpcF32x2ToPsInline(vdiv_f32(PpcPsToF32x2Inline(aValue), PpcPsToF32x2Inline(bValue)));
+#else
     return PpcFlushPairedForNiInline(
         PpcM128ToPsInline(_mm_div_ps(PpcPsToM128Inline(aValue), PpcPsToM128Inline(bValue))));
+#endif
 }
 
 inline double PPC_PsNegInline(double value)
 {
+#if defined(__aarch64__)
+    // Sign-bit flips, NaNs included, like the lane-wise form below; FNEG ignores FPCR.FZ.
+    return PpcF32x2ToPsInline(vneg_f32(PpcPsToF32x2Inline(value)));
+#else
     return PpcPackPairedInline(-PpcGetPs0Inline(value), -PpcGetPs1Inline(value));
+#endif
 }
 
 inline double PPC_PsAbsInline(double value)
 {
+#if defined(__aarch64__)
+    return PpcF32x2ToPsInline(vabs_f32(PpcPsToF32x2Inline(value)));
+#else
     return PpcPackPairedInline(std::abs(PpcGetPs0Inline(value)), std::abs(PpcGetPs1Inline(value)));
+#endif
 }
 
 inline double PPC_PsSum0Inline(double aValue, double bValue, double cValue)

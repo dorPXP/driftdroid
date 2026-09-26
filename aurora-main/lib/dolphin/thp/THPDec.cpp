@@ -9,6 +9,7 @@ using aurora::read_bits;
 
 #include <algorithm>
 #include <array>
+#include <cstring>
 #include <cmath>
 
 namespace {
@@ -67,8 +68,12 @@ struct HuffmanTable {
   std::array<u16, 17> firstCodes{};
   std::array<u16, 17> symbolOffsets{};
   std::array<u8, 256> symbols{};
+  // Codes of up to kHuffmanLookupBits bits, indexed by the next kHuffmanLookupBits of the stream:
+  // (length << 8) | symbol, or 0 when the code is longer (the slow path then walks lengths 10-16).
+  std::array<u16, 1u << 9> lookup{};
   bool valid = false;
 };
+constexpr u32 kHuffmanLookupBits = 9;
 
 struct Component {
   u8 quantizationTable = 0;
@@ -183,6 +188,18 @@ s32 parse_huffman_tables(const u8* data, size_t size, DecodeContext& context) no
       table.symbolOffsets[length] = symbolOffset;
       code = (code + count) << 1;
       symbolOffset = static_cast<u16>(symbolOffset + count);
+    }
+    // Longest first, so where ranges could overlap the shorter code wins, exactly as the
+    // bit-at-a-time search (which tries length 1 upward) would decide.
+    for (u32 length = kHuffmanLookupBits; length >= 1; --length) {
+      const u32 shift = kHuffmanLookupBits - length;
+      for (u32 index = 0; index < table.counts[length]; ++index) {
+        const u32 prefix = table.firstCodes[length] + index;
+        const u16 entry = static_cast<u16>((length << 8) | table.symbols[table.symbolOffsets[length] + index]);
+        for (u32 suffix = 0; suffix < (u32{1} << shift); ++suffix) {
+          table.lookup[(prefix << shift) | suffix] = entry;
+        }
+      }
     }
     table.valid = true;
     context.huffmanTables[id * 2 + tableClass] = table;
@@ -304,13 +321,23 @@ class BitReader {
 public:
   BitReader(const u8* data, size_t byteOffset) noexcept : mData{data}, mBitPosition{byteOffset * 8} {}
 
-  u32 read(u8 count) noexcept {
-    u32 value = 0;
-    for (u8 i = 0; i < count; ++i) {
-      const size_t bytePosition = mBitPosition >> 3;
-      value = (value << 1) | ((mData[bytePosition] >> (7 - (mBitPosition & 7))) & 1);
-      ++mBitPosition;
+  // The next `count` (<= 16) bits without consuming them. Loads a big-endian window of up to 4
+  // bytes, so it may look up to 3 bytes past the last bit it returns - always inside the frame
+  // buffer the guest allocated, which is padded well beyond the compressed data.
+  u32 peek(u8 count) noexcept {
+    if (count == 0) {
+      return 0;
     }
+    const u8* p = mData + (mBitPosition >> 3);
+    const u32 window = (u32{p[0]} << 24) | (u32{p[1]} << 16) | (u32{p[2]} << 8) | u32{p[3]};
+    return (window << (mBitPosition & 7)) >> (32 - count);
+  }
+
+  void skip(u8 count) noexcept { mBitPosition += count; }
+
+  u32 read(u8 count) noexcept {
+    const u32 value = peek(count);
+    skip(count);
     return value;
   }
 
@@ -322,16 +349,24 @@ private:
 };
 
 bool decode_huffman(BitReader& reader, const HuffmanTable& table, u8& symbol) noexcept {
-  u32 code = 0;
-  for (size_t length = 1; length <= 16; ++length) {
-    code = (code << 1) | reader.read(1);
+  // Same answer as trying lengths 1..16 one bit at a time, which used to be most of the decode:
+  // short codes resolve in one table lookup, longer ones from a single 16-bit peek.
+  const u32 bits = reader.peek(16);
+  if (const u16 entry = table.lookup[bits >> (16 - kHuffmanLookupBits)]; entry != 0) {
+    symbol = static_cast<u8>(entry);
+    reader.skip(static_cast<u8>(entry >> 8));
+    return true;
+  }
+  for (u32 length = kHuffmanLookupBits + 1; length <= 16; ++length) {
+    const u32 code = bits >> (16 - length);
     const u32 firstCode = table.firstCodes[length];
-    const u32 count = table.counts[length];
-    if (code >= firstCode && code - firstCode < count) {
+    if (code >= firstCode && code - firstCode < table.counts[length]) {
       symbol = table.symbols[table.symbolOffsets[length] + code - firstCode];
+      reader.skip(static_cast<u8>(length));
       return true;
     }
   }
+  reader.skip(16);
   return false;
 }
 
@@ -512,6 +547,16 @@ std::array<u8, 64> inverse_dct(const std::array<s16, 64>& coefficients,
 
 void write_block(u8* output, u16 width, u16 height, u16 blockX, u16 blockY, const std::array<u8, 64>& pixels) noexcept {
   const size_t tilesPerRow = (width + 7) / 8;
+  if (blockX + 8 <= width && blockY + 8 <= height) {
+    // Whole block (blockX is always a multiple of 8): each 8-pixel row is one contiguous row of an
+    // 8x4 I8 tile, and the block spans exactly two tiles vertically.
+    const size_t tileColumn = blockX / 8;
+    for (u32 row = 0; row < 8; ++row) {
+      const u32 y = blockY + row;
+      std::memcpy(output + ((y / 4) * tilesPerRow + tileColumn) * 32 + (y & 3) * 8, &pixels[row * 8], 8);
+    }
+    return;
+  }
   for (u16 row = 0; row < 8 && blockY + row < height; ++row) {
     for (u16 column = 0; column < 8 && blockX + column < width; ++column) {
       const u16 x = blockX + column;
@@ -525,7 +570,7 @@ void write_block(u8* output, u16 width, u16 height, u16 blockX, u16 blockY, cons
 
 bool decode_and_write_block(BitReader& reader, DecodeContext& context, size_t component, u8* output, u16 width,
                             u16 height, u16 x, u16 y) noexcept {
-  std::array<s16, 64> coefficients{};
+  std::array<s16, 64> coefficients;  // decode_block zero-fills it
   if (!decode_block(reader, context, component, coefficients)) {
     return false;
   }
