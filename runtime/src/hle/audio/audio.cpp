@@ -474,6 +474,13 @@ void Audio_HLE_Tick(CpuContext* ctx, uint32_t deltaMicros)
         }
     }
 
+    if (blocksCompleted > 0) {
+        g_audioMixCounters.ticksWithBlocks.fetch_add(1, std::memory_order_relaxed);
+        g_audioMixCounters.blocks.fetch_add(static_cast<uint64_t>(blocksCompleted), std::memory_order_relaxed);
+        if (blocksCompleted > 1) {
+            g_audioMixCounters.multiBlockTicks.fetch_add(1, std::memory_order_relaxed);
+        }
+    }
     {
         std::lock_guard<std::mutex> lock(g_ai.mutex);
         if (g_ai.length != 0) {

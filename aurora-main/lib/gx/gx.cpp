@@ -1896,8 +1896,87 @@ static HashType hash_texture_bind_group_cache_key(const TextureBindGroupCacheKey
   return xxh3_hash(key);
 }
 
+#if defined(__SWITCH__)
+// Diagnostic for the Switch-only item box / ramp rendering bug: with
+// sdmc:/switch/WiiCompiled/Cache/tex_diag.flag present, logs the texture setup of every new
+// indirect-texturing bind group (at most 200) to stderr.
+static void log_indirect_texture_setup(const ShaderInfo& info) noexcept {
+  static const bool enabled = [] {
+    if (FILE* f = std::fopen("sdmc:/switch/WiiCompiled/Cache/tex_diag.flag", "r")) {
+      std::fclose(f);
+      return true;
+    }
+    return false;
+  }();
+  static int logged = 0;
+  static absl::flat_hash_set<std::string> seen;
+  if (!enabled || !info.usedIndStages.any() || logged >= 400) {
+    return;
+  }
+  // Build the whole description first and print it only if this exact setup is new: the same
+  // bind group is rebuilt over and over (a menu effect filled the first log on its own).
+  std::string text;
+  char line[320];
+  std::snprintf(line, sizeof(line), "texgens=%u indStages=%u tevStages=%u\n", unsigned(g_gxState.numTexGens),
+                unsigned(g_gxState.numIndStages), unsigned(g_gxState.numTevStages));
+  text += line;
+  for (u32 i = 0; i < g_gxState.numTexGens && i < MaxTexCoord; ++i) {
+    const auto& tcg = g_gxState.tcgs[i];
+    std::snprintf(line, sizeof(line), "  tcg%u type=%u src=%u mtx=%u post=%u norm=%u\n", i, unsigned(tcg.type),
+                  unsigned(tcg.src), unsigned(tcg.mtx), unsigned(tcg.postMtx), unsigned(tcg.normalize));
+    text += line;
+  }
+  for (u32 i = 0; i < g_gxState.numIndStages && i < MaxIndStages; ++i) {
+    const auto& ind = g_gxState.indStages[i];
+    std::snprintf(line, sizeof(line), "  ind%u coord=%u map=%u scale=%u,%u\n", i, unsigned(ind.texCoordId),
+                  unsigned(ind.texMapId), unsigned(ind.scaleS), unsigned(ind.scaleT));
+    text += line;
+  }
+  for (u32 i = 0; i < MaxTextures; ++i) {
+    if (!info.sampledTextures[i] && !info.sampledIndTextures[i]) {
+      continue;
+    }
+    const auto& tex = g_gxState.textures[i];
+    if (!tex) {
+      std::snprintf(line, sizeof(line), "  map%u UNBOUND\n", i);
+      text += line;
+      continue;
+    }
+    std::snprintf(line, sizeof(line),
+                  "  map%u %ux%u gxfmt=%u wgpufmt=%u mips=%u target=%u arbmip=%u repl=%u wrap=%u,%u "
+                  "filt=%u,%u lod=%.2f..%.2f bias=%.2f ind=%u\n",
+                  i, tex.ref->size.width, tex.ref->size.height, tex.ref->gxFormat, unsigned(tex.ref->format),
+                  tex.ref->mipCount, tex.ref->attachmentTextureView ? 1u : 0u, tex.ref->hasArbitraryMips ? 1u : 0u,
+                  tex.ref->isReplacement ? 1u : 0u, unsigned(tex.texObj.wrap_s()), unsigned(tex.texObj.wrap_t()),
+                  unsigned(tex.texObj.min_filter()), unsigned(tex.texObj.mag_filter()), tex.texObj.min_lod(),
+                  tex.texObj.max_lod(), tex.texObj.lod_bias(), info.sampledIndTextures[i] ? 1u : 0u);
+    text += line;
+  }
+  if (!seen.insert(text).second) {
+    return;
+  }
+  ++logged;
+  std::fprintf(stderr, "[texdiag] #%d %s", logged, text.c_str());
+  // Texture matrices change every frame, so they are printed for the first sighting only.
+  for (u32 i = 0; i < g_gxState.numTexGens && i < MaxTexCoord; ++i) {
+    const auto& tcg = g_gxState.tcgs[i];
+    if (tcg.mtx != GX_IDENTITY && tcg.mtx >= GX_TEXMTX0) {
+      const u32 slot = (static_cast<u32>(tcg.mtx) - GX_TEXMTX0) / 3;
+      if (slot < MaxTexMtx) {
+        const float* m = reinterpret_cast<const float*>(&g_gxState.texMtxs[slot]);
+        std::fprintf(stderr, "[texdiag]     texmtx[%u]= %g %g %g %g | %g %g %g %g | %g %g %g %g\n", slot, m[0],
+                     m[1], m[2], m[3], m[4], m[5], m[6], m[7], m[8], m[9], m[10], m[11]);
+      }
+    }
+  }
+}
+#endif
+
 static GXBindGroups build_bind_groups_uncached(const ShaderInfo& info) noexcept {
   ZoneScoped;
+#if defined(__SWITCH__)
+  log_indirect_texture_setup(info);
+#endif
 
   if (!info.sampledTextures.any() && !info.sampledIndTextures.any()) {
     // Don't bother re-binding anything

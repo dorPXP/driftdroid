@@ -61,6 +61,7 @@
 #include "android_gpu_driver.h"
 #include "guest_flat_memory.h"
 #include "gx_guest_write.h"
+#include "hle/audio/ax_dsp.h"
 #include "memory.h"
 #include "system_bridge.h"
 #include "ppc_runtime.h"
@@ -631,6 +632,31 @@ void HostProfileWriteWindow(double seconds) {
                                  static_cast<double>(siteNanos) / 1e6);
                 }
             }
+        }
+        {
+            static uint64_t previous[8]{};
+            const uint64_t now[8] = {
+                g_audioMixCounters.mixes.load(std::memory_order_relaxed),
+                g_audioMixCounters.mixNanos.load(std::memory_order_relaxed),
+                g_audioMixCounters.joins.load(std::memory_order_relaxed),
+                g_audioMixCounters.joinWaits.load(std::memory_order_relaxed),
+                g_audioMixCounters.joinWaitNanos.load(std::memory_order_relaxed),
+                g_audioMixCounters.ticksWithBlocks.load(std::memory_order_relaxed),
+                g_audioMixCounters.blocks.load(std::memory_order_relaxed),
+                g_audioMixCounters.multiBlockTicks.load(std::memory_order_relaxed),
+            };
+            std::fprintf(out,
+                         "# audio_mix mixes=%llu mix_ms=%.2f joins=%llu join_waits=%llu join_wait_ms=%.2f "
+                         "ticks=%llu blocks=%llu multi_block_ticks=%llu\n",
+                         static_cast<unsigned long long>(now[0] - previous[0]),
+                         static_cast<double>(now[1] - previous[1]) / 1e6,
+                         static_cast<unsigned long long>(now[2] - previous[2]),
+                         static_cast<unsigned long long>(now[3] - previous[3]),
+                         static_cast<double>(now[4] - previous[4]) / 1e6,
+                         static_cast<unsigned long long>(now[5] - previous[5]),
+                         static_cast<unsigned long long>(now[6] - previous[6]),
+                         static_cast<unsigned long long>(now[7] - previous[7]));
+            std::copy(std::begin(now), std::end(now), std::begin(previous));
         }
         {
             static DlScanCacheCounters previous{};

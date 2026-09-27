@@ -9,6 +9,7 @@
 #include <dolphin/gx/GXEnum.h>
 
 #include <array>
+#include <cstdio>
 #include <mutex>
 #include <string_view>
 #include <utility>
@@ -25,6 +26,25 @@ static Module Log("aurora::gfx::gx");
 
 // `var local = vec * ubuf.array[in_pnmtxidx]` written as a switch over literal indices. Some
 // Adreno drivers mis-evaluate the dynamic index form for skinned characters.
+#if defined(__SWITCH__)
+// Debug view for the Switch-only indirect texturing bug (item boxes, Luigi Circuit ramps): the
+// number in sdmc:/switch/WiiCompiled/Cache/ind_debug.txt (read once) replaces the final colour of
+// every indirect-texturing shader with one intermediate value. 0 or no file = normal rendering.
+static int indirect_debug_view() {
+  static const int view = [] {
+    int value = 0;
+    if (FILE* f = std::fopen("sdmc:/switch/WiiCompiled/Cache/ind_debug.txt", "r")) {
+      if (std::fscanf(f, "%d", &value) != 1) {
+        value = 0;
+      }
+      std::fclose(f);
+    }
+    return value;
+  }();
+  return view;
+}
+#endif
+
 static std::string constant_matrix_switch(std::string_view arrayName, std::string_view localName,
                                           std::string_view vectorExpression, u32 count) {
   std::string result = fmt::format("\n    var {} = vec3f(0.0);\n    switch (in_pnmtxidx) {{", localName);
@@ -1637,6 +1657,54 @@ wgpu::ShaderModule build_shader(const ShaderConfig& config) noexcept {
         i, i * 2, i * 2 + 1);
   }
   fragmentFn += "\n    prev = tev_overflow_vec4f(prev);";
+#if defined(__SWITCH__)
+  if (info.usedIndStages.any() && indirect_debug_view() != 0) {
+    const auto has = [&](std::string_view needle) {
+      return fragmentFnPre.find(needle) != std::string::npos || fragmentFn.find(needle) != std::string::npos;
+    };
+    std::string debugColor;
+    switch (indirect_debug_view()) {
+    case 1: // dot layer
+      if (has("var sampled1 ")) debugColor = "vec4f(sampled1.rgb, 1.0)";
+      break;
+    case 2: // indirect-warped layer
+      if (has("var sampled0 ")) debugColor = "vec4f(sampled0.rgb, 1.0)";
+      break;
+    case 3: // third layer
+      if (has("var sampled2 ")) debugColor = "vec4f(sampled2.rgb, 1.0)";
+      break;
+    case 4: // texture coordinates of texcoord 3 (item box dots) or 1
+      if (has("var tex3_uv ")) debugColor = "vec4f(fract(tex3_uv), 0.0, 1.0)";
+      else if (has("var tex1_uv ")) debugColor = "vec4f(fract(tex1_uv), 0.0, 1.0)";
+      break;
+    case 5: // indirect offset, low 8 bits per axis, blue = negative x
+      if (has("ind0_offset_fixed")) {
+        debugColor = "vec4f(vec2f(ind0_offset_fixed & vec2i(255)) / 255.0, select(0.0, 1.0, ind0_offset_fixed.x < 0), 1.0)";
+      }
+      break;
+    case 6: // raw indirect texture sample
+      if (has("t_IndTexCoord0")) debugColor = "vec4f(vec3f(t_IndTexCoord0) / 255.0, 1.0)";
+      break;
+    case 7: // projective texcoord 0 (the item box environment map): red/green = uv, blue = z <= 0
+      if (has("in.tex0_uvw")) {
+        debugColor = "vec4f(clamp(tex0_uv, vec2f(0.0), vec2f(1.0)), select(0.0, 1.0, in.tex0_uvw.z <= 0.0), 1.0)";
+      }
+      break;
+    case 8: // same for projective texcoord 2
+      if (has("in.tex2_uvw")) {
+        debugColor = "vec4f(clamp(tex2_uv, vec2f(0.0), vec2f(1.0)), select(0.0, 1.0, in.tex2_uvw.z <= 0.0), 1.0)";
+      }
+      break;
+    default:
+      break;
+    }
+    if (!debugColor.empty()) {
+      fragmentFn += "\n    prev = " + debugColor + ";";
+    } else {
+      fragmentFn += "\n    prev = vec4f(1.0, 0.0, 1.0, 1.0);"; // magenta: value not available here
+    }
+  }
+#endif
   if (config.alphaCompare) {
     const auto comp0 = alpha_compare(config.alphaCompare.comp0, config.alphaCompare.ref0);
     const auto comp1 = alpha_compare(config.alphaCompare.comp1, config.alphaCompare.ref1);
@@ -2009,8 +2077,13 @@ fn tev_overflow_vec4f(in: vec4f) -> vec4f {{
   return (byte_space - floor(byte_space / 256.0) * 256.0) / 255.0;
 }}
 
+// Sign-extend from 24 bits. Written as mask-and-compare rather than the usual (x << 8) >> 8: Mesa's
+// NVIDIA backend (uam on deko3d, and the Switch GL driver) folds that shift pair into a bitfield
+// extract and loses the sign, so negative coordinates became huge positive ones on Switch only -
+// indirect texturing (item boxes, Luigi Circuit ramps) sampled garbage. Identical result everywhere.
 fn tev_s24_fixed_vec2i(in: vec2i) -> vec2i {{
-  return (in << vec2u(8u)) >> vec2u(8u);
+  let low = in & vec2i(0x00FFFFFF);
+  return select(low, low - vec2i(0x01000000), low >= vec2i(0x00800000));
 }}
 
 fn tev_byte_f32(in: f32) -> i32 {{

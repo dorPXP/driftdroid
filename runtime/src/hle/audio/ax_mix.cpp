@@ -132,8 +132,18 @@ public:
 
     void JoinMix() {
         if (m_mixThread.joinable()) {
+            g_audioMixCounters.joins.fetch_add(1, std::memory_order_relaxed);
             std::unique_lock<std::mutex> lock(m_mixMutex);
-            m_mixIdle.wait(lock, [this] { return !m_mixPending && !m_mixBusy; });
+            if (m_mixPending || m_mixBusy) {
+                const auto waitStart = std::chrono::steady_clock::now();
+                m_mixIdle.wait(lock, [this] { return !m_mixPending && !m_mixBusy; });
+                g_audioMixCounters.joinWaits.fetch_add(1, std::memory_order_relaxed);
+                g_audioMixCounters.joinWaitNanos.fetch_add(
+                    static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                              std::chrono::steady_clock::now() - waitStart)
+                                              .count()),
+                    std::memory_order_relaxed);
+            }
         }
         PublishAuxOutputs();
     }
@@ -1393,6 +1403,7 @@ private:
                 m_mixBusy = true;
             }
 
+            const auto mixStart = std::chrono::steady_clock::now();
             try {
                 ExecuteCommandList(m_mixLayout, m_mixCmdListSize);
             } catch (const std::exception& error) {
@@ -1401,6 +1412,12 @@ private:
                 ReportMixWorkerFailure("unknown exception");
             }
 
+            g_audioMixCounters.mixes.fetch_add(1, std::memory_order_relaxed);
+            g_audioMixCounters.mixNanos.fetch_add(
+                static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                          std::chrono::steady_clock::now() - mixStart)
+                                          .count()),
+                std::memory_order_relaxed);
             {
                 std::lock_guard<std::mutex> lock(m_mixMutex);
                 m_mixBusy = false;
@@ -1582,6 +1599,12 @@ void InitAram() {
 void JoinMixWorker() {
     Instance().JoinMix();
 }
+
+} // namespace AxDspHle
+
+AudioMixCounters g_audioMixCounters;
+
+namespace AxDspHle {
 
 void ShutdownMixWorker() {
     Instance().ShutdownMixWorker();

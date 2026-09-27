@@ -189,10 +189,12 @@ void GXProject(f32 x, f32 y, f32 z, const f32 mtx[3][4], const f32* pm, const f3
 // TODO GXLoadNrmMtxIndx3x3
 // TODO GXLoadTexMtxIndx
 void GXSetZScaleOffset(f32 scale, f32 offset) {
-  // Direct GX state access: catch up the GX worker first.
-  aurora::gx::fifo::sync();
-  g_gxState.zScale = scale;
-  g_gxState.zOffset = offset;
+  // Nothing reads g_gxState.zScale/zOffset; the XF writes below are what take effect. With the GX
+  // worker running, the direct write only forced a full sync (~0.2 ms/frame in races), so skip it.
+  if (!aurora::gx::fifo::threaded()) {
+    g_gxState.zScale = scale;
+    g_gxState.zOffset = offset;
+  }
   constexpr f32 z24Scale = 16777215.0f;
   const f32 sz = z24Scale * offset;
   const f32 oz = 1.0f + z24Scale * scale;
