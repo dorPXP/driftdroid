@@ -140,8 +140,7 @@ extern "C" void SelectThread_801a9c08(CpuContext* ctx)
         // Mirrors the exception in SchedulerCanSwitchAway (os_sleep.cpp): a thread parked
         // specifically on the known DWC connect-poll queue is allowed to actually switch here
         // too, or OSSleepThread's own relaxation is moot - this is the function that performs
-        // the real fiber switch. See kDwcConnectWaitQueueAddr's comment in os_internal.h and
-        // hermes/11-WFC-CONNECT-SCHEDULER-STALL.md.
+        // the real fiber switch. See kDwcConnectWaitQueueAddr's comment in os_internal.h.
         const uint32_t runningThread = ::Memory::Read32(kOSRunningContextAddr);
         const uint32_t runningQueue =
             (runningThread != 0) ? ::Memory::Read32(runningThread + kThreadQueueOffset) : 0;

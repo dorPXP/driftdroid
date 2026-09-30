@@ -38,8 +38,8 @@ if (AURORA_ENABLE_GX)
     # block (inside initialize(), already gated `#if defined(WEBGPU_DAWN) && !defined(__MINGW32__)`)
     # touches dawn/native/DawnNative.h directly (for a Dawn-specific instance-descriptor tweak);
     # that block now also excludes __SWITCH__ (see the guard in gpu.cpp itself), so the file
-    # compiles for Switch unmodified otherwise - confirmed by re-including it here (see
-    # [[switch-port-effort]] memory, Phase 3b continuation). gpu_cache.cpp stays unconditional -
+    # compiles for Switch unmodified otherwise - confirmed by re-including it here.
+    # gpu_cache.cpp stays unconditional -
     # it's a generic SQLite blob cache with zero direct wgpu::/dawn:: dependency, reusable by any
     # backend including deko3d's future uam-shader cache.
     target_sources(aurora_core PRIVATE lib/webgpu/gpu_cache.cpp lib/webgpu/gpu.cpp)

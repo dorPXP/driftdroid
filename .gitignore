@@ -96,3 +96,7 @@ android/*/src/main/jniLibs/
 # not part of this project and must never be committed here.
 /kartpadrepo/
 
+
+# Local tooling (never commit)
+.claude/
+Launcher/kartpadrepo/

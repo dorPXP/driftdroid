@@ -54,7 +54,7 @@ void EnsureSda1Base(CpuContext* cpu, bool logOnce = false)
     cpu->gpr[13] = RuntimeConfig::SDA1_BASE;
 }
 
-// REVERTED (see hermes/11-WFC-CONNECT-SCHEDULER-STALL.md): tried splitting this into a
+// REVERTED: tried splitting this into a
 // host-only counter separate from kSchedulerIdleFlagAddr, on the theory that only
 // VI_HLE_IsAdvancingRetrace()'s renderer-ownership window actually needed to block a fiber
 // switch during our own VI/audio/alarm dispatch. On-device testing showed that's wrong: with

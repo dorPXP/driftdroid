@@ -1,6 +1,6 @@
 // Switch counterpart of lib/dawn/BackendBinding.cpp (excluded from this build): the surface is
 // always the single libnx default window. Dawn's EGL swapchain is patched to accept it through the
-// Android native-window surface source (see the Switch Dawn build notes in the hermes docs).
+// Android native-window surface source.
 #include "../dawn/BackendBinding.hpp"
 
 #include <memory>

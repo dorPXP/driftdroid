@@ -1,4 +1,4 @@
-// Hand-written core of the webgpu.h-on-deko3d shim (see [[switch-port-effort]] Phase 3b). Real,
+// Hand-written core of the webgpu.h-on-deko3d shim. Real,
 // deko3d-backed implementations of the webgpu.h C ABI go here, one at a time, each removed from
 // gen_webgpu_stubs.py's generated set (IMPLEMENTED_ELSEWHERE) as it lands. Everything not yet
 // implemented lives in webgpu_deko3d_stubs.generated.cpp instead.

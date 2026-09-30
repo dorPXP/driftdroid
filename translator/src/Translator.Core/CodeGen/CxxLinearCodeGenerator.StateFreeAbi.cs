@@ -480,8 +480,8 @@ public sealed partial class CxxLinearCodeGenerator
         // accepts direct-list-init (`T v{a,b}; return v;`) for vector_size types but rejects
         // copy-list-init (`return {a,b};`) with "cannot convert <brace-enclosed initializer
         // list>" - confirmed directly against devkitA64's GCC 16, one of the first Switch-port
-        // build errors hit in dozens of generated shard files (see [[switch-port-effort]]
-        // memory). Naming the type explicitly makes this direct-list-init instead, which both
+        // build errors hit in dozens of generated shard files.
+        // Naming the type explicitly makes this direct-list-init instead, which both
         // compilers accept identically - Clang's ext_vector_type never had this restriction, so
         // this is a no-op behavior change there.
         return values.Count switch

@@ -18,7 +18,7 @@
 #if defined(_WIN32) || defined(__SWITCH__)
 // Switch (devkitA64/libnx): Horizon OS has no sigaction()/POSIX signal delivery at all (see
 // main.cpp's InstallPosixMemoryFaultHandler - not compiled/called on this target, deferred to
-// Phase 6's libnx exception-hook plumbing per [[nifty-discovering-kahn]] plan). No POSIX signal
+// Phase 6's libnx exception-hook plumbing as planned). No POSIX signal
 // handler is ever installed here, so this jmp_buf is never actually longjmp'd into from signal
 // context - the signal-mask-preserving behavior sigsetjmp/siglongjmp exist for doesn't apply.
 // Plain jmp_buf just needs to compile; same treatment as Windows' SEH path for that reason.

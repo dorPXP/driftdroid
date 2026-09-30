@@ -31,8 +31,8 @@ endfunction()
 
 function(mkw_apply_translated_compile_options target)
     # -O2, NOT -O3 (2026-09-08): -O3 was tried twice to attack the confirmed CPU-bound bottleneck
-    # (the single emulation thread runs pegged at ~100% CPU during gameplay - see
-    # [[wiicompiled-performance-goal]] memory) and broke real gameplay correctness both times:
+    # (the single emulation thread runs pegged at ~100% CPU during gameplay)
+    # and broke real gameplay correctness both times:
     # first attempt (-O3 alone) caused idling-with-stick-input to slide the character unnaturally;
     # second attempt added -fno-strict-aliasing -fwrapv (the standard mitigation for exactly this
     # class of recompiler bug - CpuContext's guest register file is read/written through raw

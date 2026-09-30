@@ -498,7 +498,7 @@ void VI_HLE_ProcessRetracesDeferred(int maxToProcess) {
     // VI_HLE_IsAdvancingRetrace() is true - which it was, for that whole dispatch. Flush it now
     // that the dispatch has fully unwound, instead of leaving the woken thread "Ready" until the
     // 100ms stranded-sleeper safety net in ProcessSleepTimers force-resumes it - too slow for
-    // WFC's own bounded connect-retry budget. See hermes/11-WFC-CONNECT-SCHEDULER-STALL.md.
+    // WFC's own bounded connect-retry budget.
     OS_HLE_RunDeferredReschedule(cpu);
 }
 

@@ -6,8 +6,8 @@
  
 +elseif(CMAKE_SYSTEM_NAME STREQUAL "NintendoSwitch")
 +  # Nintendo Switch homebrew, via devkitA64/libnx. No official SDL upstream backend exists for
-+  # this target (unlike Vita/PSP/PS2/N3DS/NGAGE above, which SDL mainline does support) - see
-+  # DriftDroid's [[nifty-discovering-kahn]] plan Phase 3b/3c. Unlike those bare-metal targets,
++  # this target (unlike Vita/PSP/PS2/N3DS/NGAGE above, which SDL mainline does support) -
++  # see DriftDroid's Switch port notes. Unlike those bare-metal targets,
 +  # devkitA64 ships a real, usable pthreads implementation over libnx's own thread primitives
 +  # (confirmed: real pthread_create/pthread_mutex*/pthread_cond* all present, not stubs), and a
 +  # reasonably POSIX-complete newlib (clock_gettime, nanosleep present) - so unlike N3DS/PSP/Vita,
@@ -65,7 +65,7 @@
 + * A preprocessor macro that is only defined if compiling for Nintendo
 + * Switch homebrew (devkitA64/libnx). Not an upstream SDL platform - added
 + * locally, see aurora-main/cmake/patches/sdl3-nintendo-switch-platform.patch
-+ * and DriftDroid's [[nifty-discovering-kahn]] plan Phase 3b/3c.
++ * and DriftDroid's Switch port notes.
 + */
 +#define SDL_PLATFORM_SWITCH 1
 +#endif

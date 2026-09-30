@@ -33,7 +33,7 @@ namespace {
 // normally runs on genuine host threads - see network_deferred.cpp) gets a chance to finish
 // before the guest's retry budget runs out.
 //
-// TRIED AND REVERTED (see hermes/11-WFC-CONNECT-SCHEDULER-STALL.md): scoping a much larger
+// TRIED AND REVERTED: scoping a much larger
 // (~500ms) pump budget to the known DWC connect-poll queue looked promising, but on-device
 // logs proved the guest gives up right after its last permitted OSSleepThread call regardless
 // of how long that one call's pump runs - the real gap wasn't wall-clock time here at all, it
@@ -190,7 +190,7 @@ bool ProcessSleepTimers(CpuContext* cpu)
     // race) by resuming it once that shape persists for 100ms, sampled every 50ms so no strand is
     // missed.
     //
-    // TRIED TIGHTENING TO 10ms/5ms, THEN REVERTED (see hermes/11-WFC-CONNECT-SCHEDULER-STALL.md):
+    // TRIED TIGHTENING TO 10ms/5ms, THEN REVERTED:
     // looked promising for DWC's connect-poll (near-zero patience for a stranded wake), but
     // on-device logs later showed the guest still gave up right after a 10ms-healed resume just
     // as it did before - the reconciler's own latency was never the deciding factor, so shrinking
@@ -300,7 +300,7 @@ extern "C" void OS__SleepTicks_HLE_801aaca8(CpuContext* ctx)
     // above actually happened, so the guest's bounded connect-retry loop spans real wall-clock
     // time comparable to real hardware instead of completing in single-digit milliseconds.
     //
-    // SCOPED FURTHER (see hermes/11-WFC-CONNECT-SCHEDULER-STALL.md): this same retry idiom is
+    // SCOPED FURTHER: this same retry idiom is
     // reused for every earlier DNS lookup DWC does before it ever reaches the actual WFC connect
     // (gpcm/gpsp/gamestats/natneg/etc.) - on-device logs showed ~100 of these padded calls firing
     // before SO_CONNECT was even issued, burning ~6.7 of DWC's real ~7-8s total login patience on
@@ -386,8 +386,7 @@ extern "C" void OS__SleepTicks_HLE_801aaca8(CpuContext* ctx)
             }
             // A caller that asks to sleep N ticks and gets back instantly (because the fiber
             // switch above could not happen) sees an elapsed time of ~0 instead of ~N - for a
-            // "wait, then check if the network op finished" retry loop (see
-            // hermes/11-WFC-CONNECT-SCHEDULER-STALL.md) that burns through its whole retry
+            // "wait, then check if the network op finished" retry loop that burns through its whole retry
             // budget in a single guest-visible instant. Honor the requested duration for real by
             // busy-waiting it out here, pumping the same host/idle work SelectThread's own idle
             // loop pumps so completions keep flowing.
@@ -429,7 +428,7 @@ namespace {
 // relinks into the wait queue a second time and OSWakeupThread livelocks. The SDK guarantees this;
 // deferred guest-callback batches (VI retrace, alarms) can raise the count and violate it.
 //
-// TRIED AND REVERTED (see hermes/11-WFC-CONNECT-SCHEDULER-STALL.md): splitting our own VI/audio/
+// TRIED AND REVERTED: splitting our own VI/audio/
 // alarm dispatch bookkeeping out of kSchedulerIdleFlagAddr and gating only on
 // VI_HLE_IsAdvancingRetrace() here looked right (it's what breaks Retro WFC's login, error
 // 20912) but on-device testing showed the blanket refusal is protecting more than VI's
@@ -581,8 +580,7 @@ extern "C" void OSSleepThread_HLE_801aa9b8(CpuContext* ctx)
             ::Memory::Read32(currentThread + kThreadQueueOffset) == queuePtr) {
             // DWC's connect poll (func_8020FE24) treats this sleep as a real "wait one frame"
             // and aborts the whole login the moment it comes back unsatisfied - it has no retry
-            // budget to spend, which is what surfaces as Retro WFC error 20912 (see
-            // hermes/11-WFC-CONNECT-SCHEDULER-STALL.md). SelectThread could not switch away, so
+            // budget to spend, which is what surfaces as Retro WFC error 20912. SelectThread could not switch away, so
             // nothing else will advance the frame on our behalf; run the same work its own idle
             // loop runs, inline, until the guest's retrace/alarm handling wakes this thread off
             // the queue. Scoped to that one queue: every other unparkable sleep keeps the

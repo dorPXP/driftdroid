@@ -99,7 +99,7 @@ class MainActivity : SDLActivity() {
         // (some function that should differ per profile - most likely the race-countdown input
         // gate - still being resolved wrong for "base" specifically) has NOT been root-caused yet;
         // this split is the real fix for now, not a temporary diagnostic, until someone does that
-        // deeper dispatch-table archaeology. See [[wiicompiled-combined-lib-effort]] memory.
+        // deeper dispatch-table archaeology.
         if (resolvedProduct == PRODUCT_BASE) {
             return arrayOf("wii", "png16", "WiiCompiled")
         }

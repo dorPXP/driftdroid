@@ -49,7 +49,7 @@ constexpr uint32_t kSchedulerIdleFlagAddr = 0x80386918u;
 constexpr uint32_t kAlarmQueueOffsetFromR13 = 0x6360u;
 
 // The wait queue func_8020FE24 (DWC's per-frame connect-retry poll, called from inside a VI
-// retrace callback) blocks on - see hermes/11-WFC-CONNECT-SCHEDULER-STALL.md. On-device logs
+// retrace callback) blocks on. On-device logs
 // proved this specific park is refused exactly ONCE and the guest gives up immediately with no
 // further retry, so SchedulerCanSwitchAway (os_sleep.cpp) and SelectThread (os_scheduler.cpp)
 // both carve out an exception for this one queue - letting the park actually happen - while
@@ -60,7 +60,7 @@ constexpr uint32_t kAlarmQueueOffsetFromR13 = 0x6360u;
 constexpr uint32_t kDwcConnectWaitQueueAddr = 0x804294A4u;
 
 // Guest link-register value on entry to OSSleepTicks for DWC's connect-poll's own short
-// (~0.5ms) per-attempt wait (see hermes/11-WFC-CONNECT-SCHEDULER-STALL.md). On real hardware
+// (~0.5ms) per-attempt wait. On real hardware
 // this idiom effectively costs close to a full render frame per attempt, because something
 // higher-priority is normally scheduled in between; that's what gives the guest's bounded
 // retry count enough real elapsed time (hundreds of ms) for the actual network connect to

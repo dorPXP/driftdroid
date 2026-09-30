@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """Builds libGameCombined.so for Android: WiiCompiled + RetroRewind in one shared library.
 
-Why this exists (see hermes/12-KARTPAD-COMPARISON-AND-SO-MERGE-DECISION.md for the full
-story, not committed - private dev notes): on Android the two products used to ship as
+Why this exists: on Android the two products used to ship as
 separate libWiiCompiled.so/libRetroRewind.so, each independently linking its own full copy
 of the shared runtime/aurora/SDL code. Live on-device profiling showed ~9% of all CPU
 cycles on the hot game-loop thread going to pure cross-.so call overhead (PLT stubs +

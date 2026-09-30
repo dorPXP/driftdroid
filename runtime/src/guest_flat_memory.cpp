@@ -31,10 +31,9 @@
 #include <windows.h>
 #elif defined(__SWITCH__)
 // Nintendo Switch homebrew (devkitA64/libnx): no mmap()/mprotect()/memfd_create() at all -
-// Horizon OS's user-mode memory API is svc*-call-based instead (see the [[switch-port-effort]]
-// memory and hermes/13-SWITCH-PORT-SESSION-1.md for the full investigation).
+// Horizon OS's user-mode memory API is svc*-call-based instead.
 //
-// Multi-view aliasing, hardware-verified 2026-09-14 (~/switch-procmem-test, 1/64/256 MiB):
+// Multi-view aliasing, hardware-verified 2026-09-14 (1/64/256 MiB):
 //   1. memalign() ordinary heap pages (state Normal), one guard page longer than what gets mapped
 //      (see kSwitchHeapTailSlack),
 //   2. svcMapProcessCodeMemory(self, hostView, heap, size) turns them into code memory at

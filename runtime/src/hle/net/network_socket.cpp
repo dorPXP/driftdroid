@@ -515,7 +515,7 @@ int32_t HandleIpTopIoctlv(uint32_t cmd, const std::vector<IoVector>& in, const s
         // short-circuits on nonBlock/forceNonBlock, IOS/Network/Socket.cpp:715-718);
         // waiting here anyway stalled the whole emulation thread on every empty read.
         //
-        // EXCEPTION (temporary, hermes/11-WFC-CONNECT-SCHEDULER-STALL.md): the NAS/payload
+        // EXCEPTION (temporary): the NAS/payload
         // socket (plain TCP, port 80) closes after exactly one failed nonblocking recv instead
         // of polling again next frame - on real hardware the reply has time to arrive because
         // each ioctl is a real IOS IPC round-trip; our in-process HLE calls recv() essentially

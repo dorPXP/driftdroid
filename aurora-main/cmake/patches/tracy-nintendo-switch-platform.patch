@@ -44,7 +44,7 @@
 +    // Nintendo Switch homebrew: no login/user-account concept getlogin_r() could report on, same
 +    // reasoning as the __ANDROID__ case just above (and devkitA64's newlib doesn't declare
 +    // getlogin_r() at all, matching how it's missing several other less-common POSIX calls this
-+    // porting effort has already hit - see [[switch-diagnostic-technique]] memory).
++    // porting effort has already hit).
 +    return "(?)";
  #else
      static char user[1024] = {};

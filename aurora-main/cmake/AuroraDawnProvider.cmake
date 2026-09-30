@@ -3,7 +3,7 @@ include_guard(GLOBAL)
 # Switch: Dawn is built separately for devkitA64 with only its OpenGL ES backend, which runs on
 # devkitPro's switch-mesa (EGL + GLES 3.x over nouveau). Source is google/dawn at the exact commit
 # the other platforms' prebuilt packages use, plus small Switch patches (platform detection, EGL
-# surface from nwindowGetDefault(), abseil newlib fixes) - see hermes/13-SWITCH-PORT-SESSION-1.md.
+# surface from nwindowGetDefault(), abseil newlib fixes).
 # This is the first-playable renderer; a deko3d backend (aurora-main/lib/deko3d/) replaces it
 # later for 60fps.
 if (CMAKE_SYSTEM_NAME STREQUAL "NintendoSwitch")

@@ -35,7 +35,7 @@ extern "C" void OS_HLE_EndDeferredGuestCallbacks();
 // VI_HLE_IsAdvancingRetrace() is true). Call this once a deferred-callback dispatch (VI retrace,
 // audio, alarms) has fully unwound, so a thread woken during that dispatch resumes promptly
 // instead of waiting on the 100ms stranded-sleeper safety net in os_sleep.cpp's
-// ProcessSleepTimers - see hermes/11-WFC-CONNECT-SCHEDULER-STALL.md.
+// ProcessSleepTimers.
 extern "C" void OS_HLE_RunDeferredReschedule(CpuContext* cpu);
 
 

@@ -135,8 +135,8 @@ elseif (_aurora_sdl3_provider STREQUAL "vendor")
     set(_aurora_sdl3_patch_command "")
     if (CMAKE_SYSTEM_NAME STREQUAL "NintendoSwitch")
       # SDL's release tarball has no Switch platform branch at all (see
-      # sdl3-nintendo-switch-platform.patch's own header comment for the full rationale and
-      # [[nifty-discovering-kahn]] plan Phase 3b/3c) - patched in here rather than forked/vendored
+      # sdl3-nintendo-switch-platform.patch's own header comment for the full rationale)
+      # - patched in here rather than forked/vendored
       # wholesale, so upgrading AURORA_SDL3_VERSION stays a one-line version bump for every other
       # platform and only needs re-verifying (or updating) this patch for Switch specifically.
       set(_aurora_sdl3_patch_command PATCH_COMMAND git apply --verbose
