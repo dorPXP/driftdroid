@@ -115,7 +115,12 @@ int g_displayMode = ParseDisplayModeConfig(RuntimeConfigFile::DisplayMode("borde
 bool g_skipUnreadyPipelines = RuntimeConfigFile::SkipUnreadyPipelines(true);
 bool g_disableCopyFilter = RuntimeConfigFile::DisableCopyFilter(true);
 bool g_constantMatrixIndexing = RuntimeConfigFile::ConstantMatrixIndexing(false);
+#if defined(__SWITCH__)
+// On by default on Switch: measured 18 -> 22 FPS in a 12-kart race at stock clock.
+bool g_threadedGx = RuntimeConfigFile::ThreadedGx(true);
+#else
 bool g_threadedGx = RuntimeConfigFile::ThreadedGx(false);
+#endif
 bool g_thermalAutoQuality = RuntimeConfigFile::ThermalAutoQuality(false);
 bool g_showFps = RuntimeConfigFile::ShowFps(true);
 bool g_showShaderCompilation = RuntimeConfigFile::ShowShaderCompilation(true);

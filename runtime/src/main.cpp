@@ -2415,6 +2415,13 @@ int RuntimeMain(int argc, char** argv) {
                 break;
             }
         }
+#if defined(__SWITCH__)
+        // deko3d is the Switch renderer. "auto" (what a freshly written Config.toml says) used to
+        // fall through to OpenGL ES here, which crashes at startup on a first-time install.
+        if (auroraConfig.desiredBackend == BACKEND_AUTO) {
+            auroraConfig.desiredBackend = BACKEND_DEKO3D;
+        }
+#endif
         const AuroraBackend requestedBackend = auroraConfig.desiredBackend;
         if (requestedBackend != BACKEND_OPENGLES) {
             // Only Dawn's Vulkan backend consults it; must precede the Vulkan instance.
