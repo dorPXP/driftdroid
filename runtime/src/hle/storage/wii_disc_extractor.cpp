@@ -6,10 +6,11 @@
 // implementation before being written). The Wii common key below is likewise long-public (leaked
 // in 2008) and is embedded the same way Dolphin's own public source does.
 //
-// Android-only: this backs the in-app SAF ROM picker (RomImportOverlay.kt), which is the only
-// caller. Desktop still goes through the separate Launcher/DolphinTool.exe pipeline, and this
-// file's use of raw POSIX pread() has no Windows equivalent anyway.
-#if defined(__ANDROID__)
+// Android and Switch only: this backs the Android SAF ROM picker (RomImportOverlay.kt) and the
+// Switch first-boot importer (switch_rom_import.cpp). Desktop still goes through the separate
+// Launcher/DolphinTool.exe pipeline, and this file's use of raw POSIX pread() has no Windows
+// equivalent anyway.
+#if defined(__ANDROID__) || defined(__SWITCH__)
 
 #include "hle/storage/wii_disc_extractor.h"
 
@@ -20,6 +21,7 @@
 #include <array>
 #include <atomic>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -79,11 +81,47 @@ public:
     virtual void ReadAt(uint64_t offset, void* buffer, size_t size) = 0;  // throws ExtractError
 };
 
+// Split images (FAT32 cannot hold a file over 4 GiB, so backup tools write "game.wbfs" +
+// "game.wbf1" + ...): when set, reads of the first part's fd continue across every part as one
+// logical file.
+struct SplitParts {
+    std::vector<int> fds;
+    std::vector<uint64_t> sizes;
+};
+SplitParts g_splitParts;
+
+// newlib on the Switch has no pread; the extractor reads each fd from one thread only, so a
+// seek + read is equivalent.
+ssize_t PlatformPread(int fd, void* buffer, size_t size, off_t offset) {
+#if defined(__SWITCH__)
+    if (lseek(fd, offset, SEEK_SET) < 0) {
+        return -1;
+    }
+    return read(fd, buffer, size);
+#else
+    return pread(fd, buffer, size, offset);
+#endif
+}
+
+ssize_t ReadLogical(int fd, void* buffer, size_t size, uint64_t offset) {
+    if (g_splitParts.fds.size() < 2 || fd != g_splitParts.fds[0]) {
+        return PlatformPread(fd, buffer, size, static_cast<off_t>(offset));
+    }
+    for (size_t i = 0; i < g_splitParts.fds.size(); ++i) {
+        if (offset < g_splitParts.sizes[i]) {
+            const size_t chunk = static_cast<size_t>(std::min<uint64_t>(size, g_splitParts.sizes[i] - offset));
+            return PlatformPread(g_splitParts.fds[i], buffer, chunk, static_cast<off_t>(offset));
+        }
+        offset -= g_splitParts.sizes[i];
+    }
+    return 0;
+}
+
 void PreadExact(int fd, uint64_t offset, void* buffer, size_t size, const char* what) {
     auto* out = static_cast<uint8_t*>(buffer);
     size_t done = 0;
     while (done < size) {
-        const ssize_t n = pread(fd, out + done, size - done, static_cast<off_t>(offset + done));
+        const ssize_t n = ReadLogical(fd, out + done, size - done, offset + done);
         if (n <= 0) {
             // Reports the actual file size next to the offset that failed - distinguishes a
             // genuinely truncated/corrupt file from a split WBFS (.wbfs + .wbf1, unsupported -
@@ -469,7 +507,8 @@ int WiiDiscExtractor_Extract(int sourceFd, const char* destDataFolder, char* err
         }
         {
             std::vector<uint8_t> bi2(0x2000);
-            reader.ReadAt(0x400, bi2.data(), bi2.size());
+            // bi2.bin follows the 0x440-byte boot.bin (the apploader then starts at 0x2440).
+            reader.ReadAt(0x440, bi2.data(), bi2.size());
             std::ofstream out(sysDir / "bi2.bin", std::ios::binary);
             out.write(reinterpret_cast<const char*>(bi2.data()), static_cast<std::streamsize>(bi2.size()));
         }
@@ -499,7 +538,28 @@ int WiiDiscExtractor_Extract(int sourceFd, const char* destDataFolder, char* err
     }
 }
 
+int WiiDiscExtractor_ExtractParts(const int* partFds, int partCount, const char* destDataFolder,
+                                  char* errorOut, int errorOutCapacity) {
+    g_splitParts = {};
+    if (partCount > 1) {
+        for (int i = 0; i < partCount; ++i) {
+            struct stat st{};
+            if (fstat(partFds[i], &st) != 0) {
+                if (errorOut && errorOutCapacity > 0) {
+                    std::snprintf(errorOut, static_cast<size_t>(errorOutCapacity), "Could not read part %d of the split image.", i + 1);
+                }
+                return -1;
+            }
+            g_splitParts.fds.push_back(partFds[i]);
+            g_splitParts.sizes.push_back(static_cast<uint64_t>(st.st_size));
+        }
+    }
+    const int result = WiiDiscExtractor_Extract(partFds[0], destDataFolder, errorOut, errorOutCapacity);
+    g_splitParts = {};
+    return result;
+}
+
 uint64_t WiiDiscExtractor_BytesDone() { return g_bytesDone.load(std::memory_order_relaxed); }
 uint64_t WiiDiscExtractor_BytesTotal() { return g_bytesTotal.load(std::memory_order_relaxed); }
 
-#endif  // __ANDROID__
+#endif  // __ANDROID__ || __SWITCH__

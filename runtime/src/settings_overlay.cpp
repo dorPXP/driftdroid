@@ -1008,6 +1008,9 @@ void AutoConfigureNewAndroidControllersIfPresent() {
                                << " on port " << targetPort;
     }
 }
+#endif  // __ANDROID__
+
+#if defined(__ANDROID__) || defined(__SWITCH__)
 // Touch-friendly replacement for DrawTopBar() below - a top menu bar with hover-opened dropdowns
 // is a desktop/mouse pattern that doesn't translate well to touch (small hit targets, no hover).
 // Reuses DrawGraphicsSettings()/DrawControllerSettings()/DrawAudioSettings() as-is for content -
@@ -1033,8 +1036,11 @@ bool DrawSidebarRow(const char* label, const char* trailing = ">") {
     return clicked;
 }
 
+static bool g_sidebarWasVisible = false;
+
 void DrawAndroidSidebar() {
     if (!g_topBarVisible) {
+        g_sidebarWasVisible = false;
         return;
     }
 
@@ -1045,6 +1051,11 @@ void DrawAndroidSidebar() {
     // for as long as the sidebar is open (TouchControlsOverlay.setSettingsOpen) rather than trying
     // to squeeze around them, since gameplay input is already blocked while it's up.
     const float sidebarWidth = io.DisplaySize.x * 0.42f;
+    // Controller navigation only moves inside the focused window: take focus when the panel opens.
+    if (!g_sidebarWasVisible) {
+        ImGui::SetNextWindowFocus();
+    }
+    g_sidebarWasVisible = true;
     ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x, 0.0f), ImGuiCond_Always, ImVec2(1.0f, 0.0f));
     ImGui::SetNextWindowSize(ImVec2(sidebarWidth, io.DisplaySize.y), ImGuiCond_Always);
     ImGui::SetNextWindowBgAlpha(0.94f);
@@ -1097,7 +1108,11 @@ void DrawAndroidSidebar() {
             savedConfirmationUntil = Clock::now() + std::chrono::seconds(2);
         }
         if (Clock::now() < savedConfirmationUntil) {
-            ImGui::TextColored(ImVec4(0.4f, 0.9f, 0.5f, 1.0f), "Settings saved.");
+            if (RuntimeConfigFile::LastSettingWriteSucceeded()) {
+                ImGui::TextColored(ImVec4(0.4f, 0.9f, 0.5f, 1.0f), "Settings saved.");
+            } else {
+                ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), "Could not save settings (see stderr.txt).");
+            }
         }
     } else {
         if (DrawSidebarRow("Back to Settings", "<")) {
@@ -1119,13 +1134,16 @@ void DrawAndroidSidebar() {
             // and crashed. No such surface exists yet on the launcher screen (ModePickerActivity),
             // so that's the only place it's safe - same reasoning as why Retro Rewind's own install
             // flow only ever runs from there too.
+#if defined(__ANDROID__)
             ImGui::TextWrapped(
                 "Manage texture packs from the launcher screen (before starting a race).");
+#endif
             break;
         case SidebarPage::Controller:
             DrawControllerSettings();
             ImGui::Separator();
             ImGui::Spacing();
+#if defined(__ANDROID__)
             if (ImGui::Button("Edit Touch Layout", ImVec2(-1.0f, 48.0f))) {
                 // Editing happens in Kotlin's TouchControlsOverlay, not this ImGui panel - close
                 // the sidebar first so it isn't sitting on top of (and eating touches meant for)
@@ -1139,6 +1157,7 @@ void DrawAndroidSidebar() {
                 SetTopBarVisible(false);
                 AndroidShowMotionSteeringDialog();
             }
+#endif
             break;
         case SidebarPage::Audio:
             DrawAudioSettings();
@@ -1210,6 +1229,45 @@ void DrawTopBar() {
     }
     ImGui::EndMainMenuBar();
 }
+
+#if defined(__SWITCH__)
+void ForwardGamepadToImGui(const SDL_Event& event) {
+    ImGuiIO& io = ImGui::GetIO();
+    io.BackendFlags |= ImGuiBackendFlags_HasGamepad;
+    if (event.type == SDL_EVENT_GAMEPAD_BUTTON_DOWN || event.type == SDL_EVENT_GAMEPAD_BUTTON_UP) {
+        ImGuiKey key = ImGuiKey_None;
+        switch (event.gbutton.button) {
+        case SDL_GAMEPAD_BUTTON_DPAD_UP: key = ImGuiKey_GamepadDpadUp; break;
+        case SDL_GAMEPAD_BUTTON_DPAD_DOWN: key = ImGuiKey_GamepadDpadDown; break;
+        case SDL_GAMEPAD_BUTTON_DPAD_LEFT: key = ImGuiKey_GamepadDpadLeft; break;
+        case SDL_GAMEPAD_BUTTON_DPAD_RIGHT: key = ImGuiKey_GamepadDpadRight; break;
+        case SDL_GAMEPAD_BUTTON_SOUTH: key = ImGuiKey_GamepadFaceDown; break;   // A: activate
+        case SDL_GAMEPAD_BUTTON_EAST: key = ImGuiKey_GamepadFaceRight; break;   // B: back
+        case SDL_GAMEPAD_BUTTON_WEST: key = ImGuiKey_GamepadFaceLeft; break;
+        case SDL_GAMEPAD_BUTTON_NORTH: key = ImGuiKey_GamepadFaceUp; break;
+        case SDL_GAMEPAD_BUTTON_LEFT_SHOULDER: key = ImGuiKey_GamepadL1; break;
+        case SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER: key = ImGuiKey_GamepadR1; break;
+        default: break;
+        }
+        if (key != ImGuiKey_None) {
+            io.AddKeyEvent(key, event.type == SDL_EVENT_GAMEPAD_BUTTON_DOWN);
+        }
+    } else if (event.type == SDL_EVENT_GAMEPAD_AXIS_MOTION &&
+               (event.gaxis.axis == SDL_GAMEPAD_AXIS_LEFTX || event.gaxis.axis == SDL_GAMEPAD_AXIS_LEFTY)) {
+        constexpr float kDeadZone = 8000.0f;
+        const float v = static_cast<float>(event.gaxis.value);
+        const float neg = v < -kDeadZone ? std::min(1.0f, (-v - kDeadZone) / (32767.0f - kDeadZone)) : 0.0f;
+        const float pos = v > kDeadZone ? std::min(1.0f, (v - kDeadZone) / (32767.0f - kDeadZone)) : 0.0f;
+        if (event.gaxis.axis == SDL_GAMEPAD_AXIS_LEFTX) {
+            io.AddKeyAnalogEvent(ImGuiKey_GamepadLStickLeft, neg > 0.0f, neg);
+            io.AddKeyAnalogEvent(ImGuiKey_GamepadLStickRight, pos > 0.0f, pos);
+        } else {
+            io.AddKeyAnalogEvent(ImGuiKey_GamepadLStickUp, neg > 0.0f, neg);
+            io.AddKeyAnalogEvent(ImGuiKey_GamepadLStickDown, pos > 0.0f, pos);
+        }
+    }
+}
+#endif
 
 bool IsToggleKey(const SDL_Event& event, SDL_Scancode code) {
     return event.type == SDL_EVENT_KEY_DOWN && !event.key.repeat && event.key.scancode == code;
@@ -1385,6 +1443,26 @@ void HandleEvents(const AuroraEvent* events) noexcept {
         if (IsToggleKey(ev->sdl, SDL_SCANCODE_F10)) {
             SetTopBarVisible(!g_topBarVisible);
         }
+        // Controller shortcut (the Switch has no F10): click both sticks together.
+        if (ev->sdl.type == SDL_EVENT_GAMEPAD_BUTTON_DOWN || ev->sdl.type == SDL_EVENT_GAMEPAD_BUTTON_UP) {
+            static bool leftStickHeld = false;
+            static bool rightStickHeld = false;
+            const bool down = ev->sdl.type == SDL_EVENT_GAMEPAD_BUTTON_DOWN;
+            const bool wasBoth = leftStickHeld && rightStickHeld;
+            if (ev->sdl.gbutton.button == SDL_GAMEPAD_BUTTON_LEFT_STICK) {
+                leftStickHeld = down;
+            } else if (ev->sdl.gbutton.button == SDL_GAMEPAD_BUTTON_RIGHT_STICK) {
+                rightStickHeld = down;
+            }
+            if (!wasBoth && leftStickHeld && rightStickHeld) {
+                SetTopBarVisible(!g_topBarVisible);
+            }
+        }
+#if defined(__SWITCH__)
+        // Drive the settings panel's controller navigation straight from the gamepad events: the
+        // Switch's virtual SDL gamepad is not guaranteed to be opened by ImGui's SDL backend.
+        ForwardGamepadToImGui(ev->sdl);
+#endif
         if (IsMouseActivity(ev->sdl)) {
             g_lastMouseActivity = Clock::now();
         }
@@ -1402,7 +1480,7 @@ void Draw() noexcept {
         DrawShaderCompilationStatus();
     }
     DrawFpsOverlay();
-#if defined(__ANDROID__)
+#if defined(__ANDROID__) || defined(__SWITCH__)
     DrawAndroidSidebar();
 #else
     DrawTopBar();

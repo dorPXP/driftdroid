@@ -1,3 +1,6 @@
+#if defined(__SWITCH__)
+#include "switch_launcher.h"
+#endif
 #include <algorithm>
 #include <atomic>
 #include <cctype>
@@ -2418,6 +2421,10 @@ int RuntimeMain(int argc, char** argv) {
             LoadAndroidCustomGpuDriver();
         }
 
+#if defined(__SWITCH__)
+        // Switch system fonts for the launcher and the settings panel (runs inside aurora_initialize).
+        auroraConfig.imGuiInitCallback = &SwitchLauncherInitFonts;
+#endif
         const AuroraInfo auroraInfo = aurora_initialize(0, nullptr, &auroraConfig);
 #if defined(ANDROID)
         // Defense-in-depth for a real device crash (GitHub issue #3, PowerVR B-Series GPU): Null
@@ -2455,6 +2462,17 @@ int RuntimeMain(int argc, char** argv) {
             RT_LOG(RT_TAG_RUNTIME) << "graphics backend: " << backendDisplayName(auroraInfo.backend)
                       << std::endl;
         }
+#if defined(__SWITCH__)
+        // First boot / install / browse: the launcher opens when the game data is missing or
+        // incomplete (or L is held at start) and returns once the player presses Play, or false
+        // if they quit. It uses aurora's frame loop, so it runs before the guest takes over.
+        if (!SwitchRunLauncher()) {
+            aurora_shutdown();
+            return 0;
+        }
+        // The launcher returns with the next aurora frame already begun (see its exit path).
+        g_auroraFrameActive.store(true, std::memory_order_release);
+#endif
         aurora_set_frame_worker_wait_callback(ServiceGuestTimingDuringAuroraFrameWait);
         GxGuestWrite::InstallAuroraHooks();
 #if defined(__SWITCH__)

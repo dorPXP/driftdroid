@@ -28,6 +28,11 @@ extern "C" {
 int WiiDiscExtractor_Extract(int sourceFd, const char* destDataFolder, char* errorOut,
                               int errorOutCapacity);
 
+// Same, for an image split into consecutive parts (FAT32's 4 GiB limit: "game.wbfs" + "game.wbf1"
+// ...), read as one file in the order given.
+int WiiDiscExtractor_ExtractParts(const int* partFds, int partCount, const char* destDataFolder,
+                                  char* errorOut, int errorOutCapacity);
+
 // Progress, safe to poll from another thread while WiiDiscExtractor_Extract runs on its own.
 // Both read as 0 before extraction starts. bytesTotal becomes nonzero once the source container
 // and partition have been parsed enough to know the real amount of file data to extract.

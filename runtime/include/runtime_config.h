@@ -541,16 +541,27 @@ inline const std::optional<std::string>& ControllerButton(size_t index) {
 
 // Update one TOML value without discarding comments, unrelated settings, or
 // user-specific paths. This is used by the in-game F10 settings bar.
+// Whether the most recent WriteSetting succeeded, so the settings panel can report it truthfully.
+inline bool& LastSettingWriteSucceeded() {
+    static bool ok = true;
+    return ok;
+}
+
 inline bool WriteSetting(std::string_view section, std::string_view key, std::string_view value) {
     const auto path = ResolveConfigPath();
-    std::ifstream input(path);
     std::vector<std::string> lines;
-    std::string line;
-    while (std::getline(input, line)) {
-        if (!line.empty() && line.back() == '\r') {
-            line.pop_back();
+    {
+        // The read handle must be closed before the file is reopened for writing below: the
+        // Switch's SD card filesystem refuses to open a file for writing while it is still open
+        // for reading, which made every settings change silently fail to save.
+        std::ifstream input(path);
+        std::string line;
+        while (std::getline(input, line)) {
+            if (!line.empty() && line.back() == '\r') {
+                line.pop_back();
+            }
+            lines.push_back(std::move(line));
         }
-        lines.push_back(std::move(line));
     }
 
     const std::string normalizedSection = Trim(section);
@@ -610,12 +621,19 @@ inline bool WriteSetting(std::string_view section, std::string_view key, std::st
     std::ofstream output(path, std::ios::trunc);
     if (!output) {
         std::cerr << "[runtime-config] Unable to write " << path.string() << std::endl;
+        LastSettingWriteSucceeded() = false;
         return false;
     }
     for (const auto& outputLine : lines) {
         output << outputLine << '\n';
     }
-    return static_cast<bool>(output);
+    output.flush();
+    const bool ok = static_cast<bool>(output);
+    if (!ok) {
+        std::cerr << "[runtime-config] Failed while writing " << path.string() << std::endl;
+    }
+    LastSettingWriteSucceeded() = ok;
+    return ok;
 }
 
 inline std::string FormatString(std::string_view value) {
@@ -942,6 +960,12 @@ inline std::filesystem::path ResolveRelativeToConfig(const std::string& value) {
 // The extracted DATA directory. Empty when nothing is configured.
 inline std::filesystem::path ResolvedDvdRoot() {
     const std::string configured = DvdRoot();
+#if defined(__SWITCH__)
+    // The first-boot importer (switch_rom_import.cpp) extracts the disc next to Config.toml.
+    if (configured.empty()) {
+        return ResolveRelativeToConfig("DATA");
+    }
+#endif
     return configured.empty() ? std::filesystem::path{} : ResolveRelativeToConfig(configured);
 }
 
