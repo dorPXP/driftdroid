@@ -1,4 +1,5 @@
 #if defined(__SWITCH__)
+#include "switch_bundled_files.h"
 #include "switch_launcher.h"
 #endif
 #include <algorithm>
@@ -2288,10 +2289,14 @@ int RuntimeMain(int argc, char** argv) {
     // hbmenu launch has nowhere to stream stdio to, so put both streams on the SD card before
     // anything else can print. Unbuffered, because a crash must not lose the lines that explain
     // it. An nxlink launch overrides these descriptors again later, which is intentional.
+    // First, before the log files below (this also creates the data folder they live in): put the
+    // files bundled in the NRO next to Config.toml if they are not there yet.
+    const std::string bundledFilesSummary = SwitchInstallBundledFiles();
     std::freopen("sdmc:/switch/WiiCompiled/log.txt", "w", stdout);
     std::freopen("sdmc:/switch/WiiCompiled/stderr.txt", "w", stderr);
     std::setvbuf(stdout, nullptr, _IONBF, 0);
     std::setvbuf(stderr, nullptr, _IONBF, 0);
+    std::fprintf(stderr, "[runtime] %s\n", bundledFilesSummary.c_str());
     // The guest runs on this thread, so every helper thread created from here on should prefer a
     // different core (see SwitchSpreadHelperThread).
     g_switchGuestCore.store(static_cast<int>(svcGetCurrentProcessorNumber()), std::memory_order_relaxed);
