@@ -1658,7 +1658,12 @@ wgpu::ShaderModule build_shader(const ShaderConfig& config) noexcept {
   }
   fragmentFn += "\n    prev = tev_overflow_vec4f(prev);";
 #if defined(__SWITCH__)
-  if (info.usedIndStages.any() && indirect_debug_view() != 0) {
+  if (indirect_debug_view() == 30) {
+    // A/B test: make every fragment shader read gl_FragCoord.xy (never-true condition, output
+    // unchanged) so the Maxwell shader program header requests position X/Y, not only W.
+    fragmentFn += "\n    if (in.pos.x < -1.0 && in.pos.y < -1.0) { prev = vec4f(1.0, 0.0, 1.0, 1.0); }";
+  }
+  if (info.usedIndStages.any() && indirect_debug_view() != 0 && indirect_debug_view() != 30) {
     const auto has = [&](std::string_view needle) {
       return fragmentFnPre.find(needle) != std::string::npos || fragmentFn.find(needle) != std::string::npos;
     };
@@ -1695,6 +1700,64 @@ wgpu::ShaderModule build_shader(const ShaderConfig& config) noexcept {
         debugColor = "vec4f(clamp(tex2_uv, vec2f(0.0), vec2f(1.0)), select(0.0, 1.0, in.tex2_uvw.z <= 0.0), 1.0)";
       }
       break;
+    case 20: { // striped multi-view, 24 px vertical stripes cycling through 8 values
+      const auto samp = [&](int i) -> std::string {
+        const auto name = fmt::format("var sampled{} ", i);
+        return has(name) ? fmt::format("vec4f(sampled{}.rgb, 1.0)", i) : std::string("vec4f(1.0, 0.0, 1.0, 1.0)");
+      };
+      const auto bindTest = [&](int i) -> std::string {
+        // Reads texture i at screen-space coordinates: shows whether the binding holds the right image,
+        // independent of every texture-coordinate computation.
+        return info.sampledTextures.test(i)
+                   ? fmt::format("vec4f(textureSampleLevel(tex{0}, tex{0}_samp, fract(in.pos.xy / 32.0), 0.0).rgb, 1.0)", i)
+                   : std::string("vec4f(1.0, 0.0, 1.0, 1.0)");
+      };
+      std::string indUv = "vec4f(1.0, 0.0, 1.0, 1.0)";
+      if (has("var ind1_uv ")) indUv = "vec4f(fract(ind1_uv), 0.0, 1.0)";
+      else if (has("var ind0_uv ")) indUv = "vec4f(fract(ind0_uv), 0.0, 1.0)";
+      fragmentFn += fmt::format(
+          "\n    var dbgv = prev;"
+          "\n    switch (u32(in.pos.x / 24.0) % 8u) {{"
+          "\n      case 1u: {{ dbgv = {0}; }}"
+          "\n      case 2u: {{ dbgv = {1}; }}"
+          "\n      case 3u: {{ dbgv = {2}; }}"
+          "\n      case 4u: {{ dbgv = {3}; }}"
+          "\n      case 5u: {{ dbgv = {4}; }}"
+          "\n      case 6u: {{ dbgv = {5}; }}"
+          "\n      case 7u: {{ dbgv = {6}; }}"
+          "\n      default: {{ }}"
+          "\n    }}",
+          samp(0), samp(1), samp(2), bindTest(0), bindTest(1), bindTest(2), indUv);
+      debugColor = "dbgv";
+      break;
+    }
+    case 21: { // striped texgen trace: each 24 px stripe shows one step of the texture-0 lookup
+      const auto pick = [&](std::string_view needle, std::string expr) -> std::string {
+        return has(needle) ? expr : std::string("vec4f(1.0, 0.0, 1.0, 1.0)");
+      };
+      const std::string s0 = pick("in.tex0_uvw", "vec4f(clamp(in.tex0_uvw.xy, vec2f(0.0), vec2f(1.0)), clamp(in.tex0_uvw.z * 0.5, 0.0, 1.0), 1.0)");
+      const std::string s1 = pick("var tex0_uv ", "vec4f(clamp(tex0_uv, vec2f(0.0), vec2f(1.0)), 0.0, 1.0)");
+      const std::string s2 = pick("tex0_fixed_uv", "vec4f(fract(vec2f(tex0_fixed_uv) / (ubuf.tex0_size_bias.xy * 128.0)), 0.0, 1.0)");
+      const std::string s3 = pick("ind1_offset_fixed", "vec4f(clamp(vec2f(ind1_offset_fixed) / (ubuf.tex0_size_bias.xy * 128.0) + 0.5, vec2f(0.0), vec2f(1.0)), 0.0, 1.0)");
+      const std::string s4 = pick("t_IndTexCoord0", "vec4f(vec3f(t_IndTexCoord0) / 255.0, 1.0)");
+      const std::string s5 = pick("var ind1_uv ", "vec4f(fract(ind1_uv), 0.0, 1.0)");
+      const std::string s6 = pick("var sampled1 ", "vec4f(sampled1.rgb, 1.0)");
+      fragmentFn += fmt::format(
+          "\n    var dbgv = prev;"
+          "\n    switch (u32(in.pos.x / 24.0) % 8u) {{"
+          "\n      case 1u: {{ dbgv = {0}; }}"
+          "\n      case 2u: {{ dbgv = {1}; }}"
+          "\n      case 3u: {{ dbgv = {2}; }}"
+          "\n      case 4u: {{ dbgv = {3}; }}"
+          "\n      case 5u: {{ dbgv = {4}; }}"
+          "\n      case 6u: {{ dbgv = {5}; }}"
+          "\n      case 7u: {{ dbgv = {6}; }}"
+          "\n      default: {{ }}"
+          "\n    }}",
+          s0, s1, s2, s3, s4, s5, s6);
+      debugColor = "dbgv";
+      break;
+    }
     default:
       break;
     }

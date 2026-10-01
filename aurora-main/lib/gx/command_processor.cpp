@@ -20,10 +20,75 @@
 #include <cstring>
 #include <mutex>
 #include <optional>
+#include <unordered_map>
 #include <vector>
 
+#if defined(__SWITCH__)
+namespace aurora::gx {
+extern uint64_t g_uniDiagConfigHash;
+extern std::vector<uint8_t> g_uniDiagLastUniform;
+bool uni_diag_enabled() noexcept;
+}
+#endif
 namespace aurora::gx::fifo {
 static Module Log("aurora::gx::fifo");
+
+#if defined(__SWITCH__)
+// uni_diag vertex capture (Cache/uni_diag.flag): for the first draws of each indirect-texturing
+// pipeline, write the draw's direct vertex bytes, every indexed array it reads and its uniform
+// block to Cache/vtx_diag_<config>_<n>.bin, so the whole draw (vertex shader included) can be
+// replayed offline with the data the Switch really used.
+static const u8* s_diagVertices = nullptr;
+static u32 s_diagVertexBytes = 0;
+
+static void vtx_diag_dump(uint64_t configHash, GXPrimitive prim, u16 vtxCount, const BindGroupRanges& ranges) {
+  if (!uni_diag_enabled() || s_diagVertices == nullptr || g_uniDiagLastUniform.empty()) {
+    return;
+  }
+  static std::unordered_map<uint64_t, int> dumps;
+  static int total = 0;
+  int& count = dumps[configHash];
+  if (count >= 4 || total >= 400) {
+    return;
+  }
+  char path[128];
+  std::snprintf(path, sizeof(path), "sdmc:/switch/WiiCompiled/Cache/vtx_diag_%016llx_%d.bin",
+                static_cast<unsigned long long>(configHash), count);
+  FILE* f = std::fopen(path, "wb");
+  if (f == nullptr) {
+    return;
+  }
+  ++count;
+  ++total;
+  const auto put32 = [&](u32 v) { std::fwrite(&v, 4, 1, f); };
+  std::fwrite("VTXD", 1, 4, f);
+  put32(1);
+  std::fwrite(&configHash, 8, 1, f);
+  put32(static_cast<u32>(prim));
+  put32(vtxCount);
+  put32(s_diagVertexBytes);
+  put32(static_cast<u32>(g_uniDiagLastUniform.size()));
+  for (int i = GX_VA_POS; i <= GX_VA_TEX7; ++i) {
+    const auto& array = g_gxState.arrays[i];
+    const bool indexed = g_gxState.vtxDesc[i] == GX_INDEX8 || g_gxState.vtxDesc[i] == GX_INDEX16;
+    put32(static_cast<u32>(g_gxState.vtxDesc[i]));
+    put32(array.stride);
+    put32(indexed && array.data != nullptr ? array.size : 0);
+    put32(ranges.vaRanges[i - GX_VA_POS].offset);
+    put32(array.le ? 1u : 0u);
+  }
+  std::fwrite(s_diagVertices, 1, s_diagVertexBytes, f);
+  std::fwrite(g_uniDiagLastUniform.data(), 1, g_uniDiagLastUniform.size(), f);
+  for (int i = GX_VA_POS; i <= GX_VA_TEX7; ++i) {
+    const auto& array = g_gxState.arrays[i];
+    const bool indexed = g_gxState.vtxDesc[i] == GX_INDEX8 || g_gxState.vtxDesc[i] == GX_INDEX16;
+    if (indexed && array.data != nullptr && array.size != 0) {
+      std::fwrite(array.data, 1, array.size, f);
+    }
+  }
+  std::fclose(f);
+}
+#endif
 
 using IndexBuffer = std::vector<u16>;
 
@@ -2037,7 +2102,28 @@ struct CachedPipelineState {
   // Carried here so the draw can be recorded without keeping the PipelineConfig that produced it alive; it is the only field of the config the draw itself still needs.
   u32 dstAlpha = UINT32_MAX;
   ShaderInfo shaderInfo{};
+  // Debug A/B (Switch): true for the alpha-only shadow-volume passes when
+  // sdmc:/switch/WiiCompiled/Cache/skip_shadow_volumes.flag exists; such draws are dropped.
+  bool debugSkip = false;
 };
+
+static bool debug_skip_shadow_volume(const PipelineConfig& c) noexcept {
+#if defined(__SWITCH__)
+  static const bool enabled = [] {
+    if (FILE* f = std::fopen("sdmc:/switch/WiiCompiled/Cache/skip_shadow_volumes.flag", "r")) {
+      std::fclose(f);
+      return true;
+    }
+    return false;
+  }();
+  return enabled && c.depthCompare && c.depthFunc == GX_GEQUAL && !c.colorUpdate && c.alphaUpdate &&
+         (c.blendMode == GX_BM_SUBTRACT ||
+          (c.blendMode == GX_BM_BLEND && c.blendFacSrc == GX_BL_ONE && c.blendFacDst == GX_BL_ONE));
+#else
+  (void)c;
+  return false;
+#endif
+}
 
 static const CachedPipelineState& cached_pipeline_state(const PipelineConfig& config) {
   constexpr size_t CacheSize = 1024;
@@ -2062,6 +2148,7 @@ static const CachedPipelineState& cached_pipeline_state(const PipelineConfig& co
       .configHash = hash,
       .dstAlpha = config.dstAlpha,
       .shaderInfo = build_shader_info(config.shaderConfig),
+      .debugSkip = debug_skip_shadow_volume(config),
   };
   return entry.state;
 }
@@ -2137,6 +2224,10 @@ bool submit_raw_draw(GXPrimitive prim, GXVtxFmt fmt, const uint8_t* vertices, ui
   const PnMtxUsage matrixUsage = interpolationIdentityActive
                                      ? pn_mtx_usage(vertices, vtxCount, vtxSize)
                                      : PnMtxUsage{};
+#if defined(__SWITCH__)
+  s_diagVertices = vertices;
+  s_diagVertexBytes = vertexBytes;
+#endif
   handle_draw_unmerged(prim, fmt, vtxCount, vertRange,
                        matrixUsage.mask, matrixUsage.topologySignature,
                        interpolationIdentityActive ? draw_geometry_signature(fmt, vertices, vtxCount, vtxSize) : 0,
@@ -2234,6 +2325,10 @@ static bool handle_draw(u8 cmd, const u8* data, u32& pos, u32 size, bool bigEndi
   const PnMtxUsage matrixUsage = interpolationIdentityActive
                                      ? pn_mtx_usage(vertices, vtxCount, vtxSize)
                                      : PnMtxUsage{};
+#if defined(__SWITCH__)
+  s_diagVertices = vertices;
+  s_diagVertexBytes = totalVtxBytes;
+#endif
   handle_draw_unmerged(prim, fmt, vtxCount, vertRange,
                        matrixUsage.mask, matrixUsage.topologySignature,
                        interpolationIdentityActive ? draw_geometry_signature(fmt, vertices, vtxCount, vtxSize) : 0,
@@ -2275,6 +2370,9 @@ static void handle_draw_unmerged(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount,
   }
 
   const auto& pipelineState = resolve_pipeline_state(prim, fmt);
+  if (pipelineState.debugSkip) UNLIKELY {
+    return;
+  }
   const auto& info = pipelineState.shaderInfo;
 
   resolve_sampled_textures(info);
@@ -2301,9 +2399,16 @@ static void handle_draw_unmerged(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount,
         .matrixTopology = matrixTopologySignature,
     };
   }
+#if defined(__SWITCH__)
+  aurora::gx::g_uniDiagConfigHash = pipelineState.configHash;
+#endif
   const auto uniformRanges =
       build_uniform(info, vertRange.offset, ranges, drawIdentity, interpolationIdentityActive,
                     usedPnMtxMask);
+#if defined(__SWITCH__)
+  vtx_diag_dump(pipelineState.configHash, prim, vtxCount, ranges);
+  g_uniDiagLastUniform.clear();
+#endif
   s_lastDrawRecordedInterpolation = interpolationIdentityActive;
 
   uint32_t instanceCount = 1;

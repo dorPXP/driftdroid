@@ -569,6 +569,86 @@ static Mat4x4<float> effective_projection() noexcept {
 }
 } // namespace
 
+#if defined(__SWITCH__)
+// Diagnostic (off unless sdmc:/switch/WiiCompiled/Cache/uni_diag.flag exists): for draws that use
+// indirect texturing, log the exact uniform block and dump the raw guest texture data, so a draw
+// can be replayed offline against a reference renderer. Only changed uniforms are logged.
+uint64_t g_uniDiagConfigHash = 0;
+// The uniform block of the draw being built, for the vertex capture in command_processor.cpp.
+std::vector<uint8_t> g_uniDiagLastUniform;
+bool uni_diag_enabled() noexcept {
+  static const bool enabled = [] {
+    if (FILE* f = std::fopen("sdmc:/switch/WiiCompiled/Cache/uni_diag.flag", "r")) {
+      std::fclose(f);
+      return true;
+    }
+    return false;
+  }();
+  return enabled;
+}
+static void uni_diag_log(const ShaderInfo& info, const uint8_t* data, size_t size) noexcept {
+  if (!uni_diag_enabled() || !info.usedIndStages.any()) {
+    return;
+  }
+  g_uniDiagLastUniform.assign(data, data + size);
+  static FILE* out = std::fopen("sdmc:/switch/WiiCompiled/Cache/uni_diag.txt", "w");
+  static std::unordered_map<uint64_t, std::pair<uint64_t, int>> lastByConfig; // hash -> (content hash, count)
+  static std::unordered_map<const void*, bool> dumpedTex;
+  static int total = 0;
+  static uint64_t drawSeq = 0;
+  ++drawSeq;
+  if (out == nullptr || total >= 6000) {
+    return;
+  }
+  uint64_t h = 1469598103934665603ull;
+  for (size_t i = 0; i < size; ++i) {
+    h = (h ^ data[i]) * 1099511628211ull;
+  }
+  auto& last = lastByConfig[g_uniDiagConfigHash];
+  if (last.second > 0 && last.first == h) {
+    return;
+  }
+  if (last.second >= 40) {
+    return;
+  }
+  last.first = h;
+  ++last.second;
+  ++total;
+  std::fprintf(out, "U cfg=%016llx seq=%llu size=%zu hex=", static_cast<unsigned long long>(g_uniDiagConfigHash),
+               static_cast<unsigned long long>(drawSeq), size);
+  for (size_t i = 0; i < size; ++i) {
+    std::fprintf(out, "%02x", data[i]);
+  }
+  std::fputc('\n', out);
+  for (int i = 0; i < MaxTextures; ++i) {
+    if (!info.sampledTextures.test(i) && !info.sampledIndTextures.test(i)) {
+      continue;
+    }
+    const auto& tex = get_texture(static_cast<GXTexMapID>(i));
+    if (!tex) {
+      std::fprintf(out, "T map%d unbound\n", i);
+      continue;
+    }
+    const auto& o = tex.texObj;
+    const u32 w = o.width(), hgt = o.height(), fmt = o.format();
+    std::fprintf(out, "T map%d w=%u h=%u fmt=%u wrap=%u,%u filt=%u,%u mips=%u data=%p ver=%u lodbias=%u\n", i, w, hgt, fmt,
+                 unsigned(o.wrap_s()), unsigned(o.wrap_t()), unsigned(o.min_filter()), unsigned(o.mag_filter()),
+                 unsigned(o.has_mips()), o.data, o.texDataVersion, unsigned(o.mode0 >> 9));
+    if (o.data != nullptr && !dumpedTex[o.data]) {
+      dumpedTex[o.data] = true;
+      char path[160];
+      std::snprintf(path, sizeof(path), "sdmc:/switch/WiiCompiled/Cache/uni_diag_%p_%ux%u_f%u.bin", o.data, w, hgt, fmt);
+      if (FILE* tf = std::fopen(path, "wb")) {
+        const size_t bytes = size_t((w + 7) & ~7u) * size_t((hgt + 7) & ~7u) * 4;
+        std::fwrite(o.data, 1, bytes, tf);
+        std::fclose(tf);
+      }
+    }
+  }
+  std::fflush(out);
+}
+#endif
+
 UniformRanges build_uniform(const ShaderInfo& info, u32 vtxStart, const BindGroupRanges& ranges,
                             const FrameInterpolationDrawIdentity& drawIdentity, bool perspective,
                             uint16_t usedPnMtxMask) noexcept {
@@ -715,6 +795,9 @@ UniformRanges build_uniform(const ShaderInfo& info, u32 vtxStart, const BindGrou
     buf.append(texture_size_bias(tex));
   }
 
+#if defined(__SWITCH__)
+  uni_diag_log(info, buf.data(), buf.size());
+#endif
   if (!perspective || frame_interpolation_fps() == 0) {
     g_gxState.stateDirty = false;
     return {
