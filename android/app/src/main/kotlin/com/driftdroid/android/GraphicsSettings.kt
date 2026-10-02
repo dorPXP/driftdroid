@@ -78,6 +78,7 @@ object GraphicsSettings {
             .setTitle("Graphics")
             .setSingleChoiceItems(labels, selected) { _, which -> selected = which }
             .setNegativeButton("Cancel", null)
+            .setNeutralButton("GPU driver...") { _, _ -> GpuDriverSettings.show(activity) }
             .setPositiveButton("Save") { _, _ ->
                 write(activity, options[selected].value)
             }

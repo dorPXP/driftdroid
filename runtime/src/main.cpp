@@ -63,6 +63,9 @@
 
 #include "abi_bridge.h"
 #include "android_gpu_driver.h"
+#if defined(__ANDROID__) && defined(MKW_PGO_GENERATE)
+void StartAndroidPgoRecording();
+#endif
 #include "guest_flat_memory.h"
 #include "gx_guest_write.h"
 #include "hle/audio/ax_dsp.h"
@@ -2432,6 +2435,9 @@ int RuntimeMain(int argc, char** argv) {
             // Only Dawn's Vulkan backend consults it; must precede the Vulkan instance.
             LoadAndroidCustomGpuDriver();
         }
+#if defined(__ANDROID__) && defined(MKW_PGO_GENERATE)
+        StartAndroidPgoRecording();
+#endif
 
 #if defined(__SWITCH__)
         // Switch system fonts for the launcher and the settings panel (runs inside aurora_initialize).
@@ -2465,6 +2471,8 @@ int RuntimeMain(int argc, char** argv) {
                       << "\" is not available on this system; aurora fell back to \""
                       << backendDisplayName(auroraInfo.backend)
                       << "\". See the [aurora::gpu] lines above for the reason." << std::endl;
+            settings_overlay::NotifyBackendFallback(backendDisplayName(requestedBackend),
+                                                    backendDisplayName(auroraInfo.backend));
         } else {
 #if defined(__SWITCH__)
             // Started here rather than at the top of RuntimeMain: sampling before the runtime is
@@ -2473,6 +2481,12 @@ int RuntimeMain(int argc, char** argv) {
 #endif
             RT_LOG(RT_TAG_RUNTIME) << "graphics backend: " << backendDisplayName(auroraInfo.backend)
                       << std::endl;
+#if defined(__ANDROID__)
+            // Automatic tries Vulkan first; ending up on OpenGL ES means Vulkan failed to start.
+            if (requestedBackend == BACKEND_AUTO && auroraInfo.backend == BACKEND_OPENGLES) {
+                settings_overlay::NotifyBackendFallback("vulkan", "opengles");
+            }
+#endif
         }
 #if defined(__SWITCH__)
         // First boot / install / browse: the launcher opens when the game data is missing or

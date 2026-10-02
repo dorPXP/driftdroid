@@ -9,8 +9,10 @@
 #include "thermal_quality.h"
 #include "runtime_config.h"
 #include "runtime_log.h"
+#include "runtime_product.h"
 
 #include <imgui.h>
+#include <imgui_internal.h>
 #include <SDL3/SDL_events.h>
 #include <SDL3/SDL_gamepad.h>
 #include <SDL3/SDL_keyboard.h>
@@ -115,6 +117,36 @@ int g_displayMode = ParseDisplayModeConfig(RuntimeConfigFile::DisplayMode("borde
 bool g_skipUnreadyPipelines = RuntimeConfigFile::SkipUnreadyPipelines(true);
 bool g_disableCopyFilter = RuntimeConfigFile::DisableCopyFilter(true);
 bool g_constantMatrixIndexing = RuntimeConfigFile::ConstantMatrixIndexing(false);
+
+// video.vertex_repack: the Adreno 8xx "vertex explosion" workaround. Fixed for the process once
+// rendering starts, so the settings entry only takes effect on the next launch.
+constexpr std::array<const char*, 4> kVertexRepackConfigValues{"auto", "off", "characters", "all"};
+int ParseVertexRepackConfig(const std::string& value) {
+    for (size_t i = 0; i < kVertexRepackConfigValues.size(); ++i) {
+        if (value == kVertexRepackConfigValues[i]) {
+            return static_cast<int>(i);
+        }
+    }
+    return 0;
+}
+int g_vertexRepackChoice = ParseVertexRepackConfig(RuntimeConfigFile::VertexRepack("auto"));
+
+AuroraVertexRepackMode VertexRepackModeForChoice(int choice) {
+    switch (choice) {
+    case 1:
+        return AURORA_VERTEX_REPACK_OFF;
+    case 2:
+        return AURORA_VERTEX_REPACK_CHARACTERS;
+    case 3:
+        return AURORA_VERTEX_REPACK_ALL;
+    default:
+        // Repacking every draw is what fixes tracks and menus too and is confirmed good in the
+        // original game. In Retro Rewind it made other karts and item boxes vanish for one
+        // Adreno 840 tester, so automatic stays with the character-only form there.
+        return RuntimeProduct::IsRetroRewind() ? AURORA_VERTEX_REPACK_AUTO_CHARACTERS
+                                               : AURORA_VERTEX_REPACK_AUTO_ALL;
+    }
+}
 #if defined(__SWITCH__)
 // On by default on Switch: measured 18 -> 22 FPS in a 12-kart race at stock clock.
 bool g_threadedGx = RuntimeConfigFile::ThreadedGx(true);
@@ -225,8 +257,10 @@ std::atomic_bool g_strapInputAccepted = false;
 std::atomic_uint64_t g_startupDismissFrame = UINT64_MAX;
 constexpr uint64_t kStrapTransitionCoverFrames = 60;
 
-constexpr std::array<ResolutionItem, 10> kResolutions = {{
-    {"Auto (window size)", 0.0f}, {"0.5x (low power)", 0.5f}, {"0.75x", 0.75f},
+// Nothing below 1x: the renderer cannot draw smaller than the game's own framebuffer, and the
+// old 0.5x/0.75x entries crashed on the way into a race.
+constexpr std::array<ResolutionItem, 8> kResolutions = {{
+    {"Auto (window size)", 0.0f},
     {"Native (1x)", 1.0f}, {"1.5x", 1.5f}, {"2x", 2.0f},
     {"3x", 3.0f}, {"4x", 4.0f}, {"6x", 6.0f}, {"8x", 8.0f},
 }};
@@ -778,6 +812,15 @@ void DrawGraphicsSettings() {
         AuroraSetConstantMatrixIndexing(g_constantMatrixIndexing);
         RuntimeConfigFile::SetConstantMatrixIndexing(g_constantMatrixIndexing);
     }
+    {
+        static constexpr std::array<const char*, 4> labels{
+            "Automatic", "Off", "Characters only", "Everything (slower)"};
+        if (ImGui::Combo("Fix stretched graphics (Snapdragon)", &g_vertexRepackChoice, labels.data(),
+                         static_cast<int>(labels.size()))) {
+            RuntimeConfigFile::SetVertexRepack(kVertexRepackConfigValues[static_cast<size_t>(g_vertexRepackChoice)]);
+        }
+        ImGui::TextDisabled("Takes effect the next time the game starts.");
+    }
 #endif
     if (ImGui::Checkbox("Skip draws while shaders compile", &g_skipUnreadyPipelines)) {
         aurora_set_skip_unready_pipelines(g_skipUnreadyPipelines);
@@ -873,6 +916,40 @@ void DrawShaderCompilationStatus() {
     }
     ImGui::End();
     ImGui::PopStyleVar();
+}
+
+std::string g_backendFallbackNotice;
+Clock::time_point g_backendFallbackNoticeUntil{};
+bool g_backendFallbackNoticeStarted = false;
+
+void DrawBackendFallbackNotice() {
+    if (g_backendFallbackNotice.empty() || StartupScreenVisible()) {
+        return;
+    }
+    // The clock starts with the first frame the player can actually see.
+    if (!g_backendFallbackNoticeStarted) {
+        g_backendFallbackNoticeStarted = true;
+        g_backendFallbackNoticeUntil = Clock::now() + std::chrono::seconds(12);
+    }
+    if (Clock::now() >= g_backendFallbackNoticeUntil) {
+        g_backendFallbackNotice.clear();
+        return;
+    }
+    const ImGuiViewport* viewport = ImGui::GetMainViewport();
+    ImGui::SetNextWindowPos(ImVec2(viewport->Pos.x + viewport->Size.x * 0.5f, viewport->Pos.y + 24.0f),
+                            ImGuiCond_Always, ImVec2(0.5f, 0.0f));
+    ImGui::SetNextWindowBgAlpha(0.8f);
+    constexpr ImGuiWindowFlags kFlags = ImGuiWindowFlags_AlwaysAutoResize |
+                                        ImGuiWindowFlags_NoDecoration |
+                                        ImGuiWindowFlags_NoFocusOnAppearing |
+                                        ImGuiWindowFlags_NoInputs |
+                                        ImGuiWindowFlags_NoMove |
+                                        ImGuiWindowFlags_NoNav |
+                                        ImGuiWindowFlags_NoSavedSettings;
+    if (ImGui::Begin("Backend Fallback Notice", nullptr, kFlags)) {
+        ImGui::TextUnformatted(g_backendFallbackNotice.c_str());
+    }
+    ImGui::End();
 }
 
 void DrawStartupScreen() {
@@ -1043,6 +1120,53 @@ bool DrawSidebarRow(const char* label, const char* trailing = ">") {
 
 static bool g_sidebarWasVisible = false;
 
+// Lets a finger drag the current (child) window's content up and down from anywhere on it, the
+// way every phone list scrolls. ImGui on its own only scrolls from the thin scrollbar, since a
+// touch arrives as a left mouse button. A drag that is mostly vertical takes over: whatever
+// widget the finger landed on is released without activating, and the content follows the
+// finger, then coasts to a stop after it lifts. Call just before EndChild().
+void ScrollCurrentWindowByTouchDrag() {
+    static bool dragging = false;
+    static bool pressBeganHere = false;
+    static float velocity = 0.0f;
+    ImGuiIO& io = ImGui::GetIO();
+    const bool hovered = ImGui::IsWindowHovered(ImGuiHoveredFlags_ChildWindows |
+                                                ImGuiHoveredFlags_AllowWhenBlockedByActiveItem);
+    if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+        pressBeganHere = hovered;
+        velocity = 0.0f;
+    }
+    if (!ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+        dragging = false;
+        pressBeganHere = false;
+        // Coast after the finger lifts.
+        if (std::fabs(velocity) > 0.5f) {
+            ImGui::SetScrollY(ImGui::GetScrollY() - velocity);
+            velocity *= 0.92f;
+        } else {
+            velocity = 0.0f;
+        }
+        return;
+    }
+    if (!pressBeganHere) {
+        return;
+    }
+    if (!dragging) {
+        const ImVec2 delta = ImGui::GetMouseDragDelta(ImGuiMouseButton_Left, 0.0f);
+        const float threshold = 12.0f * std::max(1.0f, io.FontGlobalScale);
+        if (std::fabs(delta.y) > threshold && std::fabs(delta.y) > std::fabs(delta.x) * 1.5f) {
+            dragging = true;
+            ImGui::ClearActiveID();
+        }
+    }
+    if (dragging) {
+        ImGui::SetScrollY(ImGui::GetScrollY() - io.MouseDelta.y);
+        velocity = velocity * 0.5f + io.MouseDelta.y * 0.5f;
+        // Keep widgets from reacting to the finger while it is scrolling.
+        ImGui::ClearActiveID();
+    }
+}
+
 void DrawAndroidSidebar() {
     if (!g_topBarVisible) {
         g_sidebarWasVisible = false;
@@ -1171,6 +1295,7 @@ void DrawAndroidSidebar() {
             break;
         }
     }
+    ScrollCurrentWindowByTouchDrag();
     ImGui::EndChild();
 
     ImGui::End();
@@ -1341,6 +1466,9 @@ void InitializeRuntimeSettings() noexcept {
     // actually being read back, on any launch). SetAndroidFilesDir() has definitely run by the
     // time SDL_main calls this function, so re-read everything from the real config now.
     g_resolutionScale = RuntimeConfigFile::ResolutionMultiplier(1.0f);
+    if (g_resolutionScale > 0.0f && g_resolutionScale < 1.0f) {
+        g_resolutionScale = 1.0f;
+    }
     g_audioVolumePercent = static_cast<int>(std::lround(RuntimeConfigFile::AudioVolume(1.0f) * 100.0f));
     g_musicVolumePercent = static_cast<int>(std::lround(RuntimeConfigFile::MusicVolume(1.0f) * 100.0f));
     g_soundEffectsVolumePercent =
@@ -1364,6 +1492,7 @@ void InitializeRuntimeSettings() noexcept {
     g_skipUnreadyPipelines = RuntimeConfigFile::SkipUnreadyPipelines(true);
     g_disableCopyFilter = RuntimeConfigFile::DisableCopyFilter(true);
     g_constantMatrixIndexing = RuntimeConfigFile::ConstantMatrixIndexing(false);
+    g_vertexRepackChoice = ParseVertexRepackConfig(RuntimeConfigFile::VertexRepack("auto"));
 #if defined(__SWITCH__)
     // An Adreno driver workaround with no purpose on the Switch's GPU, and a harmful one: with it
     // on, item boxes rendered as opaque black/grey cubes instead of translucent rainbow ones
@@ -1416,6 +1545,9 @@ void InitializeRuntimeSettings() noexcept {
     g_displayMode = static_cast<int>(aurora_get_display_mode());
     aurora_set_disable_copy_filter(g_disableCopyFilter);
     AuroraSetConstantMatrixIndexing(g_constantMatrixIndexing);
+#if !defined(__SWITCH__)
+    AuroraSetVertexRepackMode(VertexRepackModeForChoice(g_vertexRepackChoice));
+#endif
     AuroraSetThreadedGx(g_threadedGx);
     aurora_set_overlap_frame_encode(RuntimeConfigFile::OverlapFrameEncode(true));
     ThermalQuality::SetEnabled(g_thermalAutoQuality);
@@ -1485,6 +1617,7 @@ void Draw() noexcept {
         DrawShaderCompilationStatus();
     }
     DrawFpsOverlay();
+    DrawBackendFallbackNotice();
 #if defined(__ANDROID__) || defined(__SWITCH__)
     DrawAndroidSidebar();
 #else
@@ -1515,4 +1648,18 @@ void NotifyStrapInputAccepted() noexcept {
 }
 
 void AdvancePresentedFrame() noexcept { ++g_presentedFrame; }
+
+void NotifyBackendFallback(const char* requested, const char* actual) noexcept {
+    const auto pretty = [](const char* name) -> std::string {
+        const std::string_view value = name != nullptr ? name : "";
+        if (value == "vulkan") return "Vulkan";
+        if (value == "opengles") return "OpenGL ES";
+        return std::string(value);
+    };
+    try {
+        g_backendFallbackNotice = pretty(requested) + " could not start on this device. Using " + pretty(actual) +
+                                  " instead, which may be slower.";
+    } catch (...) {
+    }
+}
 } // namespace settings_overlay

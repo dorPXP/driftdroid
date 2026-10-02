@@ -14,4 +14,7 @@ bool StartupScreenVisible() noexcept;
 void ToggleTopBar() noexcept;
 void NotifyStrapInputAccepted() noexcept;
 void AdvancePresentedFrame() noexcept;
+// The renderer the player asked for could not start and another one is in use. Shown on screen
+// for a few seconds, since the slower fallback otherwise looks like the game just running badly.
+void NotifyBackendFallback(const char* requested, const char* actual) noexcept;
 } // namespace settings_overlay

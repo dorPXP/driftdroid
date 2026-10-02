@@ -629,6 +629,12 @@ AuroraWindowSize get_window_size() {
     fb_w = std::max(1, static_cast<int>(std::lround(static_cast<float>(fb_w) * g_thermalRenderFactor)));
     fb_h = std::max(1, static_cast<int>(std::lround(static_cast<float>(fb_h) * g_thermalRenderFactor)));
   }
+  // Same floor gpu.cpp applies to the render target, so the size reported here is the size that
+  // exists. Without it a sub-native size crashed on the way into a race.
+  if (baseW > 0 && baseH > 0) {
+    fb_w = std::max(fb_w, static_cast<int>(baseW));
+    fb_h = std::max(fb_h, static_cast<int>(baseH));
+  }
 
   const float scale = SDL_GetWindowDisplayScale(g_window);
   return {
@@ -838,6 +844,11 @@ void request_frame_buffer_resize() {
 void set_frame_buffer_scale(float scale) {
   if (scale < 0.f) {
     scale = 0.f;
+  }
+  // The render target is never smaller than the game's own framebuffer (see resize_swapchain in
+  // gpu.cpp), so a scale below 1 only made the reported size disagree with the real one.
+  if (scale > 0.f && scale < 1.f) {
+    scale = 1.f;
   }
   if (g_frameBufferScale == scale) {
     return;

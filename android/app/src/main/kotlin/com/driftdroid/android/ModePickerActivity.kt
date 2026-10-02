@@ -556,6 +556,7 @@ class ModePickerActivity : Activity() {
             REQUEST_CODE_IMPORT_MII_DATA -> handleMiiImportSourcePicked(data?.data)
             REQUEST_CODE_IMPORT_SINGLE_MII -> handleSingleMiiSourcePicked(data?.data)
             ModManager.REQUEST_CODE_PICK_ZIP -> ModManager.onZipPicked(this, data?.data)
+            GpuDriverSettings.REQUEST_CODE_PICK_ZIP -> GpuDriverSettings.onZipPicked(this, data?.data)
             IconSettings.REQUEST_CODE_PICK_IMAGE -> IconSettings.onImagePicked(this, data?.data)
         }
     }

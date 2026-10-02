@@ -72,7 +72,14 @@ void LoadAndroidCustomGpuDriver() {
                 driverDir.c_str(), driverLib.c_str());
         return;
     }
-    const std::string hookDir = NativeLibraryDir();
+    // The hook libraries sit next to this library when the APK's native libraries are extracted
+    // on install. They are not with the default packaging (libraries stay inside the APK), so the
+    // launcher also copies them to gpu_drivers/hooks/, beside the driver folders.
+    std::string hookDir = NativeLibraryDir();
+    if (hookDir.empty() || !IsFile(hookDir + "libmain_hook.so")) {
+        const auto parent = driverDir.find_last_of('/', driverDir.size() - 2);
+        hookDir = parent == std::string::npos ? std::string{} : driverDir.substr(0, parent + 1) + "hooks/";
+    }
     if (hookDir.empty() || !IsFile(hookDir + "libmain_hook.so")) {
         RT_LOGF(RT_TAG_RUNTIME,
                 "custom GPU driver hooks not found next to the runtime (%s); using the system "
