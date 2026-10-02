@@ -372,19 +372,20 @@ bool PADHasSavedMappingForIndex(const u32 idx) {
 }
 
 void PADSetPortForIndex(const u32 idx, const u32 port) {
+  if (port >= PAD_MAX_CONTROLLERS) return;
   const auto* ctrl = __PADGetControllerForIndex(idx);
   if (ctrl == nullptr) {
     return;
   }
 
-  const int32_t oldPort = SDL_GetGamepadPlayerIndex(ctrl->m_controller);
+  const int32_t oldPort = aurora::input::player_index(ctrl->m_index);
   if (const auto* dest = aurora::input::get_controller_for_player(port); dest != nullptr && dest != ctrl) {
-    SDL_SetGamepadPlayerIndex(dest->m_controller, -1);
+    aurora::input::set_player_index(dest->m_index, -1);
   }
   if (oldPort >= 0 && oldPort != port) {
     aurora::input::persist_controller_for_player(oldPort, nullptr);
   }
-  SDL_SetGamepadPlayerIndex(ctrl->m_controller, static_cast<Sint32>(port));
+  aurora::input::set_player_index(ctrl->m_index, static_cast<Sint32>(port));
   aurora::input::persist_controller_for_player(port, ctrl);
 }
 
@@ -410,7 +411,7 @@ void PADClearPort(const u32 port) {
   if (ctrl == nullptr) {
     return;
   }
-  SDL_SetGamepadPlayerIndex(ctrl->m_controller, -1);
+  aurora::input::set_player_index(ctrl->m_index, -1);
 }
 
 // Secondary bindings live only in memory; the runtime re-applies them from its
