@@ -205,9 +205,9 @@ void render(const wgpu::RenderPassEncoder& pass) noexcept {
     ImGui_ImplSDLRenderer3_RenderDrawData(data, renderer);
     SDL_RenderPresent(renderer);
   } else {
-    pass.PushDebugGroup("Aurora: Dear Imgui");
+    // No debug group around the overlay: an Adreno 740 driver (512.676) faults in
+    // vkCmdEndDebugUtilsLabelEXT on the first overlay pass, which crashes the game at launch.
     ImGui_ImplWGPU_RenderDrawData(data, pass.Get());
-    pass.PopDebugGroup();
   }
 }
 

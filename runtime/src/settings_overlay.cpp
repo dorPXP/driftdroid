@@ -844,6 +844,11 @@ void DrawGraphicsSettings() {
 #endif
     ImGui::Separator();
     ImGui::Text("Graphics API: %s", GraphicsApiDisplayName());
+    // Names the driver in use: a custom driver from the launcher's picker reports itself here
+    // (Turnip prefixes the chip name), the phone's own driver reports the bare chip.
+    if (const char* adapter = aurora_get_adapter_name(); adapter != nullptr && adapter[0] != '\0') {
+        ImGui::Text("GPU: %s", adapter);
+    }
 }
 
 void DrawFpsOverlay() {
@@ -1491,7 +1496,8 @@ void InitializeRuntimeSettings() noexcept {
     g_displayMode = ParseDisplayModeConfig(RuntimeConfigFile::DisplayMode("borderless"));
     g_skipUnreadyPipelines = RuntimeConfigFile::SkipUnreadyPipelines(true);
     g_disableCopyFilter = RuntimeConfigFile::DisableCopyFilter(true);
-    g_constantMatrixIndexing = RuntimeConfigFile::ConstantMatrixIndexing(false);
+    // With no saved choice, the GPUs known to need the workaround get it.
+    g_constantMatrixIndexing = RuntimeConfigFile::ConstantMatrixIndexing(AuroraAdapterWantsConstantMatrixIndexing());
     g_vertexRepackChoice = ParseVertexRepackConfig(RuntimeConfigFile::VertexRepack("auto"));
 #if defined(__SWITCH__)
     // An Adreno driver workaround with no purpose on the Switch's GPU, and a harmful one: with it

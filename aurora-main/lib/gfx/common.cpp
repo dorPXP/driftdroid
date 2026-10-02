@@ -1431,8 +1431,13 @@ static void render_pass_impl(const wgpu::RenderPassEncoder& pass, const std::vec
       // "in front" geometry silently vanishes. A full [0,1] viewport is unaffected either way,
       // which is why this only broke specific elements, not the whole scene. Matches upstream
       // aurora's apply_viewport (lib/gfx/encoding.cpp) exactly.
-      const float minDepth = gx::UseReversedZ ? 1.0f - vp.zfar : vp.znear;
-      const float maxDepth = gx::UseReversedZ ? 1.0f - vp.znear : vp.zfar;
+      // The game can set a range slightly outside [0,1] (near -0.06 at race start); clamp after the
+      // remap so the direction is kept and validation never rejects the viewport.
+      float minDepth = std::clamp(gx::UseReversedZ ? 1.0f - vp.zfar : vp.znear, 0.0f, 1.0f);
+      float maxDepth = std::clamp(gx::UseReversedZ ? 1.0f - vp.znear : vp.zfar, 0.0f, 1.0f);
+      if (minDepth > maxDepth) {
+        minDepth = maxDepth;
+      }
       pass.SetViewport(vp.left, vp.top, vp.width, vp.height, minDepth, maxDepth);
     } break;
     case CommandType::SetScissor: {

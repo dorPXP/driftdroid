@@ -111,6 +111,10 @@ void AuroraSetViewportPolicy(AuroraViewportPolicy policy);
 // shaders (reported on Adreno: skinned characters render as only their eyes). Takes effect for
 // pipelines created after the call.
 void AuroraSetConstantMatrixIndexing(bool enabled);
+// True when the active adapter is one the workaround above should be on for unless the player
+// chose otherwise: the Adreno 750, whose driver drops skinned characters. Valid once the
+// graphics backend is up.
+bool AuroraAdapterWantsConstantMatrixIndexing(void);
 // Workaround for Adreno 8xx "vertex explosion" (stretched meshes, smeared textures): the CPU
 // resolves indexed vertex attributes and uploads aligned, direct vertices. The AUTO modes only
 // act on Adreno 8xx. Call before the first draw; the choice is fixed for the process.

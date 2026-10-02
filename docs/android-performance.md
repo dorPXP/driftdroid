@@ -94,6 +94,15 @@ Things to know:
 - **Combined library.** After any C++ change, delete `libGameCombined.so` before relinking, and
   run `ninja -t cleandead` if objects were removed from the build, or the link fails on
   duplicate symbols.
-- **Custom GPU drivers.** The launcher can install an AdrenoTools driver package, but it is only
-  used when Dawn is built with the Vulkan library override patch. With the stock prebuilt Dawn
-  the system driver is used.
+- **Custom GPU drivers and PowerVR.** Release builds use Dawn built from source (commit
+  13abc3bc, the same one as the prebuilt package) with two patches from
+  `aurora-main/cmake/patches/`: `dawn-android-vulkan-library-override.patch` (lets the launcher's
+  GPU driver picker load a custom Adreno driver through libadrenotools) and
+  `dawn-android-imgtec-interstage-floor.patch` (from KartPad: accepts older PowerVR drivers that
+  report 64 inter-stage components). Build it for Android with a host `protoc`, install it, and
+  configure with `-DFETCHCONTENT_SOURCE_DIR_DAWN_PREBUILT=<install dir>` and
+  `-DDawn_DIR=<install dir>/lib/cmake/Dawn`. With the stock prebuilt Dawn the picker has no effect
+  and PowerVR BXM phones on the old driver get no Vulkan adapter.
+- **Build paths in release libraries.** A from-source Dawn embeds its source paths in assert
+  messages. Replace the home-directory prefix in `jniLibs` with a same-length neutral one before
+  packaging a public APK.

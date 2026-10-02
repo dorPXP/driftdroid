@@ -1970,6 +1970,7 @@ bool aurora_flush_efb_copy_to_ram(void* dest) {
 #endif
 }
 AuroraBackend aurora_get_backend() { return aurora::g_config.desiredBackend; }
+const char* aurora_get_adapter_name() { return aurora::webgpu::adapter_name(); }
 const AuroraBackend* aurora_get_available_backends(size_t* count) {
   if (count != nullptr) {
     *count = aurora::PreferredBackendOrder.size();

@@ -106,12 +106,16 @@ int active_mode() noexcept {
     const int requested = g_requestedMode.load(std::memory_order_relaxed);
     const int adreno = webgpu::g_adapterAdrenoModel;
     // 1 = PNMTXIDX-direct (skinned character) draws; 2 = every triangle draw.
-    // The automatic modes only act on Adreno 8xx, the family the corruption is confirmed on.
+    // The automatic modes act on Adreno 8xx, the family the stretched geometry is confirmed on, and
+    // on the Adreno 750, where characters go missing instead: there the character repack is paired
+    // with the constant matrix lookup (see AuroraAdapterWantsConstantMatrixIndexing).
     const bool automatic = requested == AURORA_VERTEX_REPACK_AUTO_CHARACTERS || requested == AURORA_VERTEX_REPACK_AUTO_ALL;
     int result = AURORA_VERTEX_REPACK_OFF;
     if (automatic) {
       if (adreno >= 800 && adreno < 1000) {
         result = requested == AURORA_VERTEX_REPACK_AUTO_ALL ? AURORA_VERTEX_REPACK_ALL : AURORA_VERTEX_REPACK_CHARACTERS;
+      } else if (adreno == 750) {
+        result = AURORA_VERTEX_REPACK_CHARACTERS;
       }
     } else if (requested == AURORA_VERTEX_REPACK_CHARACTERS || requested == AURORA_VERTEX_REPACK_ALL) {
       result = requested;

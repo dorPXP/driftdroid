@@ -11,6 +11,7 @@
 #include "../../gfx/common.hpp"
 #include "../../gx/fifo.hpp"
 #include "../../gx/vertex_repack.hpp"
+#include "../../webgpu/gpu.hpp"
 
 // Single definition for the `Log` that gx.hpp declares for this directory.
 aurora::Module Log("aurora::gx");
@@ -57,6 +58,8 @@ u32 AuroraGetGxSyncStats(u64* totalWaits, u64* totalNanos, AuroraGxSyncSite* sit
 void AuroraSetConstantMatrixIndexing(bool enabled) {
   aurora::gx::g_constantMatrixIndexing.store(enabled, std::memory_order_relaxed);
 }
+
+bool AuroraAdapterWantsConstantMatrixIndexing(void) { return aurora::webgpu::g_adapterAdrenoModel == 750; }
 
 void AuroraSetVertexRepackMode(AuroraVertexRepackMode mode) {
   aurora::gx::vertex_repack::set_requested_mode(static_cast<int>(mode));

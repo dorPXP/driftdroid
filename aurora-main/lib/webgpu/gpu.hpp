@@ -61,6 +61,8 @@ extern wgpu::Instance g_instance;
 extern bool g_bcTexturesSupported;
 // Adreno model number of the active adapter (840 for "Adreno (TM) 840"), 0 for anything else.
 extern int g_adapterAdrenoModel;
+// Device name of the active adapter; empty before initialize() picks one.
+const char* adapter_name() noexcept;
 
 inline int adreno_model_from_name(std::string_view name) noexcept {
   const auto at = name.find("Adreno");

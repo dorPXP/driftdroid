@@ -46,8 +46,9 @@ static int indirect_debug_view() {
 #endif
 
 static std::string constant_matrix_switch(std::string_view arrayName, std::string_view localName,
-                                          std::string_view vectorExpression, u32 count) {
-  std::string result = fmt::format("\n    var {} = vec3f(0.0);\n    switch (in_pnmtxidx) {{", localName);
+                                          std::string_view vectorExpression, u32 count,
+                                          std::string_view indexExpression = "in_pnmtxidx") {
+  std::string result = fmt::format("\n    var {} = vec3f(0.0);\n    switch ({}) {{", localName, indexExpression);
   for (u32 slot = 0; slot < count; ++slot) {
     result += fmt::format("\n      case {0}u: {{ {1} = {2} * ubuf.{3}[{0}u]; }}", slot, localName, vectorExpression,
                           arrayName);
@@ -1245,7 +1246,15 @@ wgpu::ShaderModule build_shader(const ShaderConfig& config) noexcept {
     }
     if (tcg.type == GX_TG_MTX2x4 || tcg.type == GX_TG_MTX3x4) {
       if (info.indexAttr.test(GX_VA_TEX0MTXIDX + i)) {
-        vtxXfrAttrs += fmt::format("\n    var tc{0}_tmp = tc{0} * ubuf.postex_mtx[in_texmtxidx{0} / 3u];", i);
+        if (constantPnMtx) {
+          // A per-vertex texture matrix index is the same dynamic lookup as the position matrix
+          // index, so it takes the same literal switch (characters rendered silver on Adreno 750).
+          vtxXfrAttrs += constant_matrix_switch("postex_mtx"sv, fmt::format("tc{}_tmp", i), fmt::format("tc{}", i),
+                                                info.matrixLayout.postexCount,
+                                                fmt::format("in_texmtxidx{} / 3u", i));
+        } else {
+          vtxXfrAttrs += fmt::format("\n    var tc{0}_tmp = tc{0} * ubuf.postex_mtx[in_texmtxidx{0} / 3u];", i);
+        }
       } else if (tcg.mtx == GX_IDENTITY) {
         vtxXfrAttrs += fmt::format("\n    var tc{0}_tmp = tc{0}.xyz;", i);
       } else {

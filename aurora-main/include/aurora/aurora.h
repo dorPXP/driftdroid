@@ -164,6 +164,9 @@ void aurora_set_display_mode(AuroraDisplayMode mode);
 AuroraDisplayMode aurora_get_display_mode();
 
 AuroraBackend aurora_get_backend();
+// The active adapter's device name as its driver reports it ("Adreno (TM) 642L", or
+// "Turnip Adreno (TM) 642L" with a custom driver loaded). Empty before the backend is up.
+const char* aurora_get_adapter_name();
 const AuroraBackend* aurora_get_available_backends(size_t* count);
 
 #ifdef __cplusplus

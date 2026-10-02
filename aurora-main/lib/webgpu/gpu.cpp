@@ -9,6 +9,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <mutex>
+#include <string>
 #include <string_view>
 #include <utility>
 #include <vector>
@@ -87,6 +88,8 @@ static wgpu::TextureFormat g_presentSourceOverrideFormat = wgpu::TextureFormat::
 static wgpu::Adapter g_adapter;
 wgpu::Instance g_instance;
 static wgpu::AdapterInfo g_adapterInfo;
+static std::string g_adapterName;
+const char* adapter_name() noexcept { return g_adapterName.c_str(); }
 static wgpu::SurfaceCapabilities g_surfaceCapabilities;
 bool g_bcTexturesSupported;
 int g_adapterAdrenoModel;
@@ -565,6 +568,12 @@ bool initialize(AuroraBackend auroraBackend) {
     // instance descriptor to set.
     dawn::native::DawnInstanceDescriptor dawnInstanceDescriptor;
     dawnInstanceDescriptor.backendValidationLevel = dawn::native::BackendValidationLevel::Disabled;
+    // Dawn says why it turned an adapter down (a missing Vulkan feature, a limit below WebGPU's
+    // floor) only through this callback; without it the reason goes to the system log and a
+    // player's report shows nothing but "No supported adapters".
+    dawnInstanceDescriptor.SetLoggingCallback([](wgpu::LoggingType type, wgpu::StringView message) {
+      Log.report(type == wgpu::LoggingType::Error ? LOG_ERROR : LOG_WARNING, "Dawn: {}", message);
+    });
     instanceDescriptor.nextInChain = &dawnInstanceDescriptor;
 #endif
     g_instance = wgpu::CreateInstance(&instanceDescriptor);
@@ -603,7 +612,7 @@ bool initialize(AuroraBackend auroraBackend) {
 #endif
     glProcOptions.display = nullptr;  // Dawn opens EGL_DEFAULT_DISPLAY itself
     const bool glBackend = backend == wgpu::BackendType::OpenGLES;
-    const wgpu::RequestAdapterOptions options{
+    wgpu::RequestAdapterOptions options{
         .nextInChain = glBackend ? &glProcOptions : nullptr,
         .featureLevel = glBackend ? wgpu::FeatureLevel::Compatibility : wgpu::FeatureLevel::Core,
         .powerPreference = wgpu::PowerPreference::HighPerformance,
@@ -611,22 +620,36 @@ bool initialize(AuroraBackend auroraBackend) {
         .compatibleSurface = g_surface,
     };
 #else
-    const wgpu::RequestAdapterOptions options{
+    wgpu::RequestAdapterOptions options{
         .powerPreference = wgpu::PowerPreference::HighPerformance,
         .backendType = backend,
         .compatibleSurface = g_surface,
     };
 #endif
-    const auto future = g_instance.RequestAdapter(
-        &options, wgpu::CallbackMode::WaitAnyOnly,
-        [](wgpu::RequestAdapterStatus status, wgpu::Adapter adapter, wgpu::StringView message) {
-          if (status == wgpu::RequestAdapterStatus::Success) {
-            g_adapter = std::move(adapter);
-          } else {
-            Log.warn("Adapter request failed: {}", message);
-          }
-        });
-    const auto status = g_instance.WaitAny(future, 5000000000);
+    const auto requestAdapter = [&]() -> wgpu::WaitStatus {
+      const auto future = g_instance.RequestAdapter(
+          &options, wgpu::CallbackMode::WaitAnyOnly,
+          [](wgpu::RequestAdapterStatus status, wgpu::Adapter adapter, wgpu::StringView message) {
+            if (status == wgpu::RequestAdapterStatus::Success) {
+              g_adapter = std::move(adapter);
+            } else {
+              Log.warn("Adapter request failed: {}", message);
+            }
+          });
+      return g_instance.WaitAny(future, 5000000000);
+    };
+    auto status = requestAdapter();
+#if defined(__ANDROID__)
+    // Budget phone GPUs (PowerVR GE8320, Mali-T8xx) have a working Vulkan driver that stops short
+    // of WebGPU's full limits: 4096 textures, 4 color attachments. Dawn turns those down at the
+    // Core level but accepts them at the Compatibility level, the same level the OpenGL ES
+    // backend already runs at, and Vulkan there is still far faster than OpenGL ES.
+    if (status == wgpu::WaitStatus::Success && !g_adapter && backend == wgpu::BackendType::Vulkan) {
+      Log.warn("No Core-level Vulkan adapter; retrying at the Compatibility level");
+      options.featureLevel = wgpu::FeatureLevel::Compatibility;
+      status = requestAdapter();
+    }
+#endif
     if (status != wgpu::WaitStatus::Success) {
       Log.error("Failed to create {} adapter: {}", magic_enum::enum_name(backend),
                 magic_enum::enum_name(status));
@@ -640,10 +663,21 @@ bool initialize(AuroraBackend auroraBackend) {
   g_adapter.GetInfo(&g_adapterInfo);
   g_backendType = g_adapterInfo.backendType;
   g_adapterAdrenoModel = 0;
+  bool turnip = false;
   for (const wgpu::StringView text : {g_adapterInfo.device, g_adapterInfo.description}) {
-    if (!text.IsUndefined() && g_adapterAdrenoModel == 0) {
-      g_adapterAdrenoModel = adreno_model_from_name(std::string_view(text.data, text.length));
+    if (text.IsUndefined()) {
+      continue;
     }
+    const std::string_view view(text.data, text.length);
+    turnip = turnip || view.find("Turnip") != std::string_view::npos;
+    if (g_adapterAdrenoModel == 0) {
+      g_adapterAdrenoModel = adreno_model_from_name(view);
+    }
+  }
+  if (turnip) {
+    // The model number keys workarounds for faults in Qualcomm's own driver. Turnip (Mesa's
+    // driver, loaded through the GPU driver picker) reports the same chip but lacks those faults.
+    g_adapterAdrenoModel = 0;
   }
   // See gx::UseReversedZ: GL's [-1,1] clip-space rewrite destroys reversed Z's precision.
   gx::UseReversedZ =
@@ -657,15 +691,31 @@ bool initialize(AuroraBackend auroraBackend) {
   if (description.IsUndefined()) {
     description = wgpu::StringView("Unknown");
   }
+  g_adapterName.assign(std::string_view(adapterName));
   Log.info("Graphics adapter information\n  API: {}\n  Device: {} ({})\n  Driver: {}", backendName, adapterName,
            magic_enum::enum_name(g_adapterInfo.adapterType), description);
 
   uint32_t maxTextureDimension2D = 0;
   {
     wgpu::Limits supportedLimits{};
+#if defined(__ANDROID__) && defined(WEBGPU_DAWN)
+    // A Compatibility-level device (OpenGL ES, or Vulkan on a budget GPU) defaults to no storage
+    // buffers in the vertex stage, and every GX vertex shader reads two. Ask for what the adapter
+    // has; on a Core-level adapter these already equal the per-stage limit.
+    wgpu::CompatibilityModeLimits supportedCompatLimits{};
+    supportedLimits.nextInChain = &supportedCompatLimits;
+#endif
     g_adapter.GetLimits(&supportedLimits);
     maxTextureDimension2D = supportedLimits.maxTextureDimension2D;
+#if defined(__ANDROID__) && defined(WEBGPU_DAWN)
+    wgpu::CompatibilityModeLimits requiredCompatLimits{};
+    requiredCompatLimits.maxStorageBuffersInVertexStage = supportedCompatLimits.maxStorageBuffersInVertexStage;
+    requiredCompatLimits.maxStorageBuffersInFragmentStage = supportedCompatLimits.maxStorageBuffersInFragmentStage;
+#endif
     const wgpu::Limits requiredLimits{
+#if defined(__ANDROID__) && defined(WEBGPU_DAWN)
+        .nextInChain = &requiredCompatLimits,
+#endif
         // Use "best" supported limits
         .maxTextureDimension1D = supportedLimits.maxTextureDimension1D == 0 ? WGPU_LIMIT_U32_UNDEFINED
                                                                             : supportedLimits.maxTextureDimension1D,
