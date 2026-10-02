@@ -187,6 +187,7 @@ class MainActivity : SDLActivity() {
         // frame interpolation" setting above 60 FPS has nothing to actually present onto and the
         // display stays locked at 60 regardless (confirmed on-device: selecting 90 FPS there had
         // no visible effect until this was added).
+        SDLActivity.mContentFrameRate = configuredTargetFps().toFloat()
         requestRefreshRateFor(configuredTargetFps())
 
         // The settings gear and touch controls are gameplay UI - showing them over the ROM
@@ -235,11 +236,9 @@ class MainActivity : SDLActivity() {
                 .minByOrNull { it.refreshRate }
                 ?: sameSizeModes.maxByOrNull { it.refreshRate }
                 ?: return
-        if (mode.modeId == currentMode.modeId) {
-            return
-        }
         val attributes = window.attributes
         attributes.preferredDisplayModeId = mode.modeId
+        attributes.preferredRefreshRate = mode.refreshRate
         window.attributes = attributes
     }
 

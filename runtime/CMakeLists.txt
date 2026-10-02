@@ -91,8 +91,23 @@ set(MKW_PROJECT_COMPILE_DEFINITIONS NOMINMAX)
 #                                   sdmc:/switch/WiiCompiled/Cache/gcov (GCOV_PREFIX).
 #   copy that tree back over the build dir, then
 #   cmake -DMKW_PGO=use ...      -> optimized build using the measured hot paths.
-set(MKW_PGO "" CACHE STRING "Switch PGO pass: empty, generate or use")
-if(MKW_PGO STREQUAL "generate")
+set(MKW_PGO "" CACHE STRING "PGO pass (Switch and Android): empty, generate or use")
+# Android (clang): the recording build writes files/WiiCompiled/pgo/game.profraw on the device
+# (runtime/src/android_pgo.cpp). Pull it, run `llvm-profdata merge -o android.profdata`, and pass
+# the result as MKW_PGO_PROFILE to the "use" build.
+set(MKW_PGO_PROFILE "" CACHE FILEPATH "Android PGO: merged .profdata for -DMKW_PGO=use")
+if(ANDROID AND MKW_PGO STREQUAL "generate")
+    add_compile_options(-fprofile-generate)
+    add_link_options(-fprofile-generate)
+    list(APPEND MKW_PROJECT_COMPILE_DEFINITIONS MKW_PGO_GENERATE=1)
+elseif(ANDROID AND MKW_PGO STREQUAL "use")
+    if(NOT EXISTS "${MKW_PGO_PROFILE}")
+        message(FATAL_ERROR "MKW_PGO=use on Android needs MKW_PGO_PROFILE=<merged .profdata>")
+    endif()
+    # A source edited after the recording only loses its own profile instead of failing the build.
+    add_compile_options("-fprofile-use=${MKW_PGO_PROFILE}" -Wno-profile-instr-unprofiled
+                        -Wno-profile-instr-out-of-date -Wno-backend-plugin)
+elseif(MKW_PGO STREQUAL "generate")
     # single, not atomic: the A57 is ARMv8.0 with no LSE, so every atomic counter bump would be an
     # exclusive-monitor retry loop and the training run would crawl. Translated code runs on one
     # thread; the few racy counters elsewhere are what -fprofile-correction absorbs below.

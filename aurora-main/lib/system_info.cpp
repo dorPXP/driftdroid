@@ -41,6 +41,7 @@ extern "C" NTSYSAPI NTSTATUS NTAPI RtlGetVersion(PRTL_OSVERSIONINFOEXW lpVersion
 #include <filesystem>
 #include <sys/sysinfo.h>
 #include <sched.h>
+#include <pthread.h>
 #include <cerrno>
 #include <cstdio>
 #include <cstring>
@@ -424,5 +425,11 @@ void LogMisc() {
 // No asymmetric (big.LITTLE) scheduling concern on these platforms - nothing to pin.
 void pin_calling_thread_to_core_tier(CoreTier) noexcept {}
 #endif
+
+void name_calling_thread([[maybe_unused]] const char* name) noexcept {
+#if defined(__ANDROID__) || (defined(__linux__) && !defined(__SWITCH__))
+  pthread_setname_np(pthread_self(), name);
+#endif
+}
 
 } // namespace aurora

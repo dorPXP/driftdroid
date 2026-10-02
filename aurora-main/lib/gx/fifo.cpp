@@ -115,6 +115,7 @@ std::atomic<std::thread::id> sWorkerId{};
 void worker_main() {
   sWorkerId.store(std::this_thread::get_id(), std::memory_order_release);
   aurora::pin_calling_thread_to_core_tier(aurora::CoreTier::Fast);
+  aurora::name_calling_thread("GxWorker");
 #ifdef __SWITCH__
   // Supplied by the Switch runtime (main.cpp): dedicated core and raised priority.
   if (SwitchConfigureGxWorkerThread != nullptr) {

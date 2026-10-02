@@ -28,6 +28,10 @@
         android:label="@string/app_name"
         android:theme="@style/Theme.DriftDroid">
 
+        <!-- Lets `adb shell simpleperf` profile release builds, which is where performance has to
+             be measured (debug builds run with CheckJNI). It grants nothing to other apps. -->
+        <profileable android:shell="true" />
+
         <!-- The Original/Retro Rewind choice must happen before any product .so loads (Android
              cannot swap which native library is loaded within a process), so it's now the actual
              launcher - MainActivity is started explicitly from here with the resolved choice. -->

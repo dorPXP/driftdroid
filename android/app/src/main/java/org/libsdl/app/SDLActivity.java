@@ -213,6 +213,10 @@ public class SDLActivity extends Activity implements View.OnSystemUiVisibilityCh
 
     // Main components
     protected static SDLActivity mSingleton;
+    // Frame rate the game actually produces, set by MainActivity before the surface exists. The
+    // game surface asks the display to run at this rate (SDLSurface.surfaceChanged), so a phone
+    // set to 120 Hz does not run its whole display pipeline at double speed for 60 fps content.
+    public static volatile float mContentFrameRate = 0.0f;
     protected static SDLSurface mSurface;
     protected static SDLDummyEdit mTextEdit;
     protected static ViewGroup mLayout;

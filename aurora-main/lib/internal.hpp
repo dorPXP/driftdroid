@@ -147,6 +147,8 @@ std::recursive_mutex& renderer_gpu_mutex() noexcept;
 // or any non-Linux platform.
 enum class CoreTier { Fast, Slow };
 void pin_calling_thread_to_core_tier(CoreTier tier) noexcept;
+// Names the calling thread for profilers and `top -H` (15 characters at most on Linux).
+void name_calling_thread(const char* name) noexcept;
 
 template <typename T>
 class ArrayRef {

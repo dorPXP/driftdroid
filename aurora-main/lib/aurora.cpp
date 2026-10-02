@@ -304,6 +304,7 @@ void frame_worker_main() noexcept {
     Log.warn("Could not raise the frame worker thread priority: {}", SDL_GetError());
   }
   pin_calling_thread_to_core_tier(CoreTier::Fast);
+  name_calling_thread("FrameWorker");
   {
     std::lock_guard lock(g_frameWorker.mutex);
     g_frameWorker.threadId = std::this_thread::get_id();
@@ -1088,6 +1089,7 @@ void presenter_main() noexcept {
     Log.warn("Could not raise the asynchronous presenter thread priority: {}", SDL_GetError());
   }
   pin_calling_thread_to_core_tier(CoreTier::Fast);
+  name_calling_thread("Presenter");
   for (;;) {
     PresentationJob job;
     {

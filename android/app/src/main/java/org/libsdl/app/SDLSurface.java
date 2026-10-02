@@ -131,6 +131,23 @@ public class SDLSurface extends SurfaceView implements SurfaceHolder.Callback,
             return;
         }
 
+        // The window-level display mode request alone is not honored on every phone (one set to
+        // 120 Hz stayed at 120 Hz); a frame-rate vote on the surface itself is.
+        if (Build.VERSION.SDK_INT >= 30 && SDLActivity.mContentFrameRate > 0.0f) {
+            try {
+                if (Build.VERSION.SDK_INT >= 31) {
+                    holder.getSurface().setFrameRate(SDLActivity.mContentFrameRate,
+                            Surface.FRAME_RATE_COMPATIBILITY_FIXED_SOURCE,
+                            Surface.CHANGE_FRAME_RATE_ALWAYS);
+                } else {
+                    holder.getSurface().setFrameRate(SDLActivity.mContentFrameRate,
+                            Surface.FRAME_RATE_COMPATIBILITY_FIXED_SOURCE);
+                }
+            } catch (Exception e) {
+                Log.v("SDL", "setFrameRate failed: " + e);
+            }
+        }
+
         mWidth = width;
         mHeight = height;
         int nDeviceWidth = width;

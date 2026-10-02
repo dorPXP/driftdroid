@@ -16,6 +16,10 @@
 #include <thread>
 #include <vector>
 
+#if defined(__ANDROID__)
+#include <sys/resource.h>
+#endif
+
 #include <SDL3/SDL_iostream.h>
 #include <absl/container/flat_hash_map.h>
 #include <absl/container/flat_hash_set.h>
@@ -969,6 +973,31 @@ static uint32_t g_prewarmCount = 0;
 // are free to use every core; after this point we pin them off the fast/presenter cores.
 static std::atomic_bool g_presentationStarted{false};
 
+// How many workers may replay cached recipes at once. Before the first frame that is all of them.
+// On a phone, once the game is on screen, the replay is a background chore that must not turn
+// into heat: an app update that changes the generated shaders invalidates every stored binary, and
+// replaying ~5700 recipes on every core held a Snapdragon 778G at 85 C with its fast cores
+// throttled to a third of their speed for minutes (2026-10-01). Even two workers were 69% of the
+// process's CPU cycles in a profile taken during play. One low-priority worker on the slow cores
+// finishes the same list later and stays cool; a pipeline a draw actually needs is still promoted
+// to the priority queue and gets the whole pool.
+static size_t background_pipeline_worker_limit() noexcept {
+#if defined(__ANDROID__)
+  if (g_presentationStarted.load(std::memory_order_acquire)) {
+    return 1;
+  }
+#endif
+  return MaxBackgroundPipelineWorkers;
+}
+
+// Worker threads inherit the game thread's boosted priority. Replay work drops to background
+// priority; first-use compiles the screen is waiting on run at the normal one.
+static void set_pipeline_worker_priority([[maybe_unused]] bool background) noexcept {
+#if defined(__ANDROID__)
+  setpriority(PRIO_PROCESS, 0, background ? 10 : 0);
+#endif
+}
+
 static void note_pipeline_queue_drained() {
   if (!g_prewarmActive.exchange(false, std::memory_order_acq_rel)) {
     return;
@@ -1003,6 +1032,17 @@ static void compile_pending_pipeline(PendingPipeline pending) {
   --queuedPipelines;
   if (queuedPipelines.load() == 0) {
     note_pipeline_queue_drained();
+  } else if (g_prewarmActive.load(std::memory_order_relaxed)) {
+#if defined(__ANDROID__)
+    // A long replay is only saved when it finishes or the app goes to the background. Save it in
+    // stages as well, so a session that ends first (the app is killed, the phone restarts) does
+    // not send the next launch back to the beginning.
+    static std::atomic_uint32_t sinceSave{0};
+    if (sinceSave.fetch_add(1, std::memory_order_relaxed) + 1 >= 1000) {
+      sinceSave.store(0, std::memory_order_relaxed);
+      webgpu::serialize_pipeline_caches();
+    }
+#endif
   }
 }
 
@@ -1010,6 +1050,7 @@ static void pipeline_worker() {
 #ifdef TRACY_ENABLE
   tracy::SetThreadName("Pipeline compilation thread");
 #endif
+  name_calling_thread("ShaderWorker");
   // Boot-time bulk prewarm (loading cached pipeline recipes before the first frame is ever
   // presented) has no live presentation to contend with, so let it use every core. Only once
   // g_presentationStarted flips do we pin off the fast/presenter cores (see
@@ -1025,7 +1066,7 @@ static void pipeline_worker() {
       g_pipelineCv.wait(lock, [] {
         return !g_priorityPipelines.empty() ||
                (!g_backgroundPipelines.empty() &&
-                g_activeBackgroundPipelineWorkers < MaxBackgroundPipelineWorkers) ||
+                g_activeBackgroundPipelineWorkers < background_pipeline_worker_limit()) ||
                g_pipelineThreadEnd;
       });
       if (g_pipelineThreadEnd) {
@@ -1043,6 +1084,7 @@ static void pipeline_worker() {
       pin_calling_thread_to_core_tier(CoreTier::Slow);
       pinnedToSlowTier = true;
     }
+    set_pipeline_worker_priority(background && pinnedToSlowTier);
     compile_pending_pipeline(std::move(pending));
     if (background) {
       {

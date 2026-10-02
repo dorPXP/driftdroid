@@ -27,9 +27,11 @@ Code.pul
 /build/
 /build-*/
 /android-native-build/
+/android-pgo-gen/
 /linux-native-build/
 /switch-native-build/
 /switch-build/
+/switch-build-pgo/
 /dist/
 /out/
 [Bb]in/
