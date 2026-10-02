@@ -96,7 +96,15 @@ a phone, and the honest summary is:
 - **Thermal resolution scaling** (on by default) trades pixels for frame rate
   automatically as the device heats up.
 - The first few minutes after installing are the worst, because shaders are
-  still compiling. It settles down.
+  still compiling. It settles down. After an update the shaders are rebuilt in
+  the background on a single low-priority thread, so the phone stays cool while
+  it happens.
+- The display is held at the game's frame rate, so a 120 Hz phone does not
+  redraw twice per game frame.
+- Release builds can be compiled with a recorded profile of real play
+  (profile-guided optimization), which cuts the work per frame. See
+  [`docs/android-performance.md`](docs/android-performance.md) for how to
+  record one and how to measure a release build.
 - Debug builds are much slower than release builds, so don't judge the port by
   one.
 
@@ -146,6 +154,10 @@ cd android && ./gradlew assembleRelease
 
 Build `assembleRelease` for anything you intend to measure. Debug builds enable Android's runtime
 checks and are substantially slower.
+
+Launch both the original game and Retro Rewind once before calling a build good - they use
+different libraries. Profile-guided builds, measuring and the build traps that have bitten this
+project are written up in [`docs/android-performance.md`](docs/android-performance.md).
 
 This project also still carries the original desktop build (Windows, via the .NET translator and
 Launcher under `translator/` and `Launcher/`) from upstream WiiCompiled - see
@@ -236,6 +248,15 @@ is exactly the information that's useful.
 That's thermal throttling, not a bug in the build. See [Performance](#performance). Leaving
 "Lower resolution when the phone gets hot" enabled keeps the frame rate steadier as the device
 heats up.
+
+**Characters or menu icons are stretched across the screen.**
+A driver bug on Snapdragon 8 Elite class GPUs (Adreno 8xx). The fix turns itself on for those
+GPUs; if you still see it, set **Fix stretched graphics (Snapdragon)** in the settings sidebar to
+**Everything**.
+
+**I picked Vulkan but it says OpenGL ES.**
+The game shows a notice at start when the renderer you chose could not start and another one was
+used. Please report the device and GPU - that is exactly the list that needs fixing.
 
 **Some characters or objects are invisible.**
 A few Adreno GPUs miscompile one of the shaders. Enable **Fix missing characters (some Adreno
