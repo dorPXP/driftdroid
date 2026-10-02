@@ -111,6 +111,17 @@ void AuroraSetViewportPolicy(AuroraViewportPolicy policy);
 // shaders (reported on Adreno: skinned characters render as only their eyes). Takes effect for
 // pipelines created after the call.
 void AuroraSetConstantMatrixIndexing(bool enabled);
+// Workaround for Adreno 8xx "vertex explosion" (stretched meshes, smeared textures): the CPU
+// resolves indexed vertex attributes and uploads aligned, direct vertices. The AUTO modes only
+// act on Adreno 8xx. Call before the first draw; the choice is fixed for the process.
+typedef enum {
+  AURORA_VERTEX_REPACK_AUTO_ALL = -2,        // Adreno 8xx: every triangle draw; otherwise off
+  AURORA_VERTEX_REPACK_AUTO_CHARACTERS = -1, // Adreno 8xx: skinned draws only; otherwise off
+  AURORA_VERTEX_REPACK_OFF = 0,
+  AURORA_VERTEX_REPACK_CHARACTERS = 1, // Draws with a per-vertex matrix index (characters)
+  AURORA_VERTEX_REPACK_ALL = 2,        // Every triangle draw (also fixes tracks and menus; more CPU)
+} AuroraVertexRepackMode;
+void AuroraSetVertexRepackMode(AuroraVertexRepackMode mode);
 // Experimental: decode GX commands on a dedicated worker thread. Call before rendering starts.
 void AuroraSetThreadedGx(bool enabled);
 // True while GX commands are decoded on the worker thread (AuroraSetThreadedGx took effect).

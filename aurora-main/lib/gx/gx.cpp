@@ -1754,21 +1754,13 @@ static u8 index_attr_size(GXAttr attr, GXCompCnt cnt, GXAttrType type) noexcept 
   return indexSize;
 }
 
-void populate_pipeline_config(PipelineConfig& config, GXPrimitive primitive, GXVtxFmt fmt) noexcept {
-  ZoneScoped;
-
+u8 populate_vertex_layout(std::array<AttrConfig, MaxVtxAttr>& attrs, GXVtxFmt fmt) noexcept {
   const auto& vtxFmt = g_gxState.vtxFmts[fmt];
-  // GX applies integer logic ops in the PE after fog.
-  config.shaderConfig.fogType = effective_pipeline_fog_type(
-      g_gxState.fog.type, g_gxState.zTextureOp, g_gxState.zCompLocBeforeTex,
-      g_gxState.blendMode, g_gxState.blendOp);
-  config.shaderConfig.fogRangeAdjust =
-      config.shaderConfig.fogType != GX_FOG_NONE && (g_gxState.fogRange[0] & (1u << 10)) != 0;
   u8 vtxOffset = 0;
   for (int i = GX_VA_PNMTXIDX; i <= GX_VA_TEX7; ++i) {
     const auto attr = static_cast<GXAttr>(i);
     const auto type = g_gxState.vtxDesc[i];
-    auto& mapping = config.shaderConfig.attrs[i];
+    auto& mapping = attrs[i];
     if (type == GX_NONE) {
       mapping = {};
       continue;
@@ -1804,7 +1796,19 @@ void populate_pipeline_config(PipelineConfig& config, GXPrimitive primitive, GXV
       Log.fatal("populate_pipeline_config: Invalid vertex type {}", type);
     }
   }
-  config.shaderConfig.vtxStride = vtxOffset;
+  return vtxOffset;
+}
+
+void populate_pipeline_config(PipelineConfig& config, GXPrimitive primitive, GXVtxFmt fmt) noexcept {
+  ZoneScoped;
+
+  // GX applies integer logic ops in the PE after fog.
+  config.shaderConfig.fogType = effective_pipeline_fog_type(
+      g_gxState.fog.type, g_gxState.zTextureOp, g_gxState.zCompLocBeforeTex,
+      g_gxState.blendMode, g_gxState.blendOp);
+  config.shaderConfig.fogRangeAdjust =
+      config.shaderConfig.fogType != GX_FOG_NONE && (g_gxState.fogRange[0] & (1u << 10)) != 0;
+  config.shaderConfig.vtxStride = populate_vertex_layout(config.shaderConfig.attrs, fmt);
   if (primitive == GX_LINES) {
     config.shaderConfig.lineMode = 1;
   } else if (primitive == GX_LINESTRIP) {

@@ -7,6 +7,7 @@
 
 #include <array>
 #include <cstdint>
+#include <string_view>
 
 struct SDL_Window;
 
@@ -58,6 +59,18 @@ extern wgpu::RenderPipeline g_CopyPipeline;
 extern wgpu::BindGroup g_CopyBindGroup;
 extern wgpu::Instance g_instance;
 extern bool g_bcTexturesSupported;
+// Adreno model number of the active adapter (840 for "Adreno (TM) 840"), 0 for anything else.
+extern int g_adapterAdrenoModel;
+
+inline int adreno_model_from_name(std::string_view name) noexcept {
+  const auto at = name.find("Adreno");
+  if (at == std::string_view::npos) return 0;
+  size_t i = at + 6;
+  while (i < name.size() && (name[i] < '0' || name[i] > '9')) ++i;
+  int model = 0;
+  while (i < name.size() && name[i] >= '0' && name[i] <= '9' && model < 100000) model = model * 10 + (name[i++] - '0');
+  return model;
+}
 
 bool initialize(AuroraBackend backend);
 void shutdown();

@@ -89,6 +89,7 @@ wgpu::Instance g_instance;
 static wgpu::AdapterInfo g_adapterInfo;
 static wgpu::SurfaceCapabilities g_surfaceCapabilities;
 bool g_bcTexturesSupported;
+int g_adapterAdrenoModel;
 // Written by Dawn's device-loss callback and consumed at ordered frame boundaries. Keep the
 // callback free of logging, allocation, teardown and renderer state mutation.
 static std::atomic_bool g_deviceLost{false};
@@ -638,6 +639,12 @@ bool initialize(AuroraBackend auroraBackend) {
   }
   g_adapter.GetInfo(&g_adapterInfo);
   g_backendType = g_adapterInfo.backendType;
+  g_adapterAdrenoModel = 0;
+  for (const wgpu::StringView text : {g_adapterInfo.device, g_adapterInfo.description}) {
+    if (!text.IsUndefined() && g_adapterAdrenoModel == 0) {
+      g_adapterAdrenoModel = adreno_model_from_name(std::string_view(text.data, text.length));
+    }
+  }
   // See gx::UseReversedZ: GL's [-1,1] clip-space rewrite destroys reversed Z's precision.
   gx::UseReversedZ =
       g_backendType != wgpu::BackendType::OpenGL && g_backendType != wgpu::BackendType::OpenGLES;

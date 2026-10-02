@@ -44,6 +44,7 @@ struct RuntimeUserConfig {
     std::optional<bool> skipUnreadyPipelines;
     std::optional<bool> disableCopyFilter;
     std::optional<bool> constantMatrixIndexing;
+    std::optional<std::string> vertexRepack;
     std::optional<bool> threadedGx;
     std::optional<bool> overlapFrameEncode;
     std::optional<bool> thermalAutoQuality;
@@ -460,6 +461,7 @@ inline RuntimeUserConfig ParseConfigDocument(const toml::value& document) {
     config.skipUnreadyPipelines = FindConfigValue<bool>(document, "video", "skip_unready_pipelines");
     config.disableCopyFilter = FindConfigValue<bool>(document, "video", "disable_copy_filter");
     config.constantMatrixIndexing = FindConfigValue<bool>(document, "video", "constant_matrix_indexing");
+    config.vertexRepack = FindConfigValue<std::string>(document, "video", "vertex_repack");
     config.threadedGx = FindConfigValue<bool>(document, "video", "threaded_gx");
     config.overlapFrameEncode = FindConfigValue<bool>(document, "video", "overlap_frame_encode");
     config.thermalAutoQuality = FindConfigValue<bool>(document, "video", "thermal_auto_quality");
@@ -702,6 +704,12 @@ inline bool SetConstantMatrixIndexing(bool value) {
     return WriteSetting("video", "constant_matrix_indexing", value ? "true" : "false");
 }
 
+// "auto", "off", "characters" or "all"; see AuroraSetVertexRepackMode. Read once at startup.
+inline bool SetVertexRepack(const std::string& value) {
+    Mutable().vertexRepack = value;
+    return WriteSetting("video", "vertex_repack", FormatString(value));
+}
+
 inline bool SetDisableCopyFilter(bool value) {
     Mutable().disableCopyFilter = value;
     return WriteSetting("video", "disable_copy_filter", value ? "true" : "false");
@@ -881,6 +889,10 @@ inline bool OverlapFrameEncode(bool fallback = true) {
 
 inline bool ConstantMatrixIndexing(bool fallback = false) {
     return Get().constantMatrixIndexing.value_or(fallback);
+}
+
+inline std::string VertexRepack(std::string fallback = "auto") {
+    return Get().vertexRepack.value_or(std::move(fallback));
 }
 
 inline bool DisableCopyFilter(bool fallback = true) {

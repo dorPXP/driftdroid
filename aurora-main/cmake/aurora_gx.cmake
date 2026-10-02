@@ -15,6 +15,7 @@ add_library(aurora_gx STATIC
         lib/gx/fifo.cpp
         lib/gx/frame_interpolation.cpp
         lib/gx/gx.cpp
+        lib/gx/vertex_repack.cpp
         lib/gx/pipeline.cpp
         lib/gx/shader.cpp
         lib/gx/shader_info.cpp

@@ -226,7 +226,13 @@ private:
 namespace aurora::gfx {
 inline constexpr bool UseTextureBuffer = false;
 inline constexpr uint64_t UniformBufferSize = 25165824;  // 24mb
+#if defined(__SWITCH__)
 inline constexpr uint64_t VertexBufferSize = 3145728;    // 3mb
+#else
+// Sized for gx::vertex_repack, whose aligned direct vertices are several times larger than the
+// indexed GX stream they replace.
+inline constexpr uint64_t VertexBufferSize = 16777216;   // 16mb
+#endif
 inline constexpr uint64_t IndexBufferSize = 2097152;     // 2mb
 inline constexpr uint64_t StorageBufferSize = 8388608;   // 8mb
 inline constexpr uint64_t TextureUploadSize = 25165824;  // 24mb
@@ -344,6 +350,10 @@ struct ConvRequest;
 void queue_palette_conv(tex_palette_conv::ConvRequest req);
 
 Range push_verts(const uint8_t* data, size_t length);
+// Like push_verts, but the returned range starts at a multiple of `alignment`.
+Range push_verts_aligned(const uint8_t* data, size_t length, size_t alignment);
+// Whether `length` more bytes still fit in this frame's vertex buffer.
+bool verts_fit(size_t length);
 template <typename T>
 static Range push_verts(ArrayRef<T> data) {
   return push_verts(reinterpret_cast<const uint8_t*>(data.data()), data.size() * sizeof(T));

@@ -8,6 +8,7 @@
 #include "gx_fmt.hpp"
 #include "pipeline.hpp"
 #include "shader_info.hpp"
+#include "vertex_repack.hpp"
 #include "../internal.hpp"
 
 #include <absl/container/flat_hash_map.h>
@@ -2173,8 +2174,22 @@ static const CachedPipelineState& resolve_pipeline_state(GXPrimitive prim, GXVtx
 
   PipelineConfig config{};
   populate_pipeline_config(config, prim, fmt);
+  // Adreno workaround: these draws upload CPU-repacked, aligned, fully direct vertices, so the
+  // pipeline is built for that layout. Must match vertex_repack::applies().
+  HashType repackSourceHash = 0;
+  u32 repackSourceStride = 0;
+  if (config.shaderConfig.lineMode == 0 && vertex_repack::enabled() &&
+      (config.shaderConfig.attrs[GX_VA_PNMTXIDX].attrType == GX_DIRECT || vertex_repack::all_draws())) UNLIKELY {
+    repackSourceHash = xxh3_hash(config, static_cast<HashType>(gfx::ShaderType::GX));
+    repackSourceStride = config.shaderConfig.vtxStride;
+    config.shaderConfig.vtxStride = vertex_repack::repacked_layout(config.shaderConfig.attrs);
+  }
   // cached_pipeline_state hands back a reference into a fixed direct-mapped table, so the address stays valid; the entry it points at can only be rewritten by another call to that function, and every such call goes through this miss path and replaces the memo in the same breath.
   const CachedPipelineState& state = cached_pipeline_state(config);
+  if (repackSourceStride != 0) UNLIKELY {
+    vertex_repack::note_pipeline(repackSourceHash, state.configHash, repackSourceStride,
+                                 config.shaderConfig.vtxStride);
+  }
   memo = Memo{
       .state = &state,
       .generation = generation,
@@ -2183,6 +2198,19 @@ static const CachedPipelineState& resolve_pipeline_state(GXPrimitive prim, GXVtx
       .fmt = fmt,
   };
   return state;
+}
+
+// Repacked vertices are several times larger than the GX stream. Running out of the frame's
+// vertex buffer would abort, so the draw is dropped instead (with up to 3 bytes of alignment).
+static bool repacked_verts_fit(size_t bytes) {
+  if (gfx::verts_fit(bytes + 3)) LIKELY {
+    return true;
+  }
+  static uint32_t dropped = 0;
+  if (dropped++ < 16) {
+    Log.warn("vertex repack: frame vertex buffer is full, dropping a draw of {} bytes", bytes);
+  }
+  return false;
 }
 
 bool submit_raw_draw(GXPrimitive prim, GXVtxFmt fmt, const uint8_t* vertices, uint16_t vtxCount,
@@ -2219,7 +2247,16 @@ bool submit_raw_draw(GXPrimitive prim, GXVtxFmt fmt, const uint8_t* vertices, ui
 
   // This entry point bypasses process(), so it owns the renderer lock itself.
   std::lock_guard gpuLock(aurora::renderer_gpu_mutex());
-  const gfx::Range vertRange = gfx::push_verts(vertices, vertexBytes);
+  gfx::Range vertRange;
+  if (vertex_repack::applies(prim)) UNLIKELY {
+    const auto& packed = vertex_repack::repack(fmt, vertices, vtxCount, vtxSize);
+    if (!repacked_verts_fit(packed.size())) UNLIKELY {
+      return true;
+    }
+    vertRange = gfx::push_verts_aligned(packed.data(), packed.size(), 4);
+  } else {
+    vertRange = gfx::push_verts(vertices, vertexBytes);
+  }
   const bool interpolationIdentityActive = frame_interpolation_identity_needed();
   const PnMtxUsage matrixUsage = interpolationIdentityActive
                                      ? pn_mtx_usage(vertices, vtxCount, vtxSize)
@@ -2286,7 +2323,17 @@ static bool handle_draw(u8 cmd, const u8* data, u32& pos, u32 size, bool bigEndi
 
   // Push raw vertex data to buffer
   const uint8_t* vertices = data + pos;
-  gfx::Range vertRange = gfx::push_verts(vertices, totalVtxBytes);
+  gfx::Range vertRange;
+  if (vertex_repack::applies(prim)) UNLIKELY {
+    const auto& packed = vertex_repack::repack(fmt, vertices, vtxCount, vtxSize);
+    if (!repacked_verts_fit(packed.size())) UNLIKELY {
+      pos += totalVtxBytes;
+      return true;
+    }
+    vertRange = gfx::push_verts_aligned(packed.data(), packed.size(), 4);
+  } else {
+    vertRange = gfx::push_verts(vertices, totalVtxBytes);
+  }
   pos += totalVtxBytes;
 
   // Try to merge with previous draw call

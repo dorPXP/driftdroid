@@ -776,6 +776,8 @@ struct BindGroupRanges {
   std::array<gfx::Range, MaxIndexAttr> vaRanges{};
 };
 void populate_pipeline_config(PipelineConfig& config, GXPrimitive primitive, GXVtxFmt fmt) noexcept;
+// Fills the per-attribute vertex layout for the current vertex descriptor and format; returns the stride.
+u8 populate_vertex_layout(std::array<AttrConfig, MaxVtxAttr>& attrs, GXVtxFmt fmt) noexcept;
 wgpu::RenderPipeline build_pipeline(const PipelineConfig& config, ArrayRef<wgpu::VertexBufferLayout> vtxBuffers,
                                     wgpu::ShaderModule shader, const char* label) noexcept;
 wgpu::ShaderModule build_shader(const ShaderConfig& config) noexcept;
