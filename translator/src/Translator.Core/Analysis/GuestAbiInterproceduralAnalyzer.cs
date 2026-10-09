@@ -75,7 +75,7 @@ public static class GuestAbiInterproceduralAnalyzer
         }
 
         var visible = new Dictionary<uint, GuestAbiContract>(externalContracts);
-        foreach (var (address, contract) in contracts) visible[address] = contract;
+        foreach (var (address, contract) in contracts) visible[address] = WithExternalNetWrites(address, contract);
 
         var pending = new bool[addresses.Length];
         var nextRound = new bool[addresses.Length];
@@ -110,7 +110,7 @@ public static class GuestAbiInterproceduralAnalyzer
                 var address = addresses[ordinal];
                 current[ordinal] = contract;
                 contracts[address] = contract;
-                visible[address] = contract;
+                visible[address] = WithExternalNetWrites(address, contract);
                 var callerList = callers[ordinal];
                 if (callerList is null) continue;
                 foreach (var caller in callerList) nextRound[caller] = true;
@@ -122,6 +122,15 @@ public static class GuestAbiInterproceduralAnalyzer
         }
 
         return new GuestAbiInterproceduralResult(contracts, BuildComponents(functions, contracts));
+
+        // An address with an external contract is a registered native: its translated PPC body
+        // never runs, so what it hands back in the nonvolatile registers is the native's answer.
+        // (The guest OSLoadContext body, which loads every register, otherwise marks the whole
+        // scheduler call tree as changing r14-r31.)
+        GuestAbiContract WithExternalNetWrites(uint address, GuestAbiContract contract) =>
+            externalContracts.TryGetValue(address, out var external)
+                ? contract with { GprNetWriteMask = external.GprNetWriteMask }
+                : contract;
     }
 
     /// <summary>
@@ -178,6 +187,7 @@ public static class GuestAbiInterproceduralAnalyzer
         left.DefinitelyWritesFpscr == right.DefinitelyWritesFpscr &&
         left.GqrDefiniteWriteMask == right.GqrDefiniteWriteMask &&
         left.HidDefiniteWriteMask == right.HidDefiniteWriteMask &&
+        left.GprNetWriteMask == right.GprNetWriteMask &&
         left.BoundaryFlags == right.BoundaryFlags &&
         SameTargets(left.DirectCallTargets, right.DirectCallTargets);
 

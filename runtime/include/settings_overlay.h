@@ -13,6 +13,9 @@ bool StartupScreenVisible() noexcept;
 // Android only: there is no F10 key to press, so the touch UI calls this directly instead.
 void ToggleTopBar() noexcept;
 void NotifyStrapInputAccepted() noexcept;
+// The game reported leaving a scene. The first one after the warning screen was accepted is the
+// warning screen itself going away, which is when the startup cover can lift.
+void NotifyBootSceneExited() noexcept;
 void AdvancePresentedFrame() noexcept;
 // The renderer the player asked for could not start and another one is in use. Shown on screen
 // for a few seconds, since the slower fallback otherwise looks like the game just running badly.

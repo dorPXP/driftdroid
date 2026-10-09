@@ -5,6 +5,9 @@
 // Copyright 2021 Dolphin Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#if defined(__SWITCH__)
+#include "switch_mods.h"
+#endif
 #include "hle/storage/riivolution.h"
 
 #include "hle/riivolution_contract.h"
@@ -15,6 +18,7 @@
 #include "runtime_config.h"
 #include "runtime_log.h"
 #include "runtime_product.h"
+#include "switch_launcher.h"
 
 #include <algorithm>
 #include <cctype>
@@ -89,10 +93,15 @@ void RiivoAddRoot(std::vector<RuntimeRiivolution::Overlay>& overlays, fs::path r
         return;
     }
 
+#if defined(__SWITCH__)
+    // Paths here carry a device prefix ("sdmc:/"), which canonicalisation is not written for.
+    fs::path normalized = root.lexically_normal();
+#else
     fs::path normalized = fs::weakly_canonical(root, ec);
     if (ec) {
         normalized = root.lexically_normal();
     }
+#endif
 
     const std::string comparable = RiivoComparablePath(normalized);
     const auto duplicate =
@@ -122,12 +131,30 @@ std::vector<RuntimeRiivolution::Overlay> RiivoDiscoverRoots() {
                      "command line or Config.toml");
     }
 
+#if defined(__SWITCH__)
+    // Mods switched on in the launcher's "Mods..." screen, highest priority first. Ahead of the
+    // Retro Rewind pack, so a mod can replace a file the pack also replaces.
+    for (const std::string& root : SwitchMods::EnabledRoots()) {
+        RiivoAddRoot(overlays, fs::path(root), "mod from the Mods folder");
+    }
+#endif
+
     // The one canonical Retro Rewind installation setup recorded. Only the
     // Retro Rewind product applies it: overlaying the base product with the
     // pack's menu archives made "base game" boot as a half-Retro-Rewind build.
-    if (const auto retroRewindRoot =
-            RuntimeProduct::IsRetroRewind() ? RuntimeConfigFile::RetroRewindRoot() : std::string{};
-        !retroRewindRoot.empty()) {
+    const auto retroRewindRoot =
+        RuntimeProduct::IsRetroRewind() ? RuntimeConfigFile::RetroRewindRoot() : std::string{};
+#if defined(__SWITCH__)
+    // Nothing writes retro_rewind_root on Switch: the pack is found where the player copied it.
+    // That is already a full "sdmc:/..." path - resolving it against the config folder, as below,
+    // would glue the two together and silently find nothing.
+    if (retroRewindRoot.empty() && RuntimeProduct::IsRetroRewind()) {
+        if (const std::string found = SwitchFindRetroRewindRoot(); !found.empty()) {
+            RiivoAddRoot(overlays, fs::path(found), "Retro Rewind pack on the SD card");
+        }
+    }
+#endif
+    if (!retroRewindRoot.empty()) {
         RiivoAddRoot(overlays, RuntimeNandPath::ResolveConfiguredPath(retroRewindRoot),
                      "canonical Retro Rewind installation");
     }

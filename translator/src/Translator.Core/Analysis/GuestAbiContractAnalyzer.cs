@@ -49,12 +49,33 @@ public sealed record GuestAbiContract(
     public byte GqrDefiniteWriteMask { get; init; }
     public byte HidDefiniteWriteMask { get; init; }
 
+    /// <summary>
+    /// GPRs whose value at return may differ from their value at entry. Equal to
+    /// <see cref="GprPossibleWriteMask"/> for the volatile registers; for the nonvolatile ones
+    /// (r14-r31) it leaves out every register this function saves in its prologue (and so
+    /// restores before returning) or only sees written by callees that preserve it. A caller
+    /// keeping such a register in a local does not have to reload it after the call.
+    /// See <see cref="GuestAbiContractAnalyzer.NonvolatileGprMask"/> for the assumptions.
+    /// </summary>
+    public uint GprNetWriteMask { get; init; } = uint.MaxValue;
+
     public bool HasFullSynchronizationFence =>
         (BoundaryFlags & GuestCallBoundaryFlags.RequiresCompleteContext) != 0;
 }
 
 public static class GuestAbiContractAnalyzer
 {
+    /// <summary>
+    /// r14-r31, which the PowerPC EABI makes callee-saved. Two things are taken on trust for
+    /// <see cref="GuestAbiContract.GprNetWriteMask"/>, both of which the guest program itself
+    /// depends on to run at all:
+    /// a function that stores an unmodified nonvolatile register to its stack frame in its entry
+    /// block restores it on every return path; and the target of an indirect call returns with
+    /// r14-r31 as it found them. A function that writes a nonvolatile register without saving it
+    /// (a restore thunk, an outlined epilogue, a mod continuation fragment) is still reported.
+    /// </summary>
+    public const uint NonvolatileGprMask = 0xFFFFC000u;
+
     private readonly record struct RegisterSet(
         uint Gpr, uint Fpr, byte Cr, bool Xer, bool Ctr, bool Lr, bool Fpscr, byte Gqr, byte Hid)
     {
@@ -146,6 +167,8 @@ public static class GuestAbiContractAnalyzer
 
         var readBeforeWrite = RegisterSet.Empty;
         var possibleWrites = RegisterSet.Empty;
+        // Nonvolatile GPRs that may come back changed, before prologue saves are taken off.
+        var nonvolatileNetWrites = 0u;
         var directTargets = new SortedSet<uint>();
         var boundaryFlags = GuestCallBoundaryFlags.None;
         for (var index = 0; index < blockCount; ++index)
@@ -159,6 +182,7 @@ public static class GuestAbiContractAnalyzer
                 Writes(instruction, calleeContracts, out var possibleInstructionWrites, out var definiteInstructionWrites);
                 possibleWrites = possibleWrites.Union(possibleInstructionWrites);
                 written = written.Union(definiteInstructionWrites);
+                nonvolatileNetWrites |= NonvolatileNetWrites(instruction, calleeContracts, possibleInstructionWrites.Gpr);
                 if (instruction is IrCall call && GuestTargetParser.TryParseAddress(call.Target, out var target))
                 {
                     if (!TryGetInlineThunk(target, out _, out _))
@@ -223,8 +247,174 @@ public static class GuestAbiContractAnalyzer
             DefinitelyWritesLr = definiteWrites.Lr,
             DefinitelyWritesFpscr = definiteWrites.Fpscr,
             GqrDefiniteWriteMask = definiteWrites.Gqr,
-            HidDefiniteWriteMask = definiteWrites.Hid
+            HidDefiniteWriteMask = definiteWrites.Hid,
+            GprNetWriteMask = (possibleWrites.Gpr & ~NonvolatileGprMask) |
+                              (nonvolatileNetWrites & possibleWrites.Gpr & NonvolatileGprMask &
+                               ~PrologueSavedNonvolatileGprs(function, calleeContracts))
         };
+    }
+
+    /// <summary>
+    /// The nonvolatile GPRs one instruction may leave changed for this function's caller, ignoring
+    /// this function's own prologue saves: everything it writes itself, what a direct callee
+    /// reports in its <see cref="GuestAbiContract.GprNetWriteMask"/>, and nothing for an indirect
+    /// call (see <see cref="NonvolatileGprMask"/>).
+    /// </summary>
+    private static uint NonvolatileNetWrites(
+        IrInstruction instruction,
+        IReadOnlyDictionary<uint, GuestAbiContract>? calleeContracts,
+        uint possibleGprWrites)
+    {
+        switch (instruction)
+        {
+            case IrIndirectCall indirectCall:
+                // The call's own destination register is written like any other.
+                return Register(indirectCall.Destination).Gpr & NonvolatileGprMask;
+            case IrCall call when GuestTargetParser.TryParseAddress(call.Target, out var target) &&
+                                  calleeContracts?.TryGetValue(target, out var callee) == true:
+                return (callee.GprNetWriteMask | Register(call.Destination).Gpr) & NonvolatileGprMask;
+            case IrCall call when calleeContracts is not null &&
+                                  GuestTargetParser.TryParseAddress(call.Target, out var unknownTarget) &&
+                                  !TryGetInlineThunk(unknownTarget, out _, out _):
+                // A direct target with no contract proves nothing; it may be a mod hook that
+                // rewrites this function's registers. Not for the local first pass (no contracts
+                // at all): the interprocedural fixpoint only converges if every mask starts small
+                // and grows, and starting this one full made recursive call cycles oscillate.
+                return NonvolatileGprMask;
+            default:
+                return possibleGprWrites & NonvolatileGprMask;
+        }
+    }
+
+    /// <summary>
+    /// Nonvolatile GPRs the function's opening straight-line code stores to the stack frame while
+    /// they still hold their entry value: <c>stw rN, d(r1)</c>, <c>stmw</c>, or an inline
+    /// <c>_savegpr_N</c> thunk. The scan follows fallthrough into blocks nothing else jumps to (the
+    /// lifter splits blocks at compares) and stops at the first guest call or branch, after which
+    /// a store no longer has to be a prologue save every path has executed.
+    /// </summary>
+    private static uint PrologueSavedNonvolatileGprs(
+        IrFunction function,
+        IReadOnlyDictionary<uint, GuestAbiContract>? calleeContracts)
+    {
+        var blocks = function.Blocks;
+        var entryIndex = -1;
+        var indexByLabel = new Dictionary<string, int>(blocks.Count, StringComparer.Ordinal);
+        for (var index = 0; index < blocks.Count; ++index)
+        {
+            indexByLabel[blocks[index].Label] = index;
+            if (blocks[index].Label == function.EntryLabel) entryIndex = index;
+        }
+
+        if (entryIndex < 0) return 0;
+
+        // How many blocks lead into each one, counting plain fallthrough.
+        var predecessorCounts = new int[blocks.Count];
+        for (var index = 0; index < blocks.Count; ++index)
+        {
+            var instructions = blocks[index].Instructions;
+            var terminator = instructions.Count == 0 ? null : instructions[instructions.Count - 1];
+            switch (terminator)
+            {
+                case IrBranch branch:
+                    Count(branch.TrueLabel);
+                    Count(branch.FalseLabel);
+                    break;
+                case IrJump jump:
+                    Count(jump.TargetLabel);
+                    break;
+                case IrJumpTable table:
+                    foreach (var tableCase in table.Cases) Count(tableCase.TargetLabel);
+                    break;
+                case IrReturn or IrIndirectJump or IrUndefined:
+                    break;
+                default:
+                    if (index + 1 < blocks.Count) ++predecessorCounts[index + 1];
+                    break;
+            }
+        }
+
+        var chain = new List<IrInstruction>();
+        for (var index = entryIndex; index >= 0;)
+        {
+            var instructions = blocks[index].Instructions;
+            chain.AddRange(instructions);
+            var terminator = instructions.Count == 0 ? null : instructions[instructions.Count - 1];
+            var next = terminator switch
+            {
+                IrJump jump => indexByLabel.GetValueOrDefault(jump.TargetLabel, -1),
+                IrBranch or IrJumpTable or IrReturn or IrIndirectJump or IrUndefined => -1,
+                _ => index + 1 < blocks.Count ? index + 1 : -1
+            };
+            // Only while this is still the one way through: a block with another way in may be a
+            // loop head, and the entry block itself must not be re-entered.
+            index = next > index && next != entryIndex && predecessorCounts[next] == 1 ? next : -1;
+        }
+
+        void Count(string label)
+        {
+            if (indexByLabel.TryGetValue(label, out var target)) ++predecessorCounts[target];
+        }
+
+        var saved = 0u;
+        var writtenGprs = 0u;
+        // Registers holding the stack pointer plus a constant: r1 itself, and the frame pointer a
+        // prologue sets up for _savegpr_N (r11 = r1 + size), whose stores survive as plain
+        // r11-relative ones once that thunk has been leaf-inlined.
+        var stackDerived = 1u << 1;
+        foreach (var instruction in chain)
+        {
+            switch (instruction)
+            {
+                case IrStore store:
+                    saved |= SavedRegister(store.Address.Base, store.Source, writtenGprs, stackDerived);
+                    break;
+                case IrResolvedStore store:
+                    saved |= SavedRegister(store.OriginalAddress.Base, store.Source, writtenGprs, stackDerived);
+                    break;
+                case IrResolvedStorePair pair:
+                    saved |= SavedRegister(pair.FirstOriginalAddress.Base, pair.FirstSource, writtenGprs, stackDerived);
+                    saved |= SavedRegister(pair.SecondOriginalAddress.Base, pair.SecondSource, writtenGprs, stackDerived);
+                    break;
+                case IrCall call when GuestTargetParser.TryParseAddress(call.Target, out var target):
+                    if (TryGetInlineThunk(target, out var thunk, out var start))
+                    {
+                        if (thunk == InlineThunkKind.SaveGpr)
+                            saved |= (uint.MaxValue << start) & NonvolatileGprMask & ~writtenGprs;
+                        break;
+                    }
+
+                    return saved;
+                case IrIndirectCall or IrIndirectJump or IrUndefined:
+                    return saved;
+            }
+
+            Writes(instruction, calleeContracts, out var possible, out _);
+            writtenGprs |= possible.Gpr;
+            var derivesFromStack = instruction switch
+            {
+                IrBinary { Op: "add", Left.Kind: "register", Right.Kind: "const" } add =>
+                    (Register(add.Left.RegisterName).Gpr & stackDerived) != 0,
+                IrAssign { Value.Kind: "register" } copy =>
+                    (Register(copy.Value.RegisterName).Gpr & stackDerived) != 0,
+                _ => false
+            };
+            stackDerived = derivesFromStack
+                ? stackDerived | possible.Gpr
+                : (stackDerived & ~possible.Gpr) | (1u << 1);
+        }
+
+        return saved;
+
+        static uint SavedRegister(string? addressBase, IrValue source, uint writtenGprs, uint stackDerived)
+        {
+            // Only a store into the stack frame counts: that is the one place a compiler puts a
+            // register it means to restore.
+            var baseRegister = Register(addressBase).Gpr;
+            if (baseRegister == 0 || (baseRegister & stackDerived) == 0 || source.Kind != "register") return 0;
+            var register = Register(source.RegisterName).Gpr & NonvolatileGprMask;
+            return register & ~writtenGprs;
+        }
     }
 
     /// <summary>

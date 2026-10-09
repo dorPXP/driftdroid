@@ -44,6 +44,8 @@ struct RuntimeUserConfig {
     std::optional<bool> skipUnreadyPipelines;
     std::optional<bool> disableCopyFilter;
     std::optional<bool> constantMatrixIndexing;
+    std::optional<bool> lowDetailComputerKarts;
+    std::optional<bool> thirtyFpsRaces;
     std::optional<std::string> vertexRepack;
     std::optional<bool> threadedGx;
     std::optional<bool> overlapFrameEncode;
@@ -461,6 +463,8 @@ inline RuntimeUserConfig ParseConfigDocument(const toml::value& document) {
     config.skipUnreadyPipelines = FindConfigValue<bool>(document, "video", "skip_unready_pipelines");
     config.disableCopyFilter = FindConfigValue<bool>(document, "video", "disable_copy_filter");
     config.constantMatrixIndexing = FindConfigValue<bool>(document, "video", "constant_matrix_indexing");
+    config.lowDetailComputerKarts = FindConfigValue<bool>(document, "video", "low_detail_computer_karts");
+    config.thirtyFpsRaces = FindConfigValue<bool>(document, "video", "thirty_fps_races");
     config.vertexRepack = FindConfigValue<std::string>(document, "video", "vertex_repack");
     config.threadedGx = FindConfigValue<bool>(document, "video", "threaded_gx");
     config.overlapFrameEncode = FindConfigValue<bool>(document, "video", "overlap_frame_encode");
@@ -704,6 +708,12 @@ inline bool SetConstantMatrixIndexing(bool value) {
     return WriteSetting("video", "constant_matrix_indexing", value ? "true" : "false");
 }
 
+// Computer karts use the game's split-screen models in single-player races. Applies from the next race.
+inline bool SetLowDetailComputerKarts(bool value) {
+    Mutable().lowDetailComputerKarts = value;
+    return WriteSetting("video", "low_detail_computer_karts", value ? "true" : "false");
+}
+
 // "auto", "off", "characters" or "all"; see AuroraSetVertexRepackMode. Read once at startup.
 inline bool SetVertexRepack(const std::string& value) {
     Mutable().vertexRepack = value;
@@ -887,8 +897,22 @@ inline bool OverlapFrameEncode(bool fallback = true) {
     return Get().overlapFrameEncode.value_or(fallback);
 }
 
+// Races run in the game's own 30 FPS mode. Applies from the next race.
+inline bool SetThirtyFpsRaces(bool value) {
+    Mutable().thirtyFpsRaces = value;
+    return WriteSetting("video", "thirty_fps_races", value ? "true" : "false");
+}
+
+inline bool ThirtyFpsRaces(bool fallback = false) {
+    return Get().thirtyFpsRaces.value_or(fallback);
+}
+
 inline bool ConstantMatrixIndexing(bool fallback = false) {
     return Get().constantMatrixIndexing.value_or(fallback);
+}
+
+inline bool LowDetailComputerKarts(bool fallback = false) {
+    return Get().lowDetailComputerKarts.value_or(fallback);
 }
 
 inline std::string VertexRepack(std::string fallback = "auto") {

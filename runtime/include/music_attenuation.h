@@ -21,6 +21,10 @@ bool IsMediaControlInitializationComplete() noexcept;
 // wants to drive this externally instead of via a monitor thread.
 void ReportExternalMediaPlaying(bool playing) noexcept;
 
+// The built-in music player (music_player.cpp) is playing with "mute the game's music" on: the
+// game's music bus goes silent exactly as it does for external media, whatever SetEnabled says.
+void SetMusicPlayerActive(bool active) noexcept;
+
 // Called from the guest scheduler/audio path. This applies state changes to
 // the live SoundPlayer buses, so changing a category or entering/leaving
 // attenuation never requires a scene or race restart.

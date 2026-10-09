@@ -374,7 +374,7 @@ public sealed partial class CxxLinearCodeGenerator
         var residency = _activeResidency ?? throw new InvalidOperationException(
             $"Resident state-free marshalling requested for 0x{address:X8} without an active residency.");
 
-        AppendFlush(sb, pad, ResidencyBoundarySync.StateFreeResidentOuter);
+        AppendBoundaryFlush(sb, pad, ResidencyBoundarySync.StateFreeResidentOuter);
         var inner = pad + "    ";
         sb.AppendLine($"{pad}if ({StateFreeAvailabilityCondition(address, stateFreeAbiContracts, stateFreeCallSymbols)}) {{");
         var arguments = StateFreeResidentCallArguments(residency, contract, callSiteLr);

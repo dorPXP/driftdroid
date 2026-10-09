@@ -314,10 +314,42 @@ static DeferredDnsCompletion ResolveDeferredDns(DeferredDnsWork work) {
     return completion;
 }
 
+#if defined(__SWITCH__)
+// Horizon threads cannot be detached, so a finished lookup thread used to be kept forever: one
+// leaked thread (and its stack) per DNS lookup, dozens within minutes of online play. Keep them
+// here instead and join the finished ones before starting the next.
+struct RetainedDnsWorker {
+    std::unique_ptr<std::thread> thread;
+    std::shared_ptr<std::atomic<bool>> done;
+};
+static std::mutex g_retainedDnsWorkersMutex;
+static std::vector<RetainedDnsWorker> g_retainedDnsWorkers;
+
+static void ReapFinishedDnsWorkers() {
+    std::lock_guard<std::mutex> lock(g_retainedDnsWorkersMutex);
+    for (auto it = g_retainedDnsWorkers.begin(); it != g_retainedDnsWorkers.end();) {
+        if (it->done->load(std::memory_order_acquire)) {
+            it->thread->join();
+            it = g_retainedDnsWorkers.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
+#endif
+
 static bool LaunchDeferredDns(DeferredDnsWork work) {
     std::unique_ptr<std::thread> worker;
+    const auto done = std::make_shared<std::atomic<bool>>(false);
+#if defined(__SWITCH__)
+    ReapFinishedDnsWorkers();
+#endif
     try {
-        worker = std::make_unique<std::thread>([work = std::move(work)]() mutable {
+        worker = std::make_unique<std::thread>([work = std::move(work), done]() mutable {
+            struct MarkDone {
+                std::shared_ptr<std::atomic<bool>> flag;
+                ~MarkDone() { flag->store(true, std::memory_order_release); }
+            } markDone{done};
             NetworkDeferredContract::RunWorker(
                 std::move(work),
                 [](const DeferredDnsWork& copiedWork) {
@@ -347,6 +379,13 @@ static bool LaunchDeferredDns(DeferredDnsWork work) {
         return false;
     }
 
+#if defined(__SWITCH__)
+    {
+        std::lock_guard<std::mutex> lock(g_retainedDnsWorkersMutex);
+        g_retainedDnsWorkers.push_back({std::move(worker), done});
+    }
+    return true;
+#endif
     (void)NetworkDeferredContract::DetachOrRelease(
         std::move(worker), [](std::exception_ptr error) noexcept {
             try {
@@ -1002,10 +1041,25 @@ bool Network_HLE_ProcessCompletions(CpuContext* cpu) {
     if (!cpu) {
         return false;
     }
+    DeferredNetworkStore& store = GetDeferredNetworkStore();
+    // This runs on every scheduler poll, thousands of times a second, and almost always with
+    // nothing to do (always, when playing offline). Leave before building the work queue below:
+    // an empty std::deque still allocates and frees two heap blocks, which was 1.6% of a race
+    // frame on Switch. pendingPolls/pendingConnects belong to this thread, so only the worker
+    // output needs its lock.
+    {
+        bool workerOutput = false;
+        {
+            std::lock_guard<std::mutex> lock(store.completedMutex);
+            workerOutput = !store.completed.empty();
+        }
+        if (!workerOutput && store.pendingPolls.empty() && store.pendingConnects.empty()) {
+            return false;
+        }
+    }
     NoteDeferredNetworkSchedulerThread("completion pump");
 
     std::deque<DeferredDnsCompletion> ready;
-    DeferredNetworkStore& store = GetDeferredNetworkStore();
     {
         std::lock_guard<std::mutex> lock(store.completedMutex);
         ready.swap(store.completed);

@@ -19,6 +19,8 @@ public sealed record RuntimeNativeGuestEffectSet(
 /// </summary>
 public static class RuntimeNativeGuestEffectAnalyzer
 {
+    private const uint OsLoadContextAddress = 0x801A1F58u;
+
     private static readonly Regex StubRegex = GeneratedMarkers.NativeOverrideSignaturePattern();
     private static readonly Regex RegistrationRegex = GeneratedMarkers.NativeFunctionRegistrationPattern();
     private static readonly Regex FatalRegex = GeneratedMarkers.FatalStubPattern();
@@ -87,6 +89,15 @@ public static class RuntimeNativeGuestEffectAnalyzer
                 contract = MergeAlternativeContracts(previous, contract);
                 isPrecise = precise.Contains(address) && isPrecise && !contract.HasFullSynchronizationFence;
             }
+            // The runtime wraps every native call, direct or dispatched, in PpcNonvolatileGprGuard
+            // (abi_bridge.h, ShouldPreserveNonvolatileGprsForRawCpuCall), so r14-r31 come back as
+            // they went in whatever the native did. OSLoadContext is the one exception there.
+            contract = contract with
+            {
+                GprNetWriteMask = address == OsLoadContextAddress
+                    ? uint.MaxValue
+                    : ~GuestAbiContractAnalyzer.NonvolatileGprMask
+            };
             contracts[address] = contract;
             if (isPrecise)
             {

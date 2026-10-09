@@ -27,7 +27,7 @@ import java.util.zip.ZipInputStream
  *    NOT by version number - so any future release that leaves Code.pul untouched (an
  *    assets/tracks-only update) is adopted automatically the day it ships, with no app update;
  *  - a release that DOES change Code.pul is detected as unsupported *before* downloading 1.9GB,
- *    by fetching that version's ~700KB delta archive first (see [inspectDelta]), and the player
+ *    by reading that version's delta archive first (see [inspectDelta]), and the player
  *    is told exactly that rather than being silently left on an old version.
  *
  * Every URL is constrained to the official HTTPS hosts below; nothing here will follow a redirect
@@ -109,36 +109,51 @@ internal object RetroRewindCatalog {
             .filter { compareVersions(it.version, installedVersion) > 0 && compareVersions(it.version, targetVersion) <= 0 }
             .sortedWith(RELEASE_ORDER)
 
-    /**
-     * Downloads one release's delta archive (small - hundreds of KB to a few tens of MB, against
-     * 1.9GB for a full install) and reports whether that release is one we can run, by hashing
-     * the Code.pul inside it. This is the whole reason the app can decide "is the newest release
-     * supported?" cheaply, before committing a player to a huge download on mobile data.
-     *
-     * [saveTo], when given, keeps the downloaded archive so an install that goes ahead doesn't
-     * have to fetch the same bytes twice.
-     */
-    fun inspectDelta(release: Release, saveTo: File? = null): DeltaVerdict =
+    /** Every release at or below [version], newest first. */
+    fun atOrBelow(releases: List<Release>, version: String): List<Release> =
+        releases.filter { compareVersions(it.version, version) <= 0 }.sortedWith(RELEASE_ORDER).asReversed()
+
+    /** SHA-256 of an install's Binaries/Code.pul, or null if there isn't a readable one. */
+    fun installedCodePulSha256(retroRewindRoot: File): String? =
         try {
-            val bytes = openStream(release.deltaUrl, MAX_DELTA_BYTES).use { it.readBytes() }
-            saveTo?.let { target ->
-                target.parentFile?.mkdirs()
-                target.writeBytes(bytes)
-            }
-            val codePul = readZipEntry(bytes.inputStream(), CODE_PUL_ENTRY_SUFFIX)
-            if (codePul == null) {
-                DeltaVerdict.AssetsOnly
-            } else {
-                val sha = sha256Hex(codePul)
-                if (RetroRewindRelease.SUPPORTED_CODE_PUL_SHA256.any { it.equals(sha, ignoreCase = true) }) {
-                    DeltaVerdict.SupportedCodeChange
-                } else {
-                    DeltaVerdict.UnsupportedCodeChange(sha)
-                }
-            }
+            File(retroRewindRoot, "Binaries/Code.pul").takeIf { it.isFile }?.let { sha256Hex(it.readBytes()) }
+        } catch (_: Exception) {
+            null
+        }
+
+    /**
+     * Reports whether a release is one we can run, by hashing the Code.pul inside its delta
+     * archive (usually small - hundreds of KB to a few tens of MB - but 6.13.0's was 614MB). This
+     * is the whole reason the app can decide "is the newest release supported?" before
+     * committing a player to a huge download on mobile data.
+     */
+    fun inspectDelta(release: Release): DeltaVerdict {
+        // Already known to change code: no need to fetch anything to judge it.
+        RetroRewindRelease.KNOWN_CODE_PUL_SHA256[release.version]?.let { return verdictFor(it) }
+        return try {
+            // Read as it arrives and dropped as soon as Code.pul has gone by, so even a large
+            // update archive is never held in memory or written to storage just to be judged.
+            val codePul = openStream(release.deltaUrl, MAX_DELTA_BYTES).use { readZipEntry(it, CODE_PUL_ENTRY_SUFFIX) }
+            if (codePul == null) DeltaVerdict.AssetsOnly else verdictFor(sha256Hex(codePul))
         } catch (e: Exception) {
             DeltaVerdict.Failed(e.message ?: "couldn't check that release")
         }
+    }
+
+    /** Same verdict for an update archive that has already been downloaded to [archive]. */
+    fun inspectDeltaFile(archive: File): DeltaVerdict =
+        try {
+            val codePul = archive.inputStream().use { readZipEntry(it, CODE_PUL_ENTRY_SUFFIX) }
+            if (codePul == null) DeltaVerdict.AssetsOnly else verdictFor(sha256Hex(codePul))
+        } catch (e: Exception) {
+            DeltaVerdict.Failed(e.message ?: "couldn't check that release")
+        }
+
+    fun isSupportedCodePul(sha256: String?): Boolean =
+        sha256 != null && RetroRewindRelease.SUPPORTED_CODE_PUL_SHA256.any { it.equals(sha256, ignoreCase = true) }
+
+    private fun verdictFor(codePulSha256: String): DeltaVerdict =
+        if (isSupportedCodePul(codePulSha256)) DeltaVerdict.SupportedCodeChange else DeltaVerdict.UnsupportedCodeChange(codePulSha256)
 
     /**
      * Newest release this app can actually run.
@@ -307,7 +322,7 @@ internal object RetroRewindCatalog {
     private val VERSION_PATTERN = Regex("^[0-9]+(?:\\.[0-9]+){1,3}$")
     private const val CODE_PUL_ENTRY_SUFFIX = "Binaries/Code.pul"
     private const val MAX_MANIFEST_BYTES = 1L * 1024 * 1024
-    private const val MAX_DELTA_BYTES = 512L * 1024 * 1024
+    private const val MAX_DELTA_BYTES = 4L * 1024 * 1024 * 1024
     private const val MAX_SUPPORT_PROBES = 8
     private const val MAX_REDIRECTS = 5
     private const val CONNECT_TIMEOUT_MS = 30_000

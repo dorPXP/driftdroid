@@ -249,7 +249,11 @@ inline void PpcWritePairPsqInline(uint32_t addr, T first, T second)
 // reading stale bytes, and unmapped pages commit on demand, same as MemoryInline::Flat* loads.
 MKW_PPC_FORCE_INLINE const uint8_t* PpcTryGetPsqReadableHostInline(uint32_t addr)
 {
-    return MKW_FLAT_GUEST_BASE + addr;
+    const uint8_t* host = MKW_FLAT_GUEST_BASE + addr;
+    // The reservation base is never zero and the sum cannot wrap a 64-bit pointer; saying so
+    // drops the null test the callers would otherwise carry on every paired load.
+    if (host == nullptr) __builtin_unreachable();
+    return host;
 }
 
 // Same reduction for stores. Still refuses a 32-bit address wrap (one host access can't
@@ -257,14 +261,22 @@ MKW_PPC_FORCE_INLINE const uint8_t* PpcTryGetPsqReadableHostInline(uint32_t addr
 // stored value and a null result must preserve the cold GX FIFO dispatch path byte for byte.
 // The old 1 MiB page-cross refusal is gone since the whole 4 GiB is now contiguous; deferred,
 // executable, and unmapped pages still trap.
+MKW_PPC_FORCE_INLINE bool PpcPsqStoreNeedsSlowPathInline(uint32_t addr)
+{
+    // An 8-byte store at addr needs the slow path when it would wrap the 32-bit address space
+    // (addr > 0xFFFFFFF8) or when either end lies in the MMIO window 0xCC000000..0xCDFFFFFF,
+    // i.e. addr is in 0xCBFFFFF9..0xCDFFFFFF. Same set as testing the wrap and both ends
+    // separately, in two compares instead of three tests.
+    return (addr - 0xCBFFFFF9u) < 0x02000007u || addr > UINT32_MAX - 7u;
+}
+
 MKW_PPC_FORCE_INLINE uint8_t* PpcTryGetPsqWritableHostInline(uint32_t addr)
 {
-    if (addr > UINT32_MAX - 7u) [[unlikely]]
+    if (PpcPsqStoreNeedsSlowPathInline(addr)) [[unlikely]]
         return nullptr;
-    if (MemoryInline::FlatWriteNeedsPolicy(addr) ||
-        MemoryInline::FlatWriteNeedsPolicy(addr + 7u)) [[unlikely]]
-        return nullptr;
-    return MKW_FLAT_GUEST_BASE + addr;
+    uint8_t* host = MKW_FLAT_GUEST_BASE + addr;
+    if (host == nullptr) __builtin_unreachable();  // see PpcTryGetPsqReadableHostInline
+    return host;
 }
 
 inline double PpcLoadPairPsqFloatFastInline(uint32_t addr)

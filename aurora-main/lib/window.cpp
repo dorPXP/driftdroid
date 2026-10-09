@@ -28,6 +28,8 @@
 
 #if defined(__SWITCH__)
 #include <switch.h>
+
+#include "switch/input_switch.hpp"
 #endif
 
 #if defined(SDL_PLATFORM_ANDROID)
@@ -405,6 +407,10 @@ const AuroraEvent* poll_events() {
       Log.warn("SDL_WaitEvent failed: {}", SDL_GetError());
     }
   }
+#if defined(__SWITCH__)
+  // Before the events are read, so a controller that just connected is announced in this poll.
+  input::switch_pad::poll_connections();
+#endif
   while (SDL_PollEvent(&event)) {
     process_event(event);
   }

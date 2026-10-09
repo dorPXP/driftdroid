@@ -396,12 +396,13 @@ public class RegisterResidencyCodeGenTests
             Emit(caller, guestAbiContracts: contracts),
             "narrowed_fence");
 
-        // Full synchronization, asserted by shape: r5 is flushed even though the
-        // callee is declared unable to write it, and r4 is reloaded even though
-        // this frame only reads it. Narrowing would have dropped both.
+        // Full synchronization, asserted by shape: r5 is flushed and read back even though
+        // the callee is declared unable to write it. Narrowing would have dropped both.
+        // (r4 is not read back: nothing after the call reads it, and a dead local is left stale.)
         var call = narrowed.IndexOf("InvokeDirectCpu<0x80002000u>(ctx);", StringComparison.Ordinal);
         Assert.Contains("ctx->gpr[5] = r5;", narrowed[..call], StringComparison.Ordinal);
-        Assert.Contains("    r4 = ctx->gpr[4];", narrowed[call..], StringComparison.Ordinal);
+        Assert.Contains("    r5 = ctx->gpr[5];", narrowed[call..], StringComparison.Ordinal);
+        Assert.DoesNotContain("    r4 = ctx->gpr[4];", narrowed[call..], StringComparison.Ordinal);
     }
 
     [Fact]

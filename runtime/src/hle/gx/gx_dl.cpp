@@ -1300,16 +1300,32 @@ static void ApplyAuroraVtxAttrFmt(GXVtxFmt fmt) {
     if (!hadValidState) {
         s_appliedVtxStateMatchesHle = false;
     }
+    // This runs for every drawing display list (hundreds per frame) and nearly always finds the
+    // row already published; the 26-step compare below was 2% of a race frame on Switch
+    // (profile 2026-10-06). Two exact shortcuts: the whole mirror is a verbatim copy of HLE state
+    // at the current generation, or this one row is byte-identical to its HLE row.
+    const auto& hleRow = g_hleGxState.vtxAttrFmt[fmt];
+    if (hadValidState) {
+        if (s_appliedVtxStateMatchesHle && s_appliedVtxStateGeneration == g_hleGxState.vtxStateGeneration) {
+            return;
+        }
+        if (std::memcmp(s_appliedVtxAttrFmt[fmt], hleRow, sizeof(hleRow)) == 0) {
+            return;
+        }
+    }
     for (int attr = 0; attr < 26; ++attr) {
         if (attr == GX_VA_NBT) continue;
         if (IsMatrixIndexAttr(static_cast<GXAttr>(attr))) continue;
-        const auto& f = g_hleGxState.vtxAttrFmt[fmt][attr];
+        const auto& f = hleRow[attr];
         if (hadValidState && SameVtxAttrFmt(s_appliedVtxAttrFmt[fmt][attr], f)) {
             continue;
         }
         GXSetVtxAttrFmt(fmt, static_cast<GXAttr>(attr), f.cnt, f.type, f.frac);
         s_appliedVtxAttrFmt[fmt][attr] = f;
     }
+    // Whole row, including the attributes the loop never publishes, so the byte compare above
+    // can succeed next time.
+    std::memcpy(s_appliedVtxAttrFmt[fmt], hleRow, sizeof(hleRow));
     s_appliedVtxAttrFmtValid = true;
 }
 
@@ -1432,6 +1448,17 @@ extern "C" void GX__CallDisplayList_80172f64(uint32_t listAddr, uint32_t nbytes)
     try {
         const uint8_t* list = static_cast<const uint8_t*>(GuestToHostPtr(listAddr, nbytes));
         if (!list) return;
+        // A list's bytes are first read when they are copied to the GX worker further down, and by
+        // then they have usually fallen out of the cache since last frame: that copy was about 3%
+        // of a race frame on Switch, nearly all of it waiting for memory. Asking for the first
+        // lines now lets them arrive while the lookup below runs. Most lists are a few lines long.
+        __builtin_prefetch(list);
+        __builtin_prefetch(list + 64);
+        __builtin_prefetch(list + 128);
+        __builtin_prefetch(list + 192);
+        if (!IsDisplayListActive()) {
+            GxServiceDeferredTimingFromDisplayList();
+        }
 
         const bool allowScanCache = nbytes <= kDlScanCacheMaxEntryBytes;
         const uint64_t scanLayoutHash = allowScanCache ? HashScanLayoutState() : 0;

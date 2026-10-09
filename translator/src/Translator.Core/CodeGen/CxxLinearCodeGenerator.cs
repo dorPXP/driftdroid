@@ -272,6 +272,7 @@ public sealed partial class CxxLinearCodeGenerator
             var previousFifoBurstSlot = _activeGpuFifoBurstSlot;
             var previousHoistedGqrIndices = _hoistedGqrIndices;
             _activeResidency = residency;
+            residency?.BeginBody();
             _emittedDirectCallTargets = emittedDirectCallTargets;
             _emittedLocalLabelAddresses = emittedLocalLabelAddresses;
             _activeGpuFifoBurstSlot = null;
@@ -330,6 +331,7 @@ public sealed partial class CxxLinearCodeGenerator
                 {
                     var localConstants = new Dictionary<string, uint>(StringComparer.OrdinalIgnoreCase);
                     var label = labelNames[block.Label];
+                    residency?.BeginBlock(block.Label);
                     RecordEmittedLocalLabel(label);
                     body.AppendLine($"{label}:");
                     body.AppendLine("{");
@@ -365,7 +367,12 @@ public sealed partial class CxxLinearCodeGenerator
                             directCallOrdinal = priorCalls;
                         }
 
-                        if (blockSuppressed is not null && i < blockSuppressed.Length && blockSuppressed[i])
+                        var instructionSuppressed =
+                            blockSuppressed is not null && i < blockSuppressed.Length && blockSuppressed[i];
+                        residency?.BeginInstruction(
+                            instructionSuppressed ? 0u : DefiniteGprWrites(block.Instructions[i]),
+                            instructionSuppressed ? 0u : IrGprReads(block.Instructions[i]));
+                        if (instructionSuppressed)
                         {
                             // Provably dead condition-flag or link-register
                             // traffic. The constant tracker still observes it so
@@ -404,6 +411,7 @@ public sealed partial class CxxLinearCodeGenerator
                         EmitHoistedGqrReloads(body, "    ", block.Instructions[i], hoistedGqrIndices, gqrCalleeWriteMasks);
                     }
 
+                    residency?.BeginInstruction(0u, term is null ? 0u : IrGprReads(term));
                     switch (term)
                     {
                         case IrUndefined undef:
@@ -493,6 +501,7 @@ public sealed partial class CxxLinearCodeGenerator
                     body.AppendLine();
                 }
 
+                residency?.EndBlock();
                 body.Append('}');
                 // The residency discovery pass only exists for its side effects
                 // on the recorder; materializing its text costs a full copy of
@@ -523,6 +532,10 @@ public sealed partial class CxxLinearCodeGenerator
             var recorder = RegisterResidency.CreateRecorder();
             EmitFunctionBody(recorder, bodyBufferBaseLength, discardResult: true);
             var discovered = recorder.Snapshot();
+            discovered.SolveDirtyFlow(
+                func.Blocks.Select(static block => block.Label).ToArray(),
+                func.EntryLabel,
+                label => cfg.Successors(label));
             if (!discovered.IsEmpty)
             {
                 RequireResidencyNamesAreFree(
@@ -551,6 +564,8 @@ public sealed partial class CxxLinearCodeGenerator
         sb.AppendLine();
         var guestAbiMarker = GeneratedMarkers.GuestAbi(guestAbiContract);
         sb.AppendLine($"// {guestAbiMarker}");
+        // Diagnostic only (nothing parses it): the nonvolatile GPRs this body may hand back changed.
+        sb.AppendLine($"// gpr_net_write=0x{guestAbiContract.GprNetWriteMask & GuestAbiContractAnalyzer.NonvolatileGprMask:X8}");
         // Registration is translator-internal, not code: real registration happens via the shard emitter's bulk
         // registration TUs. This survives only as a marker comment (matching RECOMP_GUEST_ABI's shape) that the
         // shard emitter and dispatch profile parse out, then strip when composing a compiled shard.

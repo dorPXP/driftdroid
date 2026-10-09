@@ -252,7 +252,12 @@ heats up.
 **Characters or menu icons are stretched across the screen.**
 A driver bug on Snapdragon 8 Elite class GPUs (Adreno 8xx). The fix turns itself on for those
 GPUs; if you still see it, set **Fix stretched graphics (Snapdragon)** in the settings sidebar to
-**Everything**.
+**Everything**, or try a different GPU driver (next question).
+
+**Can I use a different GPU driver?**
+On Snapdragon phones, yes: **Graphics...** -> **GPU driver...** installs an AdrenoTools driver
+package such as Turnip. DriftDroid does not ship drivers; where to get them and how to check which
+one is active is in [`docs/android-gpu-compatibility.md`](docs/android-gpu-compatibility.md).
 
 **I picked Vulkan but it says OpenGL ES.**
 The game shows a notice at start when the renderer you chose could not start and another one was
@@ -260,7 +265,7 @@ used. Please report the device and GPU - that is exactly the list that needs fix
 
 **Some characters or objects are invisible.**
 A few Adreno GPUs miscompile one of the shaders. Enable **Fix missing characters (some Adreno
-GPUs)** in the settings sidebar.
+GPUs)** in the settings sidebar. It turns itself on for the Adreno 750 (Galaxy S24 class).
 
 **The game crashed / stopped with an error.**
 Open an issue with the crash template. If you're on a debug build you can pull the run log with:

@@ -28,7 +28,16 @@ struct CachedShaderModule {
 std::mutex sShaderModuleCacheMutex;
 absl::flat_hash_map<ShaderConfig, std::shared_ptr<CachedShaderModule>, ShaderConfigHash> sShaderModuleCache;
 
-wgpu::ShaderModule cached_shader_module(const ShaderConfig& config) {
+// Entries live only while a pipeline is being built from them. Dawn keeps a shader module's
+// parsed program (Tint's AST and semantic data, megabytes for a GX shader) for as long as the
+// application holds a reference to the module, and frees it when the last one is dropped; the
+// pipelines keep the module itself alive. Holding every module here for the whole session meant a
+// run that had to compile a few hundred shaders - a new or reset shader cache, or an update that
+// changed the generated shader text - ran the process out of memory (std::bad_alloc inside Tint
+// after about 12 minutes on Switch). So this map only joins callers that want the same shader at
+// the same moment; the last one to finish removes the entry. A later request for the same shader
+// builds its text again and Dawn hands back the module it already has.
+std::shared_ptr<CachedShaderModule> acquire_shader_module(const ShaderConfig& config) {
   std::shared_ptr<CachedShaderModule> entry;
   {
     std::unique_lock lock{sShaderModuleCacheMutex};
@@ -39,7 +48,7 @@ wgpu::ShaderModule cached_shader_module(const ShaderConfig& config) {
     } else {
       entry = it->second;
       entry->ready.wait(lock, [&] { return !entry->compiling; });
-      return entry->module;
+      return entry;
     }
   }
 
@@ -50,14 +59,28 @@ wgpu::ShaderModule cached_shader_module(const ShaderConfig& config) {
     entry->compiling = false;
   }
   entry->ready.notify_all();
-  return module;
+  return entry;
+}
+
+void release_shader_module(const ShaderConfig& config, std::shared_ptr<CachedShaderModule>& entry) {
+  std::lock_guard lock{sShaderModuleCacheMutex};
+  // The map holds one reference and this caller one; anyone else still building holds more.
+  if (entry.use_count() == 2) {
+    const auto it = sShaderModuleCache.find(config);
+    if (it != sShaderModuleCache.end() && it->second == entry) {
+      sShaderModuleCache.erase(it);
+    }
+  }
+  entry.reset();
 }
 } // namespace
 
 wgpu::RenderPipeline create_pipeline(const PipelineConfig& config) {
   ZoneScoped;
-  const auto shader = cached_shader_module(config.shaderConfig);
-  return build_pipeline(config, {}, shader, "GX Pipeline");
+  auto shader = acquire_shader_module(config.shaderConfig);
+  auto pipeline = build_pipeline(config, {}, shader->module, "GX Pipeline");
+  release_shader_module(config.shaderConfig, shader);
+  return pipeline;
 }
 
 void clear_shader_module_cache() {

@@ -33,6 +33,7 @@ constexpr size_t kSoundPlayerCount = 11;
 
 std::atomic<bool> g_enabled{false};
 std::atomic<bool> g_externalMediaPlaying{false};
+std::atomic<bool> g_musicPlayerActive{false};
 std::atomic<bool> g_mediaControlAvailable{false};
 std::atomic<bool> g_mediaControlInitializationComplete{false};
 std::atomic<float> g_musicVolume{1.0f};
@@ -150,8 +151,8 @@ float AppliedSoundPlayerVolume(size_t playerIndex, float requestedVolume, bool a
 }
 
 bool ShouldAttenuate() noexcept {
-    return g_enabled.load(std::memory_order_acquire) &&
-           g_externalMediaPlaying.load(std::memory_order_acquire);
+    return g_musicPlayerActive.load(std::memory_order_acquire) ||
+           (g_enabled.load(std::memory_order_acquire) && g_externalMediaPlaying.load(std::memory_order_acquire));
 }
 
 #if defined(_WIN32)
@@ -232,6 +233,10 @@ bool IsMediaControlInitializationComplete() noexcept {
 
 void ReportExternalMediaPlaying(bool playing) noexcept {
     g_externalMediaPlaying.store(playing, std::memory_order_release);
+}
+
+void SetMusicPlayerActive(bool active) noexcept {
+    g_musicPlayerActive.store(active, std::memory_order_release);
 }
 
 void SetMusicVolume(float volume) noexcept {

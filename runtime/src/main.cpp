@@ -1,6 +1,9 @@
 #if defined(__SWITCH__)
 #include "switch_bundled_files.h"
 #include "switch_launcher.h"
+namespace GuestFlat {
+void SwitchReleaseForHandoff() noexcept;
+}
 #endif
 #include <algorithm>
 #include <atomic>
@@ -52,6 +55,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #include <switch.h>
+#include <malloc.h>
 #include <unwind.h>
 #else
 #include <cerrno>
@@ -197,8 +201,11 @@ void SwitchSpreadHelperThread(u32 handle) noexcept {
 // Recorded for the profiler's window files, which are the one log reliably read back from the card.
 std::atomic<int> g_switchGxWorkerCore{-1};
 std::atomic<int> g_switchAudioMixCore{-1};
+// The two helper threads the profiler also samples (0 = GX worker, 1 = AX mix worker).
+std::atomic<Handle> g_switchHelperThreadHandles[2]{INVALID_HANDLE, INVALID_HANDLE};
 
 extern "C" void SwitchConfigureGxWorkerThread() {
+    g_switchHelperThreadHandles[0].store(threadGetCurHandle(), std::memory_order_relaxed);
     const int guestCore = g_switchGuestCore.load(std::memory_order_relaxed);
     u64 processMask = 0;
     if (guestCore < 0 || R_FAILED(svcGetInfo(&processMask, InfoType_CoreMask, CUR_PROCESS_HANDLE, 0))) {
@@ -223,6 +230,7 @@ extern "C" void SwitchConfigureGxWorkerThread() {
 // core the GX worker is NOT pinned to. Its mask keeps every non-guest core so it can still run
 // elsewhere when that core is busy.
 extern "C" void SwitchConfigureAudioMixThread() {
+    g_switchHelperThreadHandles[1].store(threadGetCurHandle(), std::memory_order_relaxed);
     const int guestCore = g_switchGuestCore.load(std::memory_order_relaxed);
     u64 processMask = 0;
     if (guestCore < 0 || R_FAILED(svcGetInfo(&processMask, InfoType_CoreMask, CUR_PROCESS_HANDLE, 0))) {
@@ -568,6 +576,62 @@ struct DlScanCacheCounters {
 extern DlScanCacheCounters g_dlScanCacheCounters;
 
 constexpr unsigned kHostProfileWindowFiles = 80;
+
+// The GX worker and the AX mix worker, sampled at a quarter of the guest thread's rate: where a
+// helper thread spends its time decides how long the guest waits for it. Only the sampler thread
+// touches these tables. Key = (PC bucket, LR bucket), so a leaf like memcpy keeps its caller.
+struct HelperProfile {
+    const char* tag;
+    std::unordered_map<uint64_t, uint64_t> hits;  // (pc >> 6) << 32 | (lr >> 6)
+    uint64_t samples = 0;
+    uint64_t failures = 0;
+};
+HelperProfile g_helperProfiles[2] = {{"gx", {}, 0, 0}, {"mix", {}, 0, 0}};
+
+void HelperProfileSample(int index) {
+    const Handle handle = g_switchHelperThreadHandles[index].load(std::memory_order_relaxed);
+    const u64 base = SwitchModuleBase();
+    if (handle == INVALID_HANDLE || base == 0) {
+        return;
+    }
+    HelperProfile& profile = g_helperProfiles[index];
+    ThreadContext ctx{};
+    ++profile.samples;
+    const Result pauseRc = svcSetThreadActivity(handle, ThreadActivity_Paused);
+    const Result ctxRc = R_SUCCEEDED(pauseRc) ? svcGetThreadContext3(&ctx, handle) : pauseRc;
+    if (R_SUCCEEDED(pauseRc)) {
+        svcSetThreadActivity(handle, ThreadActivity_Runnable);
+    }
+    if (R_FAILED(ctxRc) || ctx.pc.x < base) {
+        ++profile.failures;
+        return;
+    }
+    const uint64_t pc = (ctx.pc.x - base) >> 6;
+    const uint64_t lr = ctx.lr >= base ? (ctx.lr - base) >> 6 : 0;
+    ++profile.hits[(pc << 32) | (lr & 0xFFFFFFFFull)];
+}
+
+void HelperProfileWriteWindows(unsigned window) {
+    for (HelperProfile& profile : g_helperProfiles) {
+        char path[96];
+        std::snprintf(path, sizeof(path), "sdmc:/switch/WiiCompiled/profile_windows/w%02u_%s.txt",
+                      window % kHostProfileWindowFiles, profile.tag);
+        if (FILE* out = std::fopen(path, "w")) {
+            std::fprintf(out, "helper=%s window=%u samples=%llu failures=%llu\n", profile.tag, window,
+                         static_cast<unsigned long long>(profile.samples),
+                         static_cast<unsigned long long>(profile.failures));
+            for (const auto& [key, count] : profile.hits) {
+                std::fprintf(out, "%llu 0x%llx 0x%llx\n", static_cast<unsigned long long>(count),
+                             static_cast<unsigned long long>((key >> 32) << 6),
+                             static_cast<unsigned long long>((key & 0xFFFFFFFFull) << 6));
+            }
+            std::fclose(out);
+        }
+        profile.hits.clear();
+        profile.samples = 0;
+        profile.failures = 0;
+    }
+}
 uint64_t g_hostProfilePrevHits[kHostProfileSlots]{};
 uint64_t g_hostProfilePrevSamples = 0;
 uint64_t g_hostProfilePrevPresents = 0;
@@ -597,6 +661,7 @@ void HostProfileWriteWindow(double seconds) {
     const unsigned window = g_hostProfileWindow++;
     const double fps = seconds > 0.0 ? static_cast<double>(presents) / seconds : 0.0;
     mkdir("sdmc:/switch/WiiCompiled/profile_windows", 0777);
+    HelperProfileWriteWindows(window);
     char path[96];
     std::snprintf(path, sizeof(path), "sdmc:/switch/WiiCompiled/profile_windows/w%02u.txt",
                   window % kHostProfileWindowFiles);
@@ -674,6 +739,13 @@ void HostProfileWriteWindow(double seconds) {
                          static_cast<unsigned long long>(now.digests - previous.digests),
                          static_cast<unsigned long long>(now.scans - previous.scans),
                          static_cast<unsigned long long>(now.clears - previous.clears));
+            {
+                // Grows from window to window when something leaks.
+                const struct mallinfo heap = mallinfo();
+                std::fprintf(out, "# heap in_use_mib=%llu obtained_mib=%llu\n",
+                             static_cast<unsigned long long>(static_cast<uint64_t>(heap.uordblks) >> 20),
+                             static_cast<unsigned long long>(static_cast<uint64_t>(heap.arena) >> 20));
+            }
             previous = now;
         }
         {
@@ -795,6 +867,9 @@ void StartSwitchGuestProfiler() {
                     }
                 }
             }
+            if ((sinceReport & 3) == 0) {
+                HelperProfileSample((sinceReport >> 2) & 1);  // each helper every 8 ms
+            }
             if (++sinceReport >= 15000) {  // ~15 s of samples
                 sinceReport = 0;
                 ProfileWriteReport();
@@ -831,17 +906,43 @@ __attribute__((constructor(101))) static void SwitchPgoBootTraceStaticInit() {
 // never be flushed. Dump them on a timer instead. libgcov MERGES each dump into the .gcda already
 // on disk, and the in-memory counters are cumulative, so without the reset every dump would add
 // the whole run so far again and the first minutes (boot, menus) would be counted many times.
+std::atomic<bool> g_switchGcovTimerStop{false};
+std::thread* g_switchGcovTimerThread = nullptr;
+
 void StartSwitchGcovDumpTimer() {
-    // Leaked, not detached: pthread_detach is ENOSYS on devkitA64 (see StartSwitchGuestProfiler).
-    new std::thread([] {
+    // Kept (not detached: pthread_detach is ENOSYS on devkitA64, see StartSwitchGuestProfiler) so
+    // StopSwitchGcovDumpTimer can join it.
+    g_switchGcovTimerThread = new std::thread([] {
         for (;;) {
-            std::this_thread::sleep_for(std::chrono::seconds(60));
+            for (int tenths = 0; tenths < 600; ++tenths) {
+                if (g_switchGcovTimerStop.load(std::memory_order_relaxed)) {
+                    return;
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            }
             SwitchPgoBootTrace("gcov dump begins");
             __gcov_dump();
             __gcov_reset();
             SwitchPgoBootTrace("gcov dump done");
         }
     });
+}
+
+// The launcher's hand-off to another program reuses this process: a timer thread still running
+// (or mid-dump) then executes code that is no longer there. The first recording build crashed on
+// every Retro Rewind start that way. Stop it, and flush what this program counted.
+void StopSwitchGcovDumpTimer() {
+    if (g_switchGcovTimerThread == nullptr) {
+        return;
+    }
+    g_switchGcovTimerStop.store(true, std::memory_order_relaxed);
+    g_switchGcovTimerThread->join();
+    delete g_switchGcovTimerThread;
+    g_switchGcovTimerThread = nullptr;
+    SwitchPgoBootTrace("gcov final dump begins");
+    __gcov_dump();
+    __gcov_reset();
+    SwitchPgoBootTrace("gcov final dump done");
 }
 #endif
 #endif // __SWITCH__
@@ -1509,6 +1610,19 @@ void WriteFatalLogImpl(std::string_view reason, std::string_view extraDetails = 
 
     out << "[runtime] fatal log" << std::endl;
     out << "[runtime] reason: " << reason << std::endl;
+#if defined(__SWITCH__)
+    {
+        // Whether the process had run out of memory, e.g. behind a std::bad_alloc. The kernel's
+        // "used" figure is no help (the whole heap is claimed at start, so it always equals the
+        // total); what counts is how much of that heap malloc has handed out.
+        u64 total = 0;
+        svcGetInfo(&total, InfoType_TotalMemorySize, CUR_PROCESS_HANDLE, 0);
+        const struct mallinfo heap = mallinfo();
+        out << "[runtime] heap: " << (static_cast<uint64_t>(heap.uordblks) >> 20) << " MiB in use, "
+            << (static_cast<uint64_t>(heap.arena) >> 20) << " MiB obtained, process total " << (total >> 20)
+            << " MiB" << std::endl;
+    }
+#endif
     out << "[runtime] timestamp(seconds): " << nowSecs << std::endl;
     out << "[runtime] entry: " << (g_lastEntryLabel.empty() ? "<unknown>" : g_lastEntryLabel) << std::endl;
     if (!extraDetails.empty()) {
@@ -2308,7 +2422,7 @@ int RuntimeMain(int argc, char** argv) {
 #if defined(MKW_PGO_GENERATE)
     // gcov writes its .gcda files next to the compile-time object paths, which do not exist on
     // the console; redirect the whole tree onto the SD card and strip the build-machine prefix.
-    ::setenv("GCOV_PREFIX", "sdmc:/switch/WiiCompiled/Cache/gcov", 1);
+    ::setenv("GCOV_PREFIX", "sdmc:/gcov", 1);
     ::setenv("GCOV_PREFIX_STRIP", "0", 1);
     SwitchPgoBootTrace("logs redirected, starting gcov timer");
     StartSwitchGcovDumpTimer();
@@ -2341,6 +2455,12 @@ int RuntimeMain(int argc, char** argv) {
         if (argc != 1) {
             throw std::invalid_argument("The game runtime does not accept command-line options; use Config.toml through the installed host.");
         }
+        // Retro Rewind's generated code queues its mod setup (the Kamek module's memory, its data
+        // patches and constructors, the Riivolution XML to load) behind its profile name. Android's
+        // combined library activates the profile when the app picks a game; a standalone product
+        // (desktop, Switch) has to do it here, or Retro Rewind starts with none of that applied and
+        // dies on the first call into the module. A no-op when the profile is already active.
+        RecompMod::ActivateProfile(RuntimeProduct::IsRetroRewind() ? "retro_rewind" : "base");
         RuntimeConfigFile::LogLoadedConfig();
         SystemBridge::Initialize();
         TranslatedFunctionRegistry::Finalize();
@@ -2474,11 +2594,6 @@ int RuntimeMain(int argc, char** argv) {
             settings_overlay::NotifyBackendFallback(backendDisplayName(requestedBackend),
                                                     backendDisplayName(auroraInfo.backend));
         } else {
-#if defined(__SWITCH__)
-            // Started here rather than at the top of RuntimeMain: sampling before the runtime is
-            // fully up aborted the process inside libnx before guest memory was even reserved.
-            StartSwitchGuestProfiler();
-#endif
             RT_LOG(RT_TAG_RUNTIME) << "graphics backend: " << backendDisplayName(auroraInfo.backend)
                       << std::endl;
 #if defined(__ANDROID__)
@@ -2494,10 +2609,50 @@ int RuntimeMain(int argc, char** argv) {
         // if they quit. It uses aurora's frame loop, so it runs before the guest takes over.
         if (!SwitchRunLauncher()) {
             aurora_shutdown();
+#if defined(MKW_PGO_GENERATE)
+            StopSwitchGcovDumpTimer();
+#endif
+            // Quit, or Retro Rewind queued to run next: give the loader its heap back intact.
+            GuestFlat::SwitchReleaseForHandoff();
             return 0;
         }
         // The launcher returns with the next aurora frame already begun (see its exit path).
         g_auroraFrameActive.store(true, std::memory_order_release);
+        // Started here rather than at the top of RuntimeMain: sampling before the runtime is
+        // fully up aborted the process inside libnx before guest memory was even reserved. And only
+        // after the launcher: its thread is never stopped, and a thread still running when the
+        // launcher hands the process to Retro Rewind crashes that program on start.
+        StartSwitchGuestProfiler();
+        // Horizon's BSD sockets do nothing until the service is opened; without this every
+        // connection the game makes fails and online reports error 20100. Opened only once the
+        // game is really starting, so the launcher's hand-off to another program holds no session.
+        {
+            const Result socketRc = socketInitializeDefault();
+            {
+                u64 total = 0;
+                svcGetInfo(&total, InfoType_TotalMemorySize, CUR_PROCESS_HANDLE, 0);
+                const struct mallinfo heap = mallinfo();
+                RT_LOGF(RT_TAG_RUNTIME, "heap at game start: %llu MiB in use, %llu MiB obtained, process total %llu MiB\n",
+                        static_cast<unsigned long long>(static_cast<uint64_t>(heap.uordblks) >> 20),
+                        static_cast<unsigned long long>(static_cast<uint64_t>(heap.arena) >> 20),
+                        static_cast<unsigned long long>(total >> 20));
+            }
+            RT_LOGF(RT_TAG_RUNTIME, "network sockets: %s (rc 0x%x)\n",
+                    R_SUCCEEDED(socketRc) ? "ready" : "unavailable", static_cast<unsigned>(socketRc));
+            // Hold an internet request for as long as the game runs. Without one the console treats
+            // the game as offline and is free to power Wi-Fi down mid-session, after which every
+            // lookup and connection fails (online error 20100 until a restart).
+            static NifmRequest internetRequest;
+            Result nifmRc = nifmInitialize(NifmServiceType_User);
+            if (R_SUCCEEDED(nifmRc)) {
+                nifmRc = nifmCreateRequest(&internetRequest, true);
+            }
+            if (R_SUCCEEDED(nifmRc)) {
+                nifmRc = nifmRequestSubmit(&internetRequest);
+            }
+            RT_LOGF(RT_TAG_RUNTIME, "internet request: %s (rc 0x%x)\n",
+                    R_SUCCEEDED(nifmRc) ? "submitted" : "not available", static_cast<unsigned>(nifmRc));
+        }
 #endif
         aurora_set_frame_worker_wait_callback(ServiceGuestTimingDuringAuroraFrameWait);
         GxGuestWrite::InstallAuroraHooks();

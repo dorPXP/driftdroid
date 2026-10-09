@@ -846,6 +846,42 @@ FaultCounters Counters() {
     return counters;
 }
 
+#if defined(__SWITCH__)
+// Undoes Initialize() so the homebrew loader can start another program after this one. The loader
+// reuses this process and its heap; heap pages still locked under a code-memory mapping made it
+// abort (kernel result 0xD401) the moment the launcher handed over to RetroRewind.nro. Only call
+// this when nothing will touch guest memory again.
+void SwitchReleaseForHandoff() noexcept {
+    std::lock_guard lock{StateMutex()};
+    const Handle self = envGetOwnProcessHandle();
+    unsigned failures = 0;
+    for (const MappedRegion& region : MappedRegions()) {
+        const Result rc = svcUnmapProcessMemory(g_base + region.guestBase, self,
+                                                reinterpret_cast<u64>(region.hostView) + region.sectionOffset,
+                                                region.mappedSize);
+        failures += R_FAILED(rc) ? 1u : 0u;
+    }
+    MappedRegions().clear();
+    for (auto& [key, section] : Sections()) {
+        if (section.hostView == nullptr || section.heapSource == nullptr) {
+            continue;
+        }
+        const Result rc = svcUnmapProcessCodeMemory(self, reinterpret_cast<u64>(section.hostView),
+                                                    reinterpret_cast<u64>(section.heapSource), section.size);
+        if (R_SUCCEEDED(rc)) {
+            std::free(section.heapSource);
+        } else {
+            ++failures;
+        }
+        section.hostView = nullptr;
+        section.heapSource = nullptr;
+    }
+    Sections().clear();
+    g_initialized = false;
+    RT_LOGF(RT_TAG_MEMORY, "guest memory released for hand-off (%u failure(s))\n", failures);
+}
+#endif
+
 void LogFaultSummary() noexcept {
     static std::atomic<bool> reported{false};
     if (reported.exchange(true, std::memory_order_relaxed)) return;

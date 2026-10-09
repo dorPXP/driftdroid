@@ -356,7 +356,9 @@ public sealed partial class CxxLinearCodeGenerator
                         EmitNormalizeGuestCallFloatReturn(call.Target, sb, pad, localPaired, guestAbiProvider);
                         break;
                     }
-                    var boundarySync = usesStateFreeCall || argumentNormalization.Length != 0
+                    // A site that resumes through the link register is not an ordinary return: the frame
+                    // it comes back to may be a different activation, so nothing is assumed preserved.
+                    var boundarySync = usesStateFreeCall || argumentNormalization.Length != 0 || resumesThroughLinkRegister
                         ? ResidencyBoundarySync.Full
                         : ResolveDirectCallBoundarySync(addr, guestAbiContracts, modOverridableCallTargets);
                     if (!boundarySync.IsFull &&
@@ -367,7 +369,7 @@ public sealed partial class CxxLinearCodeGenerator
                         // the callee contract does not mention it.
                         boundarySync = boundarySync.WithFpr(1);
                     }
-                    AppendFlush(sb, pad, boundarySync);
+                    AppendBoundaryFlush(sb, pad, boundarySync);
                     sb.Append(argumentNormalization);
                     if (usesStateFreeCall)
                     {
@@ -422,16 +424,16 @@ public sealed partial class CxxLinearCodeGenerator
                         break;
                     }
                     EmitNormalizeGuestCallFloatReturn(call.Target, sb, pad, localPaired, guestAbiProvider);
-                    AppendReload(sb, pad, boundarySync);
+                    AppendBoundaryReload(sb, pad, boundarySync);
                 }
                 else if (IsGuestCallTarget(call.Target))
                 {
                     var targetSymbol = FormatSymbol(call.Target);
-                    AppendFlush(sb, pad);
+                    AppendBoundaryFlush(sb, pad, ResidencyBoundarySync.Full);
                     EmitNormalizeGuestCallFloatArguments(call.Target, call.Arguments, sb, pad, localPaired, guestAbiProvider);
                     sb.AppendLine($"{pad}{targetSymbol}(ctx);");
                     EmitNormalizeGuestCallFloatReturn(call.Target, sb, pad, localPaired, guestAbiProvider);
-                    AppendReload(sb, pad);
+                    AppendBoundaryReload(sb, pad, ResidencyBoundarySync.Full);
                 }
                 else
                 {
@@ -469,7 +471,7 @@ public sealed partial class CxxLinearCodeGenerator
                         : null;
                     if (helperSync is not null && !helperSync.IsEmpty)
                     {
-                        AppendFlush(sb, pad, helperSync);
+                        AppendBoundaryFlush(sb, pad, helperSync);
                     }
                     var callExpr = $"{FormatSymbol(call.Target)}({string.Join(", ", args)})";
                     if (!string.IsNullOrWhiteSpace(call.Destination))
@@ -488,7 +490,7 @@ public sealed partial class CxxLinearCodeGenerator
                         // value in the local; reloading it from CpuContext would
                         // clobber that result with stale state.
                         var reloadSync = ExcludeDestinationFromReload(helperSync, call.Destination);
-                        AppendReload(sb, pad, reloadSync);
+                        AppendBoundaryReload(sb, pad, reloadSync);
                     }
                 }
                 if (!string.IsNullOrWhiteSpace(call.Destination) && IsFloatRegister(call.Destination))
@@ -499,9 +501,9 @@ public sealed partial class CxxLinearCodeGenerator
             case IrIndirectCall icall:
                 {
                     var indirectTarget = ToExpression(icall.Target, types);
-                    AppendFlush(sb, pad);
+                    AppendBoundaryFlush(sb, pad, ResidencyBoundarySync.Full);
                     sb.AppendLine($"{pad}InvokeIndirectCpu({indirectTarget}, ctx);");
-                    AppendReload(sb, pad);
+                    AppendBoundaryReload(sb, pad, ResidencyBoundarySync.FullGuestCall);
                     // f1 is the conventional scalar floating-point return.
                     // Do not retag the other volatile FPRs: a callee that leaves
                     // one untouched also leaves its packed payload untouched.

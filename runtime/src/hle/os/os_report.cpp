@@ -11,6 +11,7 @@
 #include "hle_stubs.h"
 #include "hle/guest_printf.h"
 #include "ppc_runtime.h"
+#include "settings_overlay.h"
 #include "system_bridge.h"
 
 // Thread-local cache used to store host-side copies of guest strings so we can
@@ -103,6 +104,12 @@ static void HLE_LogOSReport(CpuContext* cpu, const char* fmt)
         [&state]() { return NextOsReportU64(state); },
         [&state]() { return NextOsReportDouble(state); },
         [](uint32_t address) { return ReadGuestStringForReport(address); });
+
+    // Before the repeat filter below: two scenes with the same number exit during boot, and when
+    // their reports land back to back the second one is swallowed as a repeat.
+    if (buffer.find("Scene Exit") != std::string::npos) {
+        settings_overlay::NotifyBootSceneExited();
+    }
 
     // nw4r warnings arrive as "<file>:<line> Warning:" plus a bare newline, so
     // consecutive identical messages never land back to back. Blank lines are

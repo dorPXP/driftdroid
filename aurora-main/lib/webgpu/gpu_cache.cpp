@@ -255,9 +255,27 @@ static bool cache_init() {
   }
 
   if (!cache_init_core()) {
-    Log.error("SQLite DB init failed");
-    init_abort();
-    return false;
+    // A cache file damaged by a crash or power loss mid-write ("database disk image is malformed")
+    // would otherwise stay broken forever, and every launch would compile all shaders from
+    // nothing. It is only a cache: delete it and start a new one.
+    Log.error("SQLite DB init failed; deleting the cache file and starting a new one");
+    for (sqlite3_stmt** stmt : {&load_stmt, &store_stmt, &touch_stmt}) {
+      sqlite3_finalize(*stmt);
+      *stmt = nullptr;
+    }
+    sqlite3_close(db);
+    db = nullptr;
+    const auto path = std::filesystem::path{reinterpret_cast<const char8_t*>(g_config.cachePath)} / "dawn_cache.db";
+    const std::string file = fs_path_to_string(path);
+    std::error_code ec;
+    std::filesystem::remove(path, ec);
+    std::filesystem::remove(std::filesystem::path{file + "-wal"}, ec);
+    std::filesystem::remove(std::filesystem::path{file + "-shm"}, ec);
+    if (!cache_init_core()) {
+      Log.error("SQLite DB init failed again; running without a shader cache");
+      init_abort();
+      return false;
+    }
   }
 
   Log.debug("SQLite cache init succeeded");

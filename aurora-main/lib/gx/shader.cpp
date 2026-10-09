@@ -701,6 +701,15 @@ static u32 attr_comp_type_size(u8 compType) noexcept {
   }
 }
 
+// Start of an attribute's array inside abuf. The twelve offsets are declared as three vec4u rather
+// than array<u32, 12>: an array of scalars in a uniform block needs the relaxed layout
+// (uniformBufferStandardLayout), which Dawn never asks Vulkan for, so a driver may read it with the
+// classic 16-byte stride. The bytes uploaded are the same either way.
+static std::string array_start(u32 attr) {
+  const u32 index = attr - GX_VA_POS;
+  return fmt::format("ubuf.array_start[{}][{}]", index / 4u, index % 4u);
+}
+
 static std::string offset_plus(std::string_view offs, u32 add) {
   if (add == 0) {
     return std::string(offs);
@@ -723,14 +732,14 @@ auto normal_group_load(const ShaderConfig& config, u8 group, std::string_view vi
 
   if (mapping.attrType == GX_INDEX8) {
     const std::string indexOffs = offset_plus(offs, mapping.nrmIndexCount == 3 ? group : 0);
-    offs = fmt::format("ubuf.array_start[{}] + raw_fetch_u8_1(&{}, {}) * {}u + {}u", GX_VA_NRM - GX_VA_POS, buf,
-                       indexOffs, mapping.stride, groupOffset);
+    offs = fmt::format("{} + raw_fetch_u8_1(&{}, {}) * {}u + {}u", array_start(GX_VA_NRM), buf, indexOffs,
+                       mapping.stride, groupOffset);
     buf = "abuf"sv;
     le = mapping.le;
   } else if (mapping.attrType == GX_INDEX16) {
     const std::string indexOffs = offset_plus(offs, mapping.nrmIndexCount == 3 ? group * 2u : 0);
-    offs = fmt::format("ubuf.array_start[{}] + raw_fetch_u16_1(&{}, {}, {}) * {}u + {}u", GX_VA_NRM - GX_VA_POS,
-                       buf, indexOffs, le, mapping.stride, groupOffset);
+    offs = fmt::format("{} + raw_fetch_u16_1(&{}, {}, {}) * {}u + {}u", array_start(GX_VA_NRM), buf, indexOffs, le,
+                       mapping.stride, groupOffset);
     buf = "abuf"sv;
     le = mapping.le;
   } else {
@@ -749,12 +758,11 @@ auto attr_load(const ShaderConfig& config, GXAttr attr, std::string_view vidx) -
   auto offs = fmt::format("ubuf.vtx_start + {} * {}u + {}u", vidx, config.vtxStride, mapping.offset);
   auto le = false; // Vertex buffer is always big endian (for now)
   if (mapping.attrType == GX_INDEX8) {
-    offs = fmt::format("ubuf.array_start[{}] + raw_fetch_u8_1(&{}, {}) * {}u", attr - GX_VA_POS, buf, offs,
-                       mapping.stride);
+    offs = fmt::format("{} + raw_fetch_u8_1(&{}, {}) * {}u", array_start(attr), buf, offs, mapping.stride);
     buf = "abuf"sv;
     le = mapping.le;
   } else if (mapping.attrType == GX_INDEX16) {
-    offs = fmt::format("ubuf.array_start[{}] + raw_fetch_u16_1(&{}, {}, {}) * {}u", attr - GX_VA_POS, buf, offs, le,
+    offs = fmt::format("{} + raw_fetch_u16_1(&{}, {}, {}) * {}u", array_start(attr), buf, offs, le,
                        mapping.stride);
     buf = "abuf"sv;
     le = mapping.le;
@@ -2213,7 +2221,7 @@ struct Uniform {{
     render_viewport_size: vec2f,
     logical_viewport_size: vec2f,
     pad: vec2u,
-    array_start: array<u32, 12>,{0}
+    array_start: array<vec4u, 3>,{0}
 }};
 @group(0) @binding(0)
 var<storage, read> vbuf: array<u32>;

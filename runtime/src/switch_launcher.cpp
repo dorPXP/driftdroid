@@ -9,13 +9,16 @@
 #include <switch.h>
 
 #include <imgui.h>
+#include <imgui_internal.h>
 
 #include <aurora/aurora.h>
 #include <aurora/event.h>
+#include <aurora/imgui.h>
 
 #include <algorithm>
 #include <array>
 #include <cfloat>
+#include <cmath>
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
@@ -29,8 +32,13 @@
 #include <thread>
 #include <vector>
 
+#include "retro_rewind_download.h"
 #include "runtime_config.h"
+#include "runtime_product.h"
+#include "switch_mii_data.h"
+#include "switch_mods.h"
 #include "switch_rom_import.h"
+#include "zip_extract.h"
 
 namespace fs = std::filesystem;
 using Clock = std::chrono::steady_clock;
@@ -53,15 +61,17 @@ bool g_haveButtonGlyphs = false;
 // Look
 // ---------------------------------------------------------------------------------------------
 
-constexpr ImU32 kBgTop = IM_COL32(25, 31, 46, 255);
-constexpr ImU32 kBgBottom = IM_COL32(10, 12, 18, 255);
-constexpr ImU32 kPanel = IM_COL32(28, 35, 49, 255);
-constexpr ImU32 kPanelHi = IM_COL32(40, 50, 71, 255);
-constexpr ImU32 kBorder = IM_COL32(54, 65, 88, 255);
+// Palette of the Android launcher (ModePickerActivity.kt): a dark grey checkerboard, grey utility
+// buttons and Wii-menu blue for the main action.
+constexpr ImU32 kCheckLight = IM_COL32(0x3A, 0x3A, 0x3A, 255);
+constexpr ImU32 kCheckDark = IM_COL32(0x22, 0x22, 0x22, 255);
+constexpr ImU32 kPanel = IM_COL32(0x3A, 0x3A, 0x3A, 255);
+constexpr ImU32 kPanelHi = IM_COL32(0x5A, 0x5A, 0x5A, 255);
+constexpr ImU32 kBorder = IM_COL32(0x66, 0x66, 0x66, 255);
 constexpr ImU32 kText = IM_COL32(236, 240, 247, 255);
-constexpr ImU32 kMuted = IM_COL32(140, 153, 173, 255);
-constexpr ImU32 kAccent = IM_COL32(74, 134, 245, 255);
-constexpr ImU32 kAccentHi = IM_COL32(108, 160, 255, 255);
+constexpr ImU32 kMuted = IM_COL32(0xB4, 0xB4, 0xB4, 255);
+constexpr ImU32 kAccent = IM_COL32(0x1C, 0x5F, 0xD1, 255);
+constexpr ImU32 kAccentHi = IM_COL32(0x4F, 0xA6, 0xFF, 255);
 constexpr ImU32 kGood = IM_COL32(63, 185, 80, 255);
 constexpr ImU32 kWarn = IM_COL32(232, 171, 42, 255);
 constexpr ImU32 kBad = IM_COL32(248, 81, 73, 255);
@@ -96,11 +106,15 @@ struct PadInput {
     Clock::time_point nextRepeat[4] = {};
     bool aEdge = false;
     bool bEdge = false;
+    bool xEdge = false;
+    bool yEdge = false;
     // Resolved once per frame.
     int moveX = 0;
     int moveY = 0;
     bool activate = false;
     bool back = false;
+    bool x = false;
+    bool y = false;
     // Presses in the first moment after start are ignored: A is usually still held from hbmenu.
     Clock::time_point armedAt{};
 };
@@ -125,6 +139,8 @@ void FeedInput(const SDL_Event& event) {
         case SDL_GAMEPAD_BUTTON_DPAD_RIGHT: g_in.dpad[kRight] = down; UpdateHeld(kRight); break;
         case SDL_GAMEPAD_BUTTON_SOUTH: if (down) g_in.aEdge = true; break;  // A
         case SDL_GAMEPAD_BUTTON_EAST: if (down) g_in.bEdge = true; break;   // B
+        case SDL_GAMEPAD_BUTTON_WEST: if (down) g_in.xEdge = true; break;   // X
+        case SDL_GAMEPAD_BUTTON_NORTH: if (down) g_in.yEdge = true; break;  // Y
         default: break;
         }
     } else if (event.type == SDL_EVENT_GAMEPAD_AXIS_MOTION &&
@@ -171,8 +187,12 @@ void ResolveInput() {
     }
     g_in.activate = armed && g_in.aEdge;
     g_in.back = armed && g_in.bEdge;
+    g_in.x = armed && g_in.xEdge;
+    g_in.y = armed && g_in.yEdge;
     g_in.aEdge = false;
     g_in.bEdge = false;
+    g_in.xEdge = false;
+    g_in.yEdge = false;
 }
 
 float TextWidth(float px, const char* text) {
@@ -263,8 +283,60 @@ const char* Glyph(char button) {
 // Widgets
 // ---------------------------------------------------------------------------------------------
 
+// The Android launcher's background: a dark checkerboard drifting slowly down and to the right.
 void DrawBackground() {
-    g.dl->AddRectFilledMultiColor(ImVec2(0, 0), g.display, kBgTop, kBgTop, kBgBottom, kBgBottom);
+    constexpr float kTile = 42.0f;         // reference units (28dp on Android)
+    constexpr float kTilesPerSecond = 0.1f;
+    static const Clock::time_point start = Clock::now();
+    const float seconds = std::chrono::duration<float>(Clock::now() - start).count();
+    const float tile = kTile * g.s;
+    const float period = tile * 2.0f;
+    const float offX = std::fmod(seconds * kTilesPerSecond * tile, period);
+    const float offY = std::fmod(seconds * kTilesPerSecond * tile * 0.6f, period);
+    g.dl->AddRectFilled(ImVec2(0, 0), g.display, kCheckDark);
+    // Filled as anti-aliased polygons, not plain rectangles: a plain rectangle's edge snaps to whole
+    // pixels, and at this speed (a few pixels a second) that showed as the pattern creeping forward
+    // in visible single-pixel jumps, at different moments across and down. The blended edge moves
+    // by fractions of a pixel.
+    const ImDrawListFlags savedFlags = g.dl->Flags;
+    g.dl->Flags |= ImDrawListFlags_AntiAliasedFill;
+    int row = 0;
+    for (float y = offY - period; y < g.display.y; y += tile, ++row) {
+        // Light squares sit where row and column have the same parity.
+        for (float x = offX - period + ((row & 1) != 0 ? tile : 0.0f); x < g.display.x; x += period) {
+            g.dl->PathRect(ImVec2(x, y), ImVec2(x + tile, y + tile));
+            g.dl->PathFillConvex(kCheckLight);
+        }
+    }
+    g.dl->Flags = savedFlags;
+}
+
+// Banner art shared with the Android launcher (res/drawable-*), resized and stored as raw RGBA so
+// no image decoder is needed here.
+struct Art {
+    ImTextureID texture = 0;
+    uint32_t width;
+    uint32_t height;
+    const unsigned char* pixels;
+};
+constexpr unsigned char kLogoPixels[] = {
+#embed "../assets/switch_launcher/logo_720x134.rgba"
+};
+constexpr unsigned char kBaseBannerPixels[] = {
+#embed "../assets/switch_launcher/channel_mkwii_840x192.rgba"
+};
+constexpr unsigned char kRetroBannerPixels[] = {
+#embed "../assets/switch_launcher/channel_retro_rewind_840x192.rgba"
+};
+Art g_logo{0, 720, 134, kLogoPixels};
+Art g_baseBanner{0, 840, 192, kBaseBannerPixels};
+Art g_retroBanner{0, 840, 192, kRetroBannerPixels};
+
+ImTextureID ArtTexture(Art& art) {
+    if (art.texture == 0) {
+        art.texture = aurora_imgui_add_texture(art.width, art.height, art.pixels);
+    }
+    return art.texture;
 }
 
 // Title block shared by every screen.
@@ -322,9 +394,9 @@ bool Button(const char* id, const char* label, const char* sub, float x, float y
     ImU32 textColor = kText;
     ImU32 subColor = kMuted;
     if (!enabled) {
-        fill = IM_COL32(24, 29, 40, 255);
-        textColor = IM_COL32(95, 106, 124, 255);
-        subColor = IM_COL32(80, 90, 106, 255);
+        fill = IM_COL32(0x2A, 0x2A, 0x2A, 255);
+        textColor = IM_COL32(0x77, 0x77, 0x77, 255);
+        subColor = IM_COL32(0x66, 0x66, 0x66, 255);
     } else if (tone == Tone::Primary) {
         fill = active ? kAccentHi : kAccent;
         subColor = IM_COL32(222, 235, 255, 255);
@@ -350,11 +422,96 @@ bool Button(const char* id, const char* label, const char* sub, float x, float y
     return pressed;
 }
 
+// A game banner, Wii-channel style: the art fills the button, rounded. Locked banners are dimmed
+// and carry a label instead. Returns true when activated.
+bool BannerButton(const char* id, Art& art, float x, float y, float w, float h, const char* lockedLabel) {
+    const int index = NextItem(true);
+    ImGui::SetCursorScreenPos(g.P(x, y));
+    const bool clicked = ImGui::InvisibleButton(id, g.Sz(w, h));
+    const bool selected = index == SelectedItem();
+    const bool pressed = clicked || (g_in.activate && selected);
+    const bool held = ImGui::IsItemActive();
+    // The selected banner grows a little; a held one squashes like the Android press bounce.
+    const float grow = held ? -0.03f : (selected ? 0.025f : 0.0f);
+    const ImVec2 mn = ImGui::GetItemRectMin();
+    const ImVec2 mx = ImGui::GetItemRectMax();
+    const ImVec2 pad((mx.x - mn.x) * grow * 0.5f, (mx.y - mn.y) * grow * 0.5f);
+    const ImVec2 a(mn.x - pad.x, mn.y - pad.y);
+    const ImVec2 b(mx.x + pad.x, mx.y + pad.y);
+    const float radius = 22.0f * g.s;
+    g.dl->AddRectFilled(ImVec2(a.x, a.y + 5 * g.s), ImVec2(b.x, b.y + 5 * g.s), IM_COL32(0, 0, 0, 90), radius);
+    g.dl->AddImageRounded(ArtTexture(art), a, b, ImVec2(0, 0), ImVec2(1, 1), IM_COL32_WHITE, radius);
+    if (lockedLabel != nullptr) {
+        g.dl->AddRectFilled(a, b, IM_COL32(0, 0, 0, 175), radius);
+        const float px = 28.0f;
+        const float cx = ((a.x + b.x) * 0.5f - g.ox) / g.s;
+        const float cy = (a.y + b.y) * 0.5f / g.s - px * 0.5f - 2;
+        TextCentered(cx + 1.5f, cy + 2, px, IM_COL32(0, 0, 0, 200), lockedLabel);
+        TextCentered(cx, cy, px, IM_COL32_WHITE, lockedLabel);
+    }
+    if (selected || held) {
+        g.dl->AddRect(ImVec2(a.x - 3 * g.s, a.y - 3 * g.s), ImVec2(b.x + 3 * g.s, b.y + 3 * g.s),
+                      IM_COL32(255, 255, 255, 240), radius + 3 * g.s, 0, 3.5f * g.s);
+    }
+    return pressed;
+}
+
+// The square "three dots" button beside a banner, as on the Android launcher.
+bool DotsButton(const char* id, float x, float y, float w, float h) {
+    const int index = NextItem(true);
+    ImGui::SetCursorScreenPos(g.P(x, y));
+    const bool clicked = ImGui::InvisibleButton(id, g.Sz(w, h));
+    const bool selected = index == SelectedItem();
+    const bool held = ImGui::IsItemActive();
+    const ImVec2 a = ImGui::GetItemRectMin();
+    const ImVec2 b = ImGui::GetItemRectMax();
+    const float radius = 16.0f * g.s;
+    g.dl->AddRectFilled(ImVec2(a.x, a.y + 4 * g.s), ImVec2(b.x, b.y + 4 * g.s), IM_COL32(0, 0, 0, 90), radius);
+    g.dl->AddRectFilledMultiColor(a, b, IM_COL32(0xF2, 0x5C, 0x4C, 255), IM_COL32(0xF2, 0x5C, 0x4C, 255),
+                                  IM_COL32(0xD1, 0x2A, 0x1E, 255), IM_COL32(0xD1, 0x2A, 0x1E, 255));
+    const ImVec2 c((a.x + b.x) * 0.5f, (a.y + b.y) * 0.5f);
+    for (int i = -1; i <= 1; ++i) {
+        g.dl->AddCircleFilled(ImVec2(c.x, c.y + static_cast<float>(i) * 16.0f * g.s), (held ? 4.0f : 5.0f) * g.s,
+                              IM_COL32_WHITE);
+    }
+    if (selected || held) {
+        g.dl->AddRect(ImVec2(a.x - 3 * g.s, a.y - 3 * g.s), ImVec2(b.x + 3 * g.s, b.y + 3 * g.s),
+                      IM_COL32(255, 255, 255, 240), 3 * g.s, 0, 3.5f * g.s);
+    }
+    return clicked || (g_in.activate && selected);
+}
+
+// A small grey utility button with a top-to-bottom gradient and a centred label.
+bool GreyButton(const char* id, const char* label, float x, float y, float w, float h) {
+    const int index = NextItem(true);
+    ImGui::SetCursorScreenPos(g.P(x, y));
+    const bool clicked = ImGui::InvisibleButton(id, g.Sz(w, h));
+    const bool selected = index == SelectedItem();
+    const bool pressed = clicked || (g_in.activate && selected);
+    const bool active = selected || ImGui::IsItemActive();
+    const ImVec2 a = ImGui::GetItemRectMin();
+    const ImVec2 b = ImGui::GetItemRectMax();
+    const float radius = 14.0f * g.s;
+    const ImU32 top = active ? IM_COL32(0x78, 0x78, 0x78, 255) : IM_COL32(0x5A, 0x5A, 0x5A, 255);
+    const ImU32 bottom = active ? IM_COL32(0x52, 0x52, 0x52, 255) : IM_COL32(0x3A, 0x3A, 0x3A, 255);
+    g.dl->AddRectFilled(ImVec2(a.x, a.y + 4 * g.s), ImVec2(b.x, b.y + 4 * g.s), IM_COL32(0, 0, 0, 80), radius);
+    const int firstVertex = g.dl->VtxBuffer.Size;
+    g.dl->AddRectFilled(a, b, IM_COL32_WHITE, radius);
+    ImGui::ShadeVertsLinearColorGradientKeepAlpha(g.dl, firstVertex, g.dl->VtxBuffer.Size, a, ImVec2(a.x, b.y), top,
+                                                  bottom);
+    if (active) {
+        g.dl->AddRect(ImVec2(a.x - 3 * g.s, a.y - 3 * g.s), ImVec2(b.x + 3 * g.s, b.y + 3 * g.s),
+                      IM_COL32(255, 255, 255, 235), radius + 3 * g.s, 0, 3.0f * g.s);
+    }
+    TextCentered(x + w * 0.5f, y + h * 0.5f - 12, 21, active ? IM_COL32_WHITE : IM_COL32(0xDD, 0xDD, 0xDD, 255), label);
+    return pressed;
+}
+
 // ---------------------------------------------------------------------------------------------
 // State
 // ---------------------------------------------------------------------------------------------
 
-enum class Screen { Home, Import, Dialog, Progress, Done, Browse };
+enum class Screen { Home, Import, Dialog, Progress, Done, Browse, RetroDialog, RetroProgress, Mods, Mii };
 
 struct BrowseEntry {
     std::string name;
@@ -382,6 +539,8 @@ struct Ui {
 
     fs::path dataRoot;
     DataState dataState = DataState::Missing;
+    bool retroRewindApp = false;   // RetroRewind.nro is beside this app (base game only)
+    bool retroRewindPack = false;  // the RetroRewind6 folder is on the card
 
     // Import list
     std::vector<DiscImage> images;
@@ -396,6 +555,23 @@ struct Ui {
     std::deque<std::pair<Clock::time_point, uint64_t>> samples;
     bool resultOk = false;
     std::string resultMessage;
+
+    // Mods
+    std::vector<SwitchMods::Mod> mods;
+    bool modsLoaded = false;
+    bool modsChanged = false;
+    std::string modDeleteArmed;  // Y was pressed once on this mod; a second press deletes it
+    // Mods copied over as .zip files are unpacked, one at a time, when the screen opens.
+    std::unique_ptr<ZipExtract::Job> zipJob;
+    std::string zipName;
+    std::vector<std::string> zipFailed;
+
+    // Retro Rewind pack download
+    std::unique_ptr<RetroRewindDownload::Job> retroJob;
+    bool retroResult = false;  // the result screen is showing a download, not a game import
+    bool retroStopping = false;
+    bool retroNetwork = false;
+    NifmRequest retroInternet{};
 
     // Browser
     std::string cwd = "sdmc:/";
@@ -416,7 +592,7 @@ void Go(Ui& ui, Screen screen) {
     ui.focusPending = true;
     ui.sel = 0;
     ui.selMoved = true;
-    ui.navHorizontal = screen == Screen::Dialog;
+    ui.navHorizontal = screen == Screen::Dialog || screen == Screen::RetroDialog;
 }
 
 // Claims the next selectable item slot for this frame.
@@ -460,67 +636,182 @@ std::string FreeSpaceText() {
     return cached;
 }
 
+// Retro Rewind is its own program (its game code is a separate build). The base game's launcher
+// starts it by asking the homebrew loader to run it next, and leaves this file behind so it goes
+// straight into the game instead of showing a second launcher.
+constexpr const char* kRetroRewindNro = "sdmc:/switch/WiiCompiled/RetroRewind.nro";
+constexpr const char* kSkipLauncherFlag = "sdmc:/switch/WiiCompiled/Cache/start_directly.flag";
+// Where a downloaded pack goes: the first place SwitchFindRetroRewindRoot looks.
+constexpr const char* kRetroRewindInstallDir = "sdmc:/switch/WiiCompiled/RetroRewind6";
+constexpr const char* kRetroRewindPartialDir = "sdmc:/switch/WiiCompiled/RetroRewind6.partial";
+constexpr const char* kRetroRewindDownloadLabel = "Download Retro Rewind (1.8 GB)";
+
+bool FileExists(const char* path) {
+    if (FILE* file = std::fopen(path, "rb")) {
+        std::fclose(file);
+        return true;
+    }
+    return false;
+}
+
 void RefreshData(Ui& ui) {
     ui.dataState = SwitchImport::GetDataState(ui.dataRoot);
+    ui.retroRewindPack = !SwitchFindRetroRewindRoot().empty();
+    ui.retroRewindApp = !RuntimeProduct::IsRetroRewind() && FileExists(kRetroRewindNro);
+}
+
+// Queues RetroRewind.nro to run when this program exits. False when the loader cannot do that.
+bool QueueRetroRewind() {
+    if (!envHasNextLoad()) {
+        return false;
+    }
+    if (FILE* flag = std::fopen(kSkipLauncherFlag, "wb")) {
+        std::fclose(flag);
+    }
+    char args[256];
+    std::snprintf(args, sizeof(args), "\"%s\"", kRetroRewindNro);
+    return R_SUCCEEDED(envSetNextLoad(kRetroRewindNro, args));
 }
 
 // ---------------------------------------------------------------------------------------------
 // Home
 // ---------------------------------------------------------------------------------------------
 
+// Laid out like the Android launcher: logo, "Kart Channel", the game banners, then the small grey
+// buttons and a status line.
 void DrawHome(Ui& ui) {
-    DrawHeader("DriftDroid", "Mario Kart Wii for Nintendo Switch  -  beta");
+    const bool retroRewind = RuntimeProduct::IsRetroRewind();
+    const bool installed = ui.dataState == DataState::Ready;
 
-    const char* statusTitle = "Game not installed";
-    const char* statusBody = "Import your own Mario Kart Wii (PAL) disc image to get started.";
+    g.dl->AddImage(ArtTexture(g_logo), g.P(640 - 215, 22), g.P(640 + 215, 22 + 80));
+    TextCentered(640, 98, 20, IM_COL32(0xDD, 0xDD, 0xDD, 230), "Kart Channel");
+
+    const char* status = "Import your own Mario Kart Wii (PAL) disc image to get started.";
     ImU32 dot = kWarn;
     switch (ui.dataState) {
     case DataState::Ready:
-        statusTitle = "Game installed";
-        statusBody = "Mario Kart Wii (PAL) is ready to play.";
+        status = "Mario Kart Wii (PAL) is ready to play.";
         dot = kGood;
         break;
     case DataState::Partial:
-        statusTitle = "Installation unfinished";
-        statusBody = "A previous import did not complete. Import again to finish it.";
+        status = "A previous import did not complete. Import again to finish it.";
         break;
     case DataState::Outdated:
-        statusTitle = "Game data needs updating";
-        statusBody = "This version needs your game files unpacked again.";
+        status = "This version needs your game files unpacked again.";
         break;
     case DataState::Missing:
         break;
     }
-    const float cx = 380, cw = 520;
-    g.dl->AddRectFilled(g.P(cx, 150), g.P(cx + cw, 252), kPanel, 18.0f * g.s);
-    g.dl->AddRect(g.P(cx, 150), g.P(cx + cw, 252), kBorder, 18.0f * g.s, 0, 1.0f * g.s);
-    g.dl->AddCircleFilled(g.P(cx + 38, 188), 9.0f * g.s, dot);
-    Text(cx + 62, 170, 28, kText, statusTitle);
-    const std::string body = Fit(19, statusBody, cw - 56, false);
-    Text(cx + 28, 212, 19, kMuted, body.c_str());
+    if (retroRewind && installed) {
+        if (ui.retroRewindPack) {
+            status = "Mario Kart Wii (PAL) and the Retro Rewind pack are ready.";
+        } else {
+            status = "The Retro Rewind pack is not on the SD card yet. Select the banner to download it.";
+            dot = kWarn;
+        }
+    }
 
-    const bool ready = ui.dataState == DataState::Ready;
-    if (ui.focusPending) {
-        ui.sel = ready ? 0 : 1;  // Play when it is available, otherwise Import
-    }
-    const bool focusPlay = ui.focusPending && ready;
-    const bool focusImport = ui.focusPending && !ready;
-    if (Button("##play", "Play", ready ? "Start Mario Kart Wii" : "Install the game first", cx, 276, cw, 74,
-               Tone::Primary, ready, focusPlay)) {
-        ui.starting = true;
-    }
-    if (Button("##import", ready ? "Reinstall game" : "Import game", "Unpack your disc image (about 2.7 GB)", cx,
-               362, cw, 74, ready ? Tone::Normal : Tone::Primary, true, focusImport)) {
+    const auto openImport = [&ui] {
         ui.images = SwitchImport::FindDiscImages();
         Go(ui, Screen::Import);
+    };
+
+    if (ui.focusPending) {
+        ui.sel = 0;  // the first banner: Play, or the way into Import when nothing is installed
     }
-    if (Button("##browse", "Browse SD card", "Look through files and folders", cx, 448, cw, 74, Tone::Normal)) {
+    const float bw = 520, bh = 119, bx = 640 - bw * 0.5f;
+    float y = 138;
+    if (!retroRewind) {
+        if (BannerButton("##play", g_baseBanner, bx, y, bw, bh, installed ? nullptr : "Install with ISO/WBFS")) {
+            if (installed) {
+                ui.starting = true;
+            } else {
+                openImport();
+            }
+        }
+        y += bh + 16;
+        const char* locked = nullptr;
+        if (!ui.retroRewindApp) {
+            locked = "Needs RetroRewind.nro";
+        } else if (!ui.retroRewindPack) {
+            locked = kRetroRewindDownloadLabel;
+        } else if (!installed) {
+            locked = "Install the game first";
+        }
+        if (BannerButton("##retro", g_retroBanner, bx, y, bw, bh, locked)) {
+            if (locked != nullptr) {
+                if (!ui.retroRewindApp) {
+                    Notify(ui, "Put RetroRewind.nro in /switch/WiiCompiled on the SD card.");
+                } else if (!ui.retroRewindPack) {
+                    Go(ui, Screen::RetroDialog);
+                } else {
+                    Notify(ui, "Install Mario Kart Wii first.");
+                }
+            } else if (QueueRetroRewind()) {
+                ui.quit = true;
+            } else {
+                Notify(ui, "Could not start Retro Rewind from here.");
+            }
+        }
+        if (ui.retroRewindApp && ui.retroRewindPack && DotsButton("##retro-more", bx + bw + 14, y + 12, 64, bh - 24)) {
+            Go(ui, Screen::RetroDialog);
+        }
+        y += bh + 22;
+    } else {
+        const char* locked = nullptr;
+        if (!installed) {
+            locked = "Install with ISO/WBFS";
+        } else if (!ui.retroRewindPack) {
+            locked = kRetroRewindDownloadLabel;
+        }
+        if (BannerButton("##play", g_retroBanner, bx, y, bw, bh, locked)) {
+            if (locked == nullptr) {
+                ui.starting = true;
+            } else if (!installed) {
+                openImport();
+            } else {
+                Go(ui, Screen::RetroDialog);
+            }
+        }
+        if (ui.retroRewindPack && DotsButton("##retro-more", bx + bw + 14, y + 12, 64, bh - 24)) {
+            Go(ui, Screen::RetroDialog);
+        }
+        y += bh + 22;
+    }
+
+    // Two columns of small buttons, as the Android launcher's utility rows; up/down walks them
+    // left to right, top to bottom.
+    const float gw = 480, gh = 46, gx = 640 - gw * 0.5f, gstep = 54;
+    const float half = (gw - 12) * 0.5f, gx2 = gx + half + 12;
+    if (GreyButton("##import", installed ? "Reinstall game..." : "Import game...", gx, y, half, gh)) {
+        openImport();
+    }
+    if (GreyButton("##mods", "Mods...", gx2, y, half, gh)) {
+        ui.modsLoaded = false;
+        Go(ui, Screen::Mods);
+    }
+    y += gstep;
+    if (GreyButton("##mii", "Mii data...", gx, y, half, gh)) {
+        Go(ui, Screen::Mii);
+    }
+    if (GreyButton("##browse", "Browse SD card...", gx2, y, half, gh)) {
         Go(ui, Screen::Browse);
         ui.entriesLoaded = false;
         ui.focusName.clear();
     }
-    if (Button("##quit", "Quit", "Return to the Switch home menu", cx, 534, cw, 74, Tone::Normal)) {
+    y += gstep;
+    if (GreyButton("##quit", "Quit", gx, y, gw, gh)) {
         ui.quit = true;
+    }
+    y += gstep + 6;
+
+    // Status line, centred, with the coloured dot in front (hidden while a message shows there).
+    if (ui.message.empty()) {
+        const std::string text = Fit(19, status, 900, false);
+        const float width = TextWidth(19, text.c_str()) / g.s;
+        const float sy = std::min(y, 614.0f);
+        g.dl->AddCircleFilled(g.P(640 - width * 0.5f - 16, sy + 12), 6.0f * g.s, dot);
+        TextCentered(640, sy, 19, IM_COL32(0xDD, 0xDD, 0xDD, 255), text.c_str());
     }
     ui.focusPending = false;
     DrawMessage(ui);
@@ -724,18 +1015,15 @@ void DrawDialog(Ui& ui) {
 
 void DrawProgressBar(float x, float y, float w, float h, double fraction) {
     const float radius = h * 0.5f;
-    g.dl->AddRectFilled(g.P(x, y), g.P(x + w, y + h), IM_COL32(35, 43, 60, 255), radius * g.s);
+    g.dl->AddRectFilled(g.P(x, y), g.P(x + w, y + h), IM_COL32(0x2A, 0x2A, 0x2A, 255), radius * g.s);
     const float fill = static_cast<float>(std::clamp(fraction, 0.0, 1.0)) * w;
     if (fill > 1.0f) {
         g.dl->AddRectFilled(g.P(x, y), g.P(x + std::max(fill, h), y + h), kAccent, radius * g.s);
     }
 }
 
-void DrawProgress(Ui& ui) {
-    DrawHeader("Installing", ShortPath(ui.installing.parts[0]).c_str());
-
-    const uint64_t total = ui.job ? ui.job->BytesTotal() : 0;
-    const uint64_t done = ui.job ? ui.job->BytesDone() : 0;
+// The big percentage, bar, amounts and speed shared by the import and download screens.
+void DrawProgressBody(Ui& ui, uint64_t done, uint64_t total) {
     const double fraction = total != 0 ? std::min(1.0, static_cast<double>(done) / static_cast<double>(total)) : 0.0;
 
     // Speed over roughly the last five seconds.
@@ -772,20 +1060,143 @@ void DrawProgress(Ui& ui) {
         TextCentered(640, 418, 21, kMuted, line);
     }
     TextCentered(640, 540, 21, kWarn, "Keep the console on and leave the SD card in.");
+}
+
+void DrawProgress(Ui& ui) {
+    DrawHeader("Installing", ShortPath(ui.installing.parts[0]).c_str());
+    DrawProgressBody(ui, ui.job ? ui.job->BytesDone() : 0, ui.job ? ui.job->BytesTotal() : 0);
 
     if (ui.job && ui.job->Finished()) {
         const std::string error = ui.job->Finish();
         ui.job.reset();
         ui.resultOk = error.empty();
         ui.resultMessage = error;
+        ui.retroResult = false;
         RefreshData(ui);
         Go(ui, Screen::Done);
     }
     DrawFooter({}, "");
 }
 
+// ---------------------------------------------------------------------------------------------
+// Retro Rewind pack download
+// ---------------------------------------------------------------------------------------------
+
+// Opens what a download needs and nothing else does: sockets, an internet request (so the console
+// keeps Wi-Fi up) and no auto-sleep. All of it is closed again when the download ends, because the
+// launcher may hand the process to another program, which must not inherit an open session.
+void OpenRetroNetwork(Ui& ui) {
+    if (ui.retroNetwork) {
+        return;
+    }
+    socketInitializeDefault();
+    if (R_SUCCEEDED(nifmInitialize(NifmServiceType_User))) {
+        if (R_SUCCEEDED(nifmCreateRequest(&ui.retroInternet, true))) {
+            nifmRequestSubmit(&ui.retroInternet);
+        }
+    }
+    appletSetAutoSleepDisabled(true);
+    ui.retroNetwork = true;
+}
+
+void CloseRetroNetwork(Ui& ui) {
+    if (!ui.retroNetwork) {
+        return;
+    }
+    appletSetAutoSleepDisabled(false);
+    nifmRequestClose(&ui.retroInternet);
+    ui.retroInternet = NifmRequest{};
+    nifmExit();
+    socketExit();
+    ui.retroNetwork = false;
+}
+
+void BeginRetroDownload(Ui& ui) {
+    ui.retroResult = true;
+    // A download that was started before already holds most of its space.
+    const uint64_t needed = FileExists(kRetroRewindPartialDir) ? (300ull << 20) : RetroRewindDownload::RequiredFreeBytes();
+    const uint64_t free = SwitchImport::FreeSpaceBytes();
+    if (free < needed) {
+        ui.resultOk = false;
+        ui.resultMessage = "Not enough free space on the SD card: about " + FormatBytes(needed) + " is needed, " +
+                           FormatBytes(free) + " is free. Free up some space on the SD card and try again.";
+        Go(ui, Screen::Done);
+        return;
+    }
+    OpenRetroNetwork(ui);
+    ui.retroStopping = false;
+    ui.retroJob = std::make_unique<RetroRewindDownload::Job>();
+    ui.retroJob->Start(kRetroRewindInstallDir, RuntimeConfigFile::ApplicationDataDirectory() / "cacert.pem");
+    ui.samples.clear();
+    ui.samples.emplace_back(Clock::now(), 0);
+    Go(ui, Screen::RetroProgress);
+}
+
+void DrawRetroDialog(Ui& ui) {
+    const float x = 200, y = 150, w = 880, h = 380;
+    g.dl->AddRectFilled(g.P(x, y), g.P(x + w, y + h), kPanel, 22.0f * g.s);
+    g.dl->AddRect(g.P(x, y), g.P(x + w, y + h), kBorder, 22.0f * g.s, 0, 1.0f * g.s);
+
+    const bool resume = FileExists(kRetroRewindPartialDir);
+    Text(x + 44, y + 40, 38, kText, ui.retroRewindPack ? "Download Retro Rewind again?" : "Download Retro Rewind?");
+    const std::string line1 = std::string("Version ") + RetroRewindDownload::PinnedVersion() +
+                              ", straight from the official Retro Rewind server.";
+    Text(x + 44, y + 110, 24, kText, line1.c_str());
+    Text(x + 44, y + 154, 21, kMuted,
+         resume ? "Continues the download that was started before."
+                : "About 1.8 GB to download; needs Wi-Fi and 2.3 GB free on the SD card.");
+    Text(x + 44, y + 190, 21, kMuted, "It can take 10 to 30 minutes. Keep the console on.");
+    if (ui.retroRewindPack) {
+        Text(x + 44, y + 226, 21, kMuted, "The pack you have now stays in use until the new one is complete.");
+    }
+
+    const float by = y + h - 112;
+    if (ui.focusPending) {
+        ui.sel = 1;  // Download
+    }
+    if (Button("##cancel", "Cancel", nullptr, x + 44, by, 380, 76, Tone::Normal)) {
+        Go(ui, Screen::Home);
+    }
+    if (Button("##confirm", resume ? "Continue" : "Download", nullptr, x + w - 44 - 380, by, 380, 76, Tone::Primary,
+               true, ui.focusPending)) {
+        BeginRetroDownload(ui);
+    }
+    ui.focusPending = false;
+    if (g_in.back) {
+        Go(ui, Screen::Home);
+    }
+    DrawFooter({{'A', "Select"}, {'B', "Cancel"}}, FreeSpaceText());
+}
+
+void DrawRetroProgress(Ui& ui) {
+    DrawHeader("Downloading Retro Rewind", RetroRewindDownload::PinnedVersion());
+    DrawProgressBody(ui, ui.retroJob ? ui.retroJob->BytesDone() : 0, ui.retroJob ? ui.retroJob->BytesTotal() : 0);
+    if (ui.retroStopping) {
+        TextCentered(640, 470, 24, kText, "Stopping...");
+    } else if (ui.retroJob && ui.retroJob->Reconnecting()) {
+        TextCentered(640, 470, 24, kWarn, "Connection lost. Trying again...");
+    }
+
+    if (g_in.back && ui.retroJob && !ui.retroStopping) {
+        ui.retroJob->Cancel();
+        ui.retroStopping = true;
+    }
+    if (ui.retroJob && ui.retroJob->Finished()) {
+        const std::string error = ui.retroJob->Finish();
+        ui.retroJob.reset();
+        CloseRetroNetwork(ui);
+        ui.resultOk = error.empty();
+        ui.resultMessage = error;
+        ui.retroResult = true;
+        RefreshData(ui);
+        Go(ui, Screen::Done);
+    }
+    DrawFooter(ui.retroStopping ? std::vector<Hint>{} : std::vector<Hint>{{'B', "Stop (progress is kept)"}}, "");
+}
+
 void DrawDone(Ui& ui) {
-    DrawHeader(ui.resultOk ? "Installed" : "Install failed", nullptr);
+    const bool retro = ui.retroResult;
+    DrawHeader(ui.resultOk ? "Installed" : retro ? "Download not finished" : "Install failed", nullptr);
 
     // Status badge.
     const ImU32 color = ui.resultOk ? kGood : kBad;
@@ -798,7 +1209,7 @@ void DrawDone(Ui& ui) {
         g.dl->AddLine(g.P(664, 196), g.P(616, 244), IM_COL32(255, 255, 255, 255), 9.0f * g.s);
     }
     if (ui.resultOk) {
-        TextCentered(640, 296, 34, kText, "Mario Kart Wii is ready to play.");
+        TextCentered(640, 296, 34, kText, retro ? "Retro Rewind is ready." : "Mario Kart Wii is ready to play.");
     } else {
         // Wrap the message over two lines.
         std::string message = ui.resultMessage;
@@ -821,7 +1232,20 @@ void DrawDone(Ui& ui) {
 
     const float bx = 380, bw = 520;
     float by = 392;
-    if (ui.resultOk) {
+    if (retro) {
+        // Playing Retro Rewind is the banner's job (from the regular game it means switching
+        // programs), so a finished download just goes back to the menu.
+        if (!ui.resultOk) {
+            if (Button("##retry", "Try again", nullptr, bx, by, bw, 74, Tone::Primary, true, ui.focusPending)) {
+                Go(ui, Screen::RetroDialog);
+            }
+            by += 86;
+        }
+        if (Button("##menu", "Back to menu", nullptr, bx, by, bw, 74, ui.resultOk ? Tone::Primary : Tone::Normal, true,
+                   ui.resultOk && ui.focusPending)) {
+            Go(ui, Screen::Home);
+        }
+    } else if (ui.resultOk) {
         if (Button("##play", "Play now", nullptr, bx, by, bw, 74, Tone::Primary, true, ui.focusPending)) {
             ui.starting = true;
         }
@@ -842,6 +1266,191 @@ void DrawDone(Ui& ui) {
     ui.focusPending = false;
     DrawMessage(ui);
     DrawFooter({{'A', "Select"}}, FreeSpaceText());
+}
+
+// ---------------------------------------------------------------------------------------------
+// Mods
+// ---------------------------------------------------------------------------------------------
+
+// The next .zip in the Mods folder that has no unpacked folder yet, "" when there is none.
+std::string NextModZip(const Ui& ui) {
+    std::vector<std::string> zips;
+    std::error_code ec;
+    for (fs::directory_iterator it(SwitchMods::kFolder, ec), end; !ec && it != end; it.increment(ec)) {
+        if (it->is_regular_file(ec) && Lower(it->path().extension().string()) == ".zip") {
+            zips.push_back(it->path().filename().string());
+        }
+    }
+    std::sort(zips.begin(), zips.end());
+    for (const std::string& zip : zips) {
+        const std::string folder = std::string(SwitchMods::kFolder) + "/" + fs::path(zip).stem().string();
+        if (!fs::exists(folder, ec) &&
+            std::find(ui.zipFailed.begin(), ui.zipFailed.end(), zip) == ui.zipFailed.end()) {
+            return zip;
+        }
+    }
+    return {};
+}
+
+void DrawMods(Ui& ui) {
+    if (ui.zipJob) {
+        DrawHeader("Mods", "Unpacking a mod that was copied over as a .zip file.");
+        const std::string name = Fit(26, ui.zipName, 1000, false);
+        TextCentered(640, 150, 26, kText, name.c_str());
+        DrawProgressBody(ui, ui.zipJob->BytesDone(), ui.zipJob->BytesTotal());
+        if (ui.zipJob->Finished()) {
+            const std::string error = ui.zipJob->Finish();
+            ui.zipJob.reset();
+            if (!error.empty()) {
+                ui.zipFailed.push_back(ui.zipName);
+                Notify(ui, ui.zipName + ": " + error, kWarn, 10);
+            } else {
+                ui.modsChanged = true;
+            }
+            ui.modsLoaded = false;  // look again: another zip may be waiting
+        }
+        DrawFooter({}, "");
+        return;
+    }
+    if (!ui.modsLoaded) {
+        std::error_code ec;
+        fs::create_directories(SwitchMods::kFolder, ec);
+        if (const std::string zip = NextModZip(ui); !zip.empty()) {
+            ui.zipName = zip;
+            ui.zipJob = std::make_unique<ZipExtract::Job>();
+            ui.zipJob->Start(std::string(SwitchMods::kFolder) + "/" + zip,
+                             std::string(SwitchMods::kFolder) + "/" + fs::path(zip).stem().string());
+            ui.samples.clear();
+            ui.samples.emplace_back(Clock::now(), 0);
+            return;
+        }
+        ui.mods = SwitchMods::List();
+        ui.modsLoaded = true;
+        ui.modDeleteArmed.clear();
+    }
+    DrawHeader("Mods", "Folders in /switch/WiiCompiled/Mods. The one at the top wins when two change the same file.");
+
+    if (ui.mods.empty()) {
+        TextCentered(640, 250, 28, kText, "No mods yet.");
+        TextCentered(640, 300, 21, kMuted, "Copy each mod, as a .zip or as its folder (the one with \"riivolution\" inside),");
+        TextCentered(640, 330, 21, kMuted, "into /switch/WiiCompiled/Mods on the SD card, then come back here.");
+        ui.focusPending = false;
+        if (g_in.back) {
+            Go(ui, Screen::Home);
+        }
+        DrawMessage(ui);
+        DrawFooter({{'B', "Back"}}, FreeSpaceText());
+        return;
+    }
+
+    if (ui.focusPending) {
+        ui.sel = 0;
+        ui.focusPending = false;
+    }
+    const int count = static_cast<int>(ui.mods.size());
+    const int sel = std::clamp(ui.sel, 0, count - 1);
+    // Six rows fit above the message line; the window follows the highlight.
+    constexpr int kRows = 6;
+    const int first = std::clamp(sel - kRows / 2, 0, std::max(0, count - kRows));
+    // Rows above the window still count as items, so the highlight index stays the list index.
+    for (int i = 0; i < first; ++i) {
+        NextItem(true);
+    }
+    float y = 150;
+    int toggled = -1;
+    for (int i = first; i < std::min(count, first + kRows); ++i) {
+        const SwitchMods::Mod& mod = ui.mods[static_cast<size_t>(i)];
+        const std::string label = Fit(30, mod.name, 760, false);
+        char sub[64];
+        std::snprintf(sub, sizeof(sub), "%s  -  priority %d of %d", mod.enabled ? "On" : "Off", i + 1, count);
+        ImGui::PushID(i);
+        if (Button("##mod", label.c_str(), sub, 160, y, 960, 62, mod.enabled ? Tone::Primary : Tone::Normal)) {
+            toggled = i;
+        }
+        ImGui::PopID();
+        y += 68;
+    }
+    for (int i = first + kRows; i < count; ++i) {
+        NextItem(true);
+    }
+
+    SwitchMods::Mod& current = ui.mods[static_cast<size_t>(sel)];
+    if (toggled >= 0) {
+        SwitchMods::Mod& mod = ui.mods[static_cast<size_t>(toggled)];
+        mod.enabled = !mod.enabled;
+        SwitchMods::SetEnabled(mod, mod.enabled);
+        ui.sel = toggled;
+        ui.modsChanged = true;
+        ui.modDeleteArmed.clear();
+    } else if (g_in.x && sel > 0) {
+        std::swap(ui.mods[static_cast<size_t>(sel)], ui.mods[static_cast<size_t>(sel - 1)]);
+        SwitchMods::SaveOrder(ui.mods);
+        ui.sel = sel - 1;
+        ui.modsChanged = true;
+        ui.modDeleteArmed.clear();
+    } else if (g_in.y) {
+        if (ui.modDeleteArmed == current.name) {
+            const std::string name = current.name;
+            if (SwitchMods::Delete(current)) {
+                Notify(ui, "Deleted " + name + ".", kGood);
+            } else {
+                Notify(ui, "Could not delete " + name + ".");
+            }
+            ui.modsLoaded = false;
+            ui.modsChanged = true;
+        } else {
+            ui.modDeleteArmed = current.name;
+            Notify(ui, "Press Y again to delete " + current.name + " from the SD card.", kWarn, 4);
+        }
+    } else if (g_in.moveY != 0) {
+        ui.modDeleteArmed.clear();
+    }
+    if (g_in.back) {
+        if (ui.modsChanged) {
+            Notify(ui, "Mod changes apply the next time the game starts.", kGood);
+            ui.modsChanged = false;
+        }
+        Go(ui, Screen::Home);
+    }
+    DrawMessage(ui);
+    DrawFooter({{'A', "On / off"}, {'X', "Move up"}, {'Y', "Delete"}, {'B', "Back"}}, FreeSpaceText());
+}
+
+// ---------------------------------------------------------------------------------------------
+// Mii data
+// ---------------------------------------------------------------------------------------------
+
+void DrawMii(Ui& ui) {
+    DrawHeader("Mii data", "Everything goes through the folder /switch/WiiCompiled/Mii on the SD card.");
+    const fs::path database =
+        RuntimeConfigFile::ApplicationDataDirectory() / "NAND" / "shared2" / "menu" / "FaceLib" / "RFL_DB.dat";
+    const fs::path folder = "sdmc:/switch/WiiCompiled/Mii";
+    const auto report = [&ui](const SwitchMiiData::Result& result) {
+        Notify(ui, result.message, result.ok ? kGood : kWarn, 8);
+    };
+
+    const float bx = 240, bw = 800, bh = 86;
+    float y = 170;
+    if (Button("##export", "Save my Miis to the SD card", "Copies the game's Mii database there as RFL_DB.dat.", bx, y, bw,
+               bh, Tone::Normal, true, ui.focusPending)) {
+        report(SwitchMiiData::Export(database, folder));
+    }
+    y += bh + 14;
+    if (Button("##add", "Add single Miis", "Adds every .rcd, .mii or .miigx file in the folder to a free slot.", bx, y,
+               bw, bh, Tone::Normal)) {
+        report(SwitchMiiData::AddSingleMiis(database, folder));
+    }
+    y += bh + 14;
+    if (Button("##replace", "Replace all my Miis", "Uses the RFL_DB.dat in the folder instead. The old one is kept as a backup.",
+               bx, y, bw, bh, Tone::Danger)) {
+        report(SwitchMiiData::Replace(database, folder));
+    }
+    ui.focusPending = false;
+    if (g_in.back) {
+        Go(ui, Screen::Home);
+    }
+    DrawMessage(ui);
+    DrawFooter({{'A', "Select"}, {'B', "Back"}}, "");
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1165,6 +1774,10 @@ void DrawFrame(Ui& ui) {
         case Screen::Progress: DrawProgress(ui); break;
         case Screen::Done: DrawDone(ui); break;
         case Screen::Browse: DrawBrowse(ui); break;
+        case Screen::RetroDialog: DrawRetroDialog(ui); break;
+        case Screen::RetroProgress: DrawRetroProgress(ui); break;
+        case Screen::Mods: DrawMods(ui); break;
+        case Screen::Mii: DrawMii(ui); break;
         }
         }
     }
@@ -1227,6 +1840,17 @@ bool SwitchRunLauncher() {
     if (ui.dataState != DataState::Ready) {
         ui.images = SwitchImport::FindDiscImages();
     }
+    // Started from the base game's launcher: go straight in, as long as everything is in place.
+    if (FileExists(kSkipLauncherFlag)) {
+        std::remove(kSkipLauncherFlag);
+        if (RuntimeProduct::IsRetroRewind() && ui.dataState == DataState::Ready && ui.retroRewindPack) {
+            while (!aurora_begin_frame()) {
+                aurora_update();
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+            return true;
+        }
+    }
 
     g_ui = &ui;
     g_in = PadInput{};
@@ -1269,10 +1893,28 @@ bool SwitchRunLauncher() {
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
     }
+    // Leaving with a download still running (the HOME menu closing the app): stop it and release
+    // the network before anything else runs.
+    ui.retroJob.reset();
+    CloseRetroNetwork(ui);
     launcherIo.ConfigFlags = savedConfigFlags;
     g_ui = nullptr;
     g_in = PadInput{};
     return ui.starting;
+}
+
+std::string SwitchFindRetroRewindRoot() {
+    static constexpr const char* kCandidates[] = {
+        "sdmc:/switch/WiiCompiled/RetroRewind6",
+        "sdmc:/switch/WiiCompiled/RetroRewind/RetroRewind6",
+        "sdmc:/RetroRewind6",
+    };
+    for (const char* candidate : kCandidates) {
+        if (FileExists((std::string(candidate) + "/Binaries/Code.pul").c_str())) {
+            return candidate;
+        }
+    }
+    return {};
 }
 
 #endif  // __SWITCH__

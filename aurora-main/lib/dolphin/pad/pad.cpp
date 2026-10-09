@@ -1,5 +1,7 @@
 #include "../../input.hpp"
 #include "../../internal.hpp"
+#include <chrono>
+#include <cstdlib>
 #include <dolphin/pad.h>
 #include <dolphin/si.h>
 #include <SDL3/SDL_mouse.h>
@@ -680,6 +682,28 @@ u32 PADRead(PADStatus* status) {
   uint32_t rumbleSupport = 0;
   for (uint32_t i = 0; i < PAD_CHANMAX; ++i) {
     memset(&status[i], 0, sizeof(PADStatus));
+#if !defined(__SWITCH__) && !defined(__ANDROID__)
+    // Unattended test runs on desktop: MKW_TEST_PAD_AUTOPRESS=<seconds> makes port 0 a pad that,
+    // after that many seconds, holds A for 900 ms of every second. That walks the menus into a
+    // Grand Prix and keeps accelerating, with no window focus or real controller needed.
+    if (i == 0) {
+      static const int autoPressDelay = [] {
+        const char* value = std::getenv("MKW_TEST_PAD_AUTOPRESS");
+        return value != nullptr ? std::atoi(value) : -1;
+      }();
+      if (autoPressDelay >= 0) {
+        using TestClock = std::chrono::steady_clock;
+        static const TestClock::time_point start = TestClock::now();
+        const auto elapsed =
+            std::chrono::duration_cast<std::chrono::milliseconds>(TestClock::now() - start).count();
+        status[i].err = PAD_ERR_NONE;
+        if (elapsed >= static_cast<long long>(autoPressDelay) * 1000 && (elapsed % 1000) < 900) {
+          status[i].button |= PAD_BUTTON_A;
+        }
+        continue;
+      }
+    }
+#endif
     auto controller = aurora::input::get_controller_for_player(i);
     if (controller == nullptr && !g_keyboardBindings[i].m_mappingsSet) {
       status[i].err = PAD_ERR_NO_CONTROLLER;
@@ -781,12 +805,19 @@ u32 PADRead(PADStatus* status) {
           status[i].button |= mapping.padButton;
         }
 
+#if !defined(__SWITCH__)
         if (mapping.padButton == PAD_TRIGGER_L) {
           leftTriggerSet = true;
         }
         if (mapping.padButton == PAD_TRIGGER_R) {
           rightTriggerSet = true;
         }
+#else
+        // On Switch the bumpers are second bindings for GC L/R next to ZL/ZR (settings_overlay's
+        // ApplyConfiguredMappings); they must not switch the analog triggers' digital press off.
+        (void)leftTriggerSet;
+        (void)rightTriggerSet;
+#endif
       });
 
       // TODO: Add serializable mappings for these (probably not necessary)?

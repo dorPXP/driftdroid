@@ -12,8 +12,8 @@ android {
         applicationId = "com.driftdroid.android"
         minSdk = 29
         targetSdk = 34
-        versionCode = 4
-        versionName = "1.3.0-gpu-test1"
+        versionCode = 6
+        versionName = "1.3.0"
 
         ndk {
             abiFilters += "arm64-v8a"

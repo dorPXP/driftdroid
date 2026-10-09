@@ -6,6 +6,7 @@
 #include "controller_mapping_wizard.h"
 #include "game_graphics_options.h"
 #include "music_attenuation.h"
+#include "music_player.h"
 #include "thermal_quality.h"
 #include "runtime_config.h"
 #include "runtime_log.h"
@@ -54,6 +55,9 @@ void RequestMkwAspectMode(bool widescreen);
 namespace AxDspHle {
 void SetMixWorkerEnabled(bool enabled);
 }
+
+void RuntimeSetLowDetailComputerKarts(bool enabled) noexcept;  // hle/low_detail_karts.cpp
+void RuntimeSetThirtyFpsRaces(bool enabled) noexcept;          // hle/frame_rate_lock.cpp
 
 namespace settings_overlay {
 namespace {
@@ -117,6 +121,15 @@ int g_displayMode = ParseDisplayModeConfig(RuntimeConfigFile::DisplayMode("borde
 bool g_skipUnreadyPipelines = RuntimeConfigFile::SkipUnreadyPipelines(true);
 bool g_disableCopyFilter = RuntimeConfigFile::DisableCopyFilter(true);
 bool g_constantMatrixIndexing = RuntimeConfigFile::ConstantMatrixIndexing(false);
+// Computer karts load the game's own split-screen models in single-player races: far fewer draws
+// and no driver animation per kart. On by default on Switch, where a full race is CPU-bound.
+#if defined(__SWITCH__)
+constexpr bool kLowDetailComputerKartsDefault = true;
+#else
+constexpr bool kLowDetailComputerKartsDefault = false;
+#endif
+bool g_lowDetailComputerKarts = RuntimeConfigFile::LowDetailComputerKarts(kLowDetailComputerKartsDefault);
+bool g_thirtyFpsRaces = RuntimeConfigFile::ThirtyFpsRaces(false);
 
 // video.vertex_repack: the Adreno 8xx "vertex explosion" workaround. Fixed for the process once
 // rendering starts, so the settings entry only takes effect on the next launch.
@@ -255,7 +268,23 @@ constexpr std::array<std::string_view, 3> kDisplayModeConfigNames = {
 uint64_t g_presentedFrame = 0;
 std::atomic_bool g_strapInputAccepted = false;
 std::atomic_uint64_t g_startupDismissFrame = UINT64_MAX;
-constexpr uint64_t kStrapTransitionCoverFrames = 60;
+// The cover stays up until the warning screen's scene has really gone (NotifyBootSceneExited).
+// Counting frames from the accepted input alone lifted it early on slow starts - the Switch showed
+// the warning screen stuttering through its fade. The long count is only a fallback.
+constexpr uint64_t kStrapTransitionCoverFrames = 600;
+constexpr uint64_t kSceneExitCoverFrames = 6;
+std::atomic_bool g_bootSceneExited = false;
+// The same two limits in wall time. Frames alone kept the cover up far too long whenever the first
+// frames after the warning screen were slow (reported on Switch: the intro's sound started under
+// the splash and the intro then appeared part-way through), and the 600-frame fallback is half a
+// minute at 20 FPS.
+constexpr int64_t kStrapTransitionCoverMs = 4000;
+constexpr int64_t kSceneExitCoverMs = 150;
+std::atomic_int64_t g_startupDismissAtMs = INT64_MAX;
+
+int64_t StartupClockMs() noexcept {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now().time_since_epoch()).count();
+}
 
 // Nothing below 1x: the renderer cannot draw smaller than the game's own framebuffer, and the
 // old 0.5x/0.75x entries crashed on the way into a race.
@@ -351,6 +380,29 @@ void ApplyConfiguredMappings() {
         if (PADGetButtonMappings(port, &count) == nullptr || count != PAD_BUTTON_COUNT) {
             continue;
         }
+#if defined(__SWITCH__)
+        // Requested directly: "i want the L and R button to do the same as ZL and ZR, use item and
+        // well, drift". aurora's default puts GC L/R on the analog triggers (ZL/ZR) only and Z on
+        // the right bumper, so the bumpers join as second bindings and Z gives its bumper up (the
+        // game also looks behind on X). A binding saved in Config.toml still wins below.
+        for (const uint16_t padButton : {PAD_TRIGGER_Z, PAD_TRIGGER_L, PAD_TRIGGER_R}) {
+            const auto it = std::find_if(kControllerButtons.begin(), kControllerButtons.end(),
+                                         [&](const auto& item) { return item.padButton == padButton; });
+            if (it == kControllerButtons.end() ||
+                RuntimeConfigFile::ControllerButton(static_cast<size_t>(it - kControllerButtons.begin()))) {
+                continue;
+            }
+            if (padButton == PAD_TRIGGER_Z) {
+                PADSetButtonMapping(port, PADButtonMapping{PAD_NATIVE_BUTTON_INVALID, padButton});
+            } else {
+                PADSetAltButtonMapping(
+                    port, PADButtonMapping{static_cast<uint32_t>(padButton == PAD_TRIGGER_L
+                                                                     ? SDL_GAMEPAD_BUTTON_LEFT_SHOULDER
+                                                                     : SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER),
+                                           padButton});
+            }
+        }
+#endif
         for (size_t i = 0; i < kControllerButtons.size(); ++i) {
             const auto& configured = RuntimeConfigFile::ControllerButton(i);
             if (!configured) {
@@ -644,6 +696,157 @@ void DrawAudioSettings() {
     }
 }
 
+#if defined(__SWITCH__)
+extern "C" void AuroraSwitchSetMotionSteering(int enabled, float sensitivity, int inverted);
+extern "C" void AuroraSwitchRecenterMotionSteering();
+extern "C" int AuroraSwitchMotionSteeringSeen();
+
+// Tilt to steer (aurora-main/lib/switch/input_switch.cpp). Kept in its own small file beside
+// Config.toml, like the music player's settings.
+struct MotionSteeringSettings {
+    bool enabled = false;
+    bool inverted = false;
+    int sensitivityPercent = 100;
+    bool loaded = false;
+};
+MotionSteeringSettings g_motionSteering;
+
+void ApplyMotionSteering(bool save) {
+    AuroraSwitchSetMotionSteering(g_motionSteering.enabled ? 1 : 0,
+                                  static_cast<float>(g_motionSteering.sensitivityPercent) / 100.0f,
+                                  g_motionSteering.inverted ? 1 : 0);
+    if (!save) {
+        return;
+    }
+    const auto path = RuntimeConfigFile::ApplicationDataDirectory() / "motion_steering.cfg";
+    if (FILE* file = std::fopen(path.string().c_str(), "wb")) {
+        std::fprintf(file, "%d %d %d\n", g_motionSteering.enabled ? 1 : 0, g_motionSteering.inverted ? 1 : 0,
+                     g_motionSteering.sensitivityPercent);
+        std::fclose(file);
+    }
+}
+
+void LoadMotionSteering() {
+    if (g_motionSteering.loaded) {
+        return;
+    }
+    g_motionSteering.loaded = true;
+    const auto path = RuntimeConfigFile::ApplicationDataDirectory() / "motion_steering.cfg";
+    if (FILE* file = std::fopen(path.string().c_str(), "rb")) {
+        int enabled = 0, inverted = 0, sensitivity = 100;
+        if (std::fscanf(file, "%d %d %d", &enabled, &inverted, &sensitivity) == 3) {
+            g_motionSteering.enabled = enabled != 0;
+            g_motionSteering.inverted = inverted != 0;
+            g_motionSteering.sensitivityPercent = std::clamp(sensitivity, 50, 200);
+        }
+        std::fclose(file);
+    }
+    ApplyMotionSteering(false);
+}
+
+void DrawMotionSteeringSettings() {
+    LoadMotionSteering();
+    ImGui::SeparatorText("Tilt to steer (player 1)");
+    bool changed = ImGui::Checkbox("Steer by tilting the console or controller", &g_motionSteering.enabled);
+    if (g_motionSteering.enabled) {
+        ImGui::SetNextItemWidth(220.0f);
+        changed |= ImGui::SliderInt("Sensitivity##Motion", &g_motionSteering.sensitivityPercent, 50, 200, "%d%%");
+        changed |= ImGui::Checkbox("Reverse direction", &g_motionSteering.inverted);
+        if (ImGui::Button("Set straight ahead to how I am holding it now", ImVec2(-1.0f, 48.0f))) {
+            AuroraSwitchRecenterMotionSteering();
+        }
+        if (AuroraSwitchMotionSteeringSeen() == 0) {
+            ImGui::TextDisabled("Waiting for the tilt sensor...");
+        }
+    }
+    if (changed) {
+        ApplyMotionSteering(true);
+    }
+}
+#endif
+
+// The player's own MP3s over the game (music_player.cpp). Big buttons and tall rows: on Switch this
+// page is used with a finger as much as with the controller.
+void DrawMusicPlayer() {
+    static std::vector<std::string> tracks;
+    static bool listed = false;
+    if (!listed) {
+        tracks = MusicPlayer::Rescan();
+        listed = true;
+    }
+    const MusicPlayer::Status status = MusicPlayer::GetStatus();
+    const float width = ImGui::GetContentRegionAvail().x;
+
+    if (tracks.empty()) {
+        ImGui::TextWrapped("No music yet. Put MP3 files in %s on the SD card, then press Look again.",
+                           MusicPlayer::FolderForDisplay().c_str());
+        if (ImGui::Button("Look again", ImVec2(width, 52.0f))) {
+            tracks = MusicPlayer::Rescan();
+        }
+        return;
+    }
+
+    const bool haveTrack = status.index >= 0 && status.index < static_cast<int>(tracks.size());
+    ImGui::TextWrapped("%s", haveTrack ? tracks[static_cast<size_t>(status.index)].c_str() : "Nothing playing");
+    const auto clock = [](double seconds) {
+        const int total = static_cast<int>(seconds);
+        char text[16];
+        std::snprintf(text, sizeof(text), "%d:%02d", total / 60, total % 60);
+        return std::string(text);
+    };
+    const float fraction =
+        status.durationSeconds > 0.0 ? static_cast<float>(status.positionSeconds / status.durationSeconds) : 0.0f;
+    const std::string times = clock(status.positionSeconds) + " / " + clock(status.durationSeconds);
+    ImGui::ProgressBar(fraction, ImVec2(width, 22.0f), status.loaded ? times.c_str() : "");
+
+    const float spacing = ImGui::GetStyle().ItemSpacing.x;
+    const float third = (width - spacing * 2.0f) / 3.0f;
+    if (ImGui::Button("Previous", ImVec2(third, 60.0f))) {
+        MusicPlayer::Previous();
+    }
+    ImGui::SameLine();
+    if (ImGui::Button(status.playing ? "Pause" : "Play", ImVec2(third, 60.0f))) {
+        MusicPlayer::TogglePause();
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Next", ImVec2(third, 60.0f))) {
+        MusicPlayer::Next();
+    }
+
+    int volume = static_cast<int>(std::lround(MusicPlayer::Volume() * 100.0f));
+    ImGui::SetNextItemWidth(width * 0.62f);
+    if (ImGui::SliderInt("Volume##MusicPlayer", &volume, 0, 100, "%d%%")) {
+        MusicPlayer::SetVolume(static_cast<float>(volume) / 100.0f);
+    }
+    bool shuffle = MusicPlayer::Shuffle();
+    if (ImGui::Checkbox("Shuffle", &shuffle)) {
+        MusicPlayer::SetShuffle(shuffle);
+    }
+    bool muteGame = MusicPlayer::MuteGameMusic();
+    if (ImGui::Checkbox("Turn off the game's own music while this plays", &muteGame)) {
+        MusicPlayer::SetMuteGameMusic(muteGame);
+    }
+    if (status.loaded) {
+        ImGui::SameLine();
+        if (ImGui::Button("Stop")) {
+            MusicPlayer::Stop();
+        }
+    }
+
+    ImGui::Separator();
+    for (size_t i = 0; i < tracks.size(); ++i) {
+        ImGui::PushID(static_cast<int>(i));
+        const bool current = static_cast<int>(i) == status.index;
+        if (ImGui::Selectable(tracks[i].c_str(), current, 0, ImVec2(0.0f, 44.0f))) {
+            MusicPlayer::Play(static_cast<int>(i));
+        }
+        ImGui::PopID();
+    }
+    if (ImGui::Button("Look for new files", ImVec2(width, 48.0f))) {
+        tracks = MusicPlayer::Rescan();
+    }
+}
+
 // Render-resolution scale (0.5x-8x the Wii's native output), same list/logic as DrawTopBar's own
 // resolution dropdown. That one lives inline in DrawTopBar (desktop's menu bar) and is left alone
 // there; this is a separate, sidebar-appropriate (BeginCombo, not BeginMenu) copy for
@@ -822,6 +1025,16 @@ void DrawGraphicsSettings() {
         ImGui::TextDisabled("Takes effect the next time the game starts.");
     }
 #endif
+    if (ImGui::Checkbox("Simpler computer karts (faster races)", &g_lowDetailComputerKarts)) {
+        RuntimeSetLowDetailComputerKarts(g_lowDetailComputerKarts);
+        RuntimeConfigFile::SetLowDetailComputerKarts(g_lowDetailComputerKarts);
+    }
+    ImGui::TextDisabled("Applies from the next race.");
+    if (ImGui::Checkbox("30 FPS races (normal speed, half the frames)", &g_thirtyFpsRaces)) {
+        RuntimeSetThirtyFpsRaces(g_thirtyFpsRaces);
+        RuntimeConfigFile::SetThirtyFpsRaces(g_thirtyFpsRaces);
+    }
+    ImGui::TextDisabled("For when 60 can't be held. Applies from the next race.");
     if (ImGui::Checkbox("Skip draws while shaders compile", &g_skipUnreadyPipelines)) {
         aurora_set_skip_unready_pipelines(g_skipUnreadyPipelines);
         RuntimeConfigFile::SetSkipUnreadyPipelines(g_skipUnreadyPipelines);
@@ -1203,14 +1416,15 @@ void DrawAndroidSidebar() {
         return;
     }
 
-    enum class SidebarPage { Root, Display, Controller, Audio };
+    enum class SidebarPage { Root, Display, Controller, Audio, Music };
     static SidebarPage page = SidebarPage::Root;
 
     ImGui::SetWindowFontScale(1.15f);
     ImGui::TextUnformatted(page == SidebarPage::Root ? "Settings"
                             : page == SidebarPage::Display ? "Display"
                             : page == SidebarPage::Controller ? "Controller"
-                                                               : "Audio");
+                            : page == SidebarPage::Music ? "Music player"
+                                                          : "Audio");
     const float closeWidth = ImGui::CalcTextSize("Close").x + ImGui::GetStyle().FramePadding.x * 2.0f + 16.0f;
     ImGui::SameLine(ImGui::GetContentRegionMax().x - closeWidth);
     if (ImGui::Button("Close", ImVec2(closeWidth, 0.0f))) {
@@ -1231,6 +1445,13 @@ void DrawAndroidSidebar() {
         if (DrawSidebarRow("Audio")) {
             page = SidebarPage::Audio;
         }
+#if defined(__SWITCH__)
+        // Android keeps its files where the player cannot reach them, so there is no folder to
+        // drop music into there yet.
+        if (DrawSidebarRow("Music player")) {
+            page = SidebarPage::Music;
+        }
+#endif
         ImGui::Separator();
         ImGui::Spacing();
         // Every slider/checkbox on every page already writes straight to Config.toml the instant
@@ -1277,6 +1498,9 @@ void DrawAndroidSidebar() {
             DrawControllerSettings();
             ImGui::Separator();
             ImGui::Spacing();
+#if defined(__SWITCH__)
+            DrawMotionSteeringSettings();
+#endif
 #if defined(__ANDROID__)
             if (ImGui::Button("Edit Touch Layout", ImVec2(-1.0f, 48.0f))) {
                 // Editing happens in Kotlin's TouchControlsOverlay, not this ImGui panel - close
@@ -1295,6 +1519,9 @@ void DrawAndroidSidebar() {
             break;
         case SidebarPage::Audio:
             DrawAudioSettings();
+            break;
+        case SidebarPage::Music:
+            DrawMusicPlayer();
             break;
         case SidebarPage::Root:
             break;
@@ -1354,6 +1581,12 @@ void DrawTopBar() {
     const std::string audioMenuLabel = audioLabel + "###AudioSettingsMenu";
     if (ImGui::BeginMenu(audioMenuLabel.c_str())) {
         DrawAudioSettings();
+        ImGui::EndMenu();
+    }
+
+    if (ImGui::BeginMenu("Music player")) {
+        ImGui::Dummy(ImVec2(420.0f, 0.0f));
+        DrawMusicPlayer();
         ImGui::EndMenu();
     }
 
@@ -1463,6 +1696,9 @@ void PersistDisplayModeIfChanged() {
 } // namespace
 
 void InitializeRuntimeSettings() noexcept {
+#if defined(__SWITCH__)
+    LoadMotionSteering();  // a saved "tilt to steer" applies without opening the menu
+#endif
 #if defined(__ANDROID__)
     // The g_* globals above were initialized at static-init time, which on Android runs
     // before Kotlin's JNI call to SetAndroidFilesDir() - so RuntimeConfigFile::ApplicationDataDirectory()
@@ -1551,6 +1787,10 @@ void InitializeRuntimeSettings() noexcept {
     g_displayMode = static_cast<int>(aurora_get_display_mode());
     aurora_set_disable_copy_filter(g_disableCopyFilter);
     AuroraSetConstantMatrixIndexing(g_constantMatrixIndexing);
+    g_lowDetailComputerKarts = RuntimeConfigFile::LowDetailComputerKarts(kLowDetailComputerKartsDefault);
+    RuntimeSetLowDetailComputerKarts(g_lowDetailComputerKarts);
+    g_thirtyFpsRaces = RuntimeConfigFile::ThirtyFpsRaces(false);
+    RuntimeSetThirtyFpsRaces(g_thirtyFpsRaces);
 #if !defined(__SWITCH__)
     AuroraSetVertexRepackMode(VertexRepackModeForChoice(g_vertexRepackChoice));
 #endif
@@ -1562,7 +1802,9 @@ void InitializeRuntimeSettings() noexcept {
 #endif
     aurora_set_skip_unready_pipelines(g_skipUnreadyPipelines);
     g_strapInputAccepted.store(false, std::memory_order_relaxed);
+    g_bootSceneExited.store(false, std::memory_order_relaxed);
     g_startupDismissFrame.store(UINT64_MAX, std::memory_order_relaxed);
+    g_startupDismissAtMs.store(INT64_MAX, std::memory_order_relaxed);
     PADBlockInput(g_topBarVisible);
 }
 
@@ -1638,7 +1880,8 @@ void Draw() noexcept {
 
 bool StartupScreenVisible() noexcept {
     return !g_strapInputAccepted.load(std::memory_order_acquire) ||
-           g_presentedFrame < g_startupDismissFrame.load(std::memory_order_relaxed);
+           (g_presentedFrame < g_startupDismissFrame.load(std::memory_order_relaxed) &&
+            StartupClockMs() < g_startupDismissAtMs.load(std::memory_order_relaxed));
 }
 
 void ToggleTopBar() noexcept {
@@ -1650,6 +1893,18 @@ void NotifyStrapInputAccepted() noexcept {
     if (g_strapInputAccepted.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
         g_startupDismissFrame.store(g_presentedFrame + kStrapTransitionCoverFrames,
                                     std::memory_order_release);
+        g_startupDismissAtMs.store(StartupClockMs() + kStrapTransitionCoverMs, std::memory_order_release);
+    }
+}
+
+void NotifyBootSceneExited() noexcept {
+    if (!g_strapInputAccepted.load(std::memory_order_acquire)) {
+        return;
+    }
+    bool expected = false;
+    if (g_bootSceneExited.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
+        g_startupDismissFrame.store(g_presentedFrame + kSceneExitCoverFrames, std::memory_order_release);
+        g_startupDismissAtMs.store(StartupClockMs() + kSceneExitCoverMs, std::memory_order_release);
     }
 }
 

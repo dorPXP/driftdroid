@@ -470,14 +470,37 @@ inline double PpcAccurateSingleMaddIntermediateInline(double a, double c, double
     return result;
 }
 
+// True when `value` is exactly a widened single. Compared on the bits, so it holds for signed
+// zeros and NaNs too, and when the operand visibly came from a float (an lfs load, the result of
+// another single op) the compiler folds the whole test away.
+inline bool PpcIsWidenedSingleInline(double value, float& narrowed)
+{
+    narrowed = static_cast<float>(value);
+    return PpcBitCastToU64Inline(static_cast<double>(narrowed)) == PpcBitCastToU64Inline(value);
+}
+
+// fmuls rounds its second operand to 25 significant bits before multiplying (Gekko's multiplier
+// is narrower than a double). A widened single has at most 24, so the rounding is the identity
+// for it - and that is nearly every operand the game multiplies. Taking that case first lets the
+// compiler see a plain float x float product (which it narrows to one FMUL) instead of the
+// bit-twiddling rounding on every multiply; other operands go through it exactly as before.
+// Results are bit-identical to the rounding path for every non-NaN operand. With a NaN operand
+// the result is a NaN either way; which operand's payload it carries was never fixed (it follows
+// the operand order the compiler happens to pick for the multiply), and still is not.
 inline double PpcFmulsInline(double a, double c)
 {
+    float single;
+    if (PpcIsWidenedSingleInline(c, single)) [[likely]]
+        return static_cast<double>(PpcForceSingleValueInline(a * static_cast<double>(single)));
     return static_cast<double>(
         PpcForceSingleValueInline(a * PpcForce25BitInline(c)));
 }
 
 inline double PpcFmulsNoNiInline(double a, double c)
 {
+    float single;
+    if (PpcIsWidenedSingleInline(c, single)) [[likely]]
+        return static_cast<double>(static_cast<float>(a * static_cast<double>(single)));
     return static_cast<double>(static_cast<float>(a * PpcForce25BitInline(c)));
 }
 

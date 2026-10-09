@@ -580,7 +580,8 @@ static std::optional<std::filesystem::path> FindCaCertificateBundle() {
         }
     }
 
-#if defined(__ANDROID__)
+#if defined(__ANDROID__) || defined(__SWITCH__)
+    // Android unpacks it into the app's data folder; the Switch NRO installs it beside Config.toml.
     const auto androidAsset = RuntimeConfigFile::ApplicationDataDirectory() / "cacert.pem";
     if (std::filesystem::is_regular_file(androidAsset)) {
         return androidAsset;

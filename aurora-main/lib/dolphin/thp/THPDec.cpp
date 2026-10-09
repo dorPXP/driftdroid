@@ -11,6 +11,10 @@ using aurora::read_bits;
 #include <array>
 #include <cstring>
 #include <cmath>
+#include <condition_variable>
+#include <mutex>
+#include <thread>
+#include <vector>
 
 namespace {
 // Error codes
@@ -317,90 +321,102 @@ s32 parse_headers(const void* file, DecodeContext& context) noexcept {
   }
 }
 
+// MSB-first bit reader with a 64-bit buffer held in registers. After refill() at least 56 bits are
+// buffered, enough for one Huffman code and its value bits (at most 16 + 16) without another load.
+// Refilling loads 8 bytes at the read pointer, so it may look up to 8 bytes past the last bit
+// consumed - always inside the frame buffer the guest allocated, which is padded well beyond the
+// compressed data.
 class BitReader {
 public:
-  BitReader(const u8* data, size_t byteOffset) noexcept : mData{data}, mBitPosition{byteOffset * 8} {}
+  BitReader(const u8* data, size_t byteOffset) noexcept : mNext{data + byteOffset} {}
 
-  // The next `count` (<= 16) bits without consuming them. Loads a big-endian window of up to 4
-  // bytes, so it may look up to 3 bytes past the last bit it returns - always inside the frame
-  // buffer the guest allocated, which is padded well beyond the compressed data.
-  u32 peek(u8 count) noexcept {
-    if (count == 0) {
-      return 0;
-    }
-    const u8* p = mData + (mBitPosition >> 3);
-    const u32 window = (u32{p[0]} << 24) | (u32{p[1]} << 16) | (u32{p[2]} << 8) | u32{p[3]};
-    return (window << (mBitPosition & 7)) >> (32 - count);
+  void refill() noexcept {
+    u64 raw;
+    std::memcpy(&raw, mNext, sizeof(raw));
+    mBuffer |= __builtin_bswap64(raw) >> mCount;
+    mNext += (63 - mCount) >> 3;
+    mCount |= 56;
   }
 
-  void skip(u8 count) noexcept { mBitPosition += count; }
+  // The next 16 bits. Needs a refill() since at most 40 bits were consumed.
+  u32 peek16() const noexcept { return static_cast<u32>(mBuffer >> 48); }
 
-  u32 read(u8 count) noexcept {
-    const u32 value = peek(count);
-    skip(count);
-    return value;
+  // `count` (1-16) bits starting `offset` bits ahead, without consuming anything.
+  u32 peek_at(u32 offset, u32 count) const noexcept { return static_cast<u32>((mBuffer << offset) >> (64 - count)); }
+
+  void skip(u32 count) noexcept {
+    mBuffer <<= count;
+    mCount -= count;
   }
 
-  void byte_align() noexcept { mBitPosition = (mBitPosition + 7) & ~size_t{7}; }
+  void byte_align() noexcept { skip(mCount & 7); }
 
 private:
-  const u8* mData;
-  size_t mBitPosition;
+  const u8* mNext;
+  u64 mBuffer = 0;
+  u32 mCount = 0;
 };
 
-bool decode_huffman(BitReader& reader, const HuffmanTable& table, u8& symbol) noexcept {
-  // Same answer as trying lengths 1..16 one bit at a time, which used to be most of the decode:
-  // short codes resolve in one table lookup, longer ones from a single 16-bit peek.
-  const u32 bits = reader.peek(16);
-  if (const u16 entry = table.lookup[bits >> (16 - kHuffmanLookupBits)]; entry != 0) {
+// Decodes the Huffman code at the top of `bits` (the next 16 stream bits). Returns the code's
+// length, or 0 when no code matches. Same answer as trying lengths 1..16 one bit at a time:
+// short codes resolve in one table lookup, longer ones by walking lengths 10-16.
+inline u32 decode_huffman(u32 bits, const HuffmanTable& table, u8& symbol) noexcept {
+  if (const u16 entry = table.lookup[bits >> (16 - kHuffmanLookupBits)]; entry != 0) [[likely]] {
     symbol = static_cast<u8>(entry);
-    reader.skip(static_cast<u8>(entry >> 8));
-    return true;
+    return entry >> 8;
   }
   for (u32 length = kHuffmanLookupBits + 1; length <= 16; ++length) {
     const u32 code = bits >> (16 - length);
     const u32 firstCode = table.firstCodes[length];
     if (code >= firstCode && code - firstCode < table.counts[length]) {
       symbol = table.symbols[table.symbolOffsets[length] + code - firstCode];
-      reader.skip(static_cast<u8>(length));
-      return true;
+      return length;
     }
   }
-  reader.skip(16);
-  return false;
+  return 0;
 }
 
-s32 extend_value(u32 value, u8 bitCount) noexcept {
-  if (bitCount != 0 && value < (u32{1} << (bitCount - 1))) {
-    return static_cast<s32>(value) - static_cast<s32>(u32{1} << bitCount) + 1;
-  }
-  return static_cast<s32>(value);
+// JPEG's EXTEND for a value of `bitCount` (1-16) bits: values below 2^(bitCount-1) are negative.
+// Branch-free, because the sign of a coefficient is as good as random to a branch predictor.
+inline s32 extend_value(u32 value, u32 bitCount) noexcept {
+  const s32 isNegative = static_cast<s32>(value - (u32{1} << (bitCount - 1))) >> 31;  // all ones or zero
+  return static_cast<s32>(value) + (isNegative & (1 - static_cast<s32>(u32{1} << bitCount)));
 }
 
-bool decode_block(BitReader& reader, DecodeContext& context, size_t componentIndex,
-                  std::array<s16, 64>& block) noexcept {
-  block.fill(0);
+// Entropy-decodes one block into `block` (natural order) and sets a bit in `rowMask` for every
+// row that received a coefficient.
+bool decode_block(BitReader& sharedReader, DecodeContext& context, size_t componentIndex, s16* block,
+                  u32& rowMask) noexcept {
+  std::memset(block, 0, 64 * sizeof(s16));
   Component& component = context.components[componentIndex];
   const HuffmanTable& dcTable = context.huffmanTables[component.dcTable * 2];
   const HuffmanTable& acTable = context.huffmanTables[component.acTable * 2 + 1];
 
-  u8 bitCount = 0;
-  if (!decode_huffman(reader, dcTable, bitCount) || bitCount > 16) {
+  BitReader reader = sharedReader;  // a local copy the compiler can keep in registers
+  reader.refill();
+  u8 symbol = 0;
+  u32 length = decode_huffman(reader.peek16(), dcTable, symbol);
+  u32 bitCount = symbol;
+  if (length == 0 || bitCount > 16) {
     return false;
   }
-  const u32 encodedDifference = reader.read(bitCount);
-  component.predictedDc += extend_value(encodedDifference, bitCount);
+  const u32 encodedDifference = bitCount == 0 ? 0 : reader.peek_at(length, bitCount);
+  reader.skip(length + bitCount);
+  component.predictedDc += bitCount == 0 ? 0 : extend_value(encodedDifference, bitCount);
   block[0] = static_cast<s16>(component.predictedDc);
+  u32 rows = 1;
 
   size_t coefficient = 1;
   while (coefficient < 64) {
-    u8 runAndSize = 0;
-    if (!decode_huffman(reader, acTable, runAndSize)) {
+    reader.refill();
+    length = decode_huffman(reader.peek16(), acTable, symbol);
+    if (length == 0) {
       return false;
     }
-    const u8 run = runAndSize >> 4;
-    bitCount = runAndSize & 15;
+    const u32 run = symbol >> 4;
+    bitCount = symbol & 15;
     if (bitCount == 0) {
+      reader.skip(length);
       if (run == 15) {
         coefficient += 16;
         continue;
@@ -412,10 +428,15 @@ bool decode_block(BitReader& reader, DecodeContext& context, size_t componentInd
     if (coefficient >= 64) {
       return false;
     }
-    const u32 encodedValue = reader.read(bitCount);
-    block[kNaturalOrder[coefficient]] = static_cast<s16>(extend_value(encodedValue, bitCount));
+    const u32 encodedValue = reader.peek_at(length, bitCount);
+    reader.skip(length + bitCount);
+    const u32 position = kNaturalOrder[coefficient];
+    block[position] = static_cast<s16>(extend_value(encodedValue, bitCount));
+    rows |= u32{1} << (position >> 3);
     ++coefficient;
   }
+  sharedReader = reader;
+  rowMask = rows;
   return true;
 }
 
@@ -490,6 +511,78 @@ FloatRow transform_column(const FloatRow& x) noexcept {
   return combine(even, odd);
 }
 
+u8 to_pixel(float value) noexcept {
+  const float scaled = value * 0.125f;
+  return scaled <= 0.0f ? 0 : scaled >= 255.0f ? 255 : static_cast<u8>(scaled);
+}
+
+// Four columns at a time. Lane-wise +, - and * are the same IEEE operations as the scalar code,
+// and fma4 is one fused multiply-add per lane, so every pixel is computed by exactly the
+// operation sequence of transform_column above - just four (NEON) lanes per instruction.
+using Float4 = float __attribute__((vector_size(16)));
+using Int4 = s32 __attribute__((vector_size(16)));
+
+inline Float4 splat4(float value) noexcept { return Float4{value, value, value, value}; }
+
+inline Float4 fma4(Float4 a, Float4 b, Float4 c) noexcept {
+  Float4 result;
+  for (int lane = 0; lane < 4; ++lane) {
+    result[lane] = __builtin_fmaf(a[lane], b[lane], c[lane]);
+  }
+  return result;
+}
+
+inline void store_pixels4(u8* out, Float4 value) noexcept {
+  const Float4 scaled = value * splat4(0.125f);
+  // Same result as to_pixel for every finite input: clamp to [0, 255], then truncate.
+  const Float4 zero = splat4(0.0f);
+  const Float4 top = splat4(255.0f);
+  Float4 clamped = scaled > zero ? scaled : zero;
+  clamped = clamped < top ? clamped : top;
+  const Int4 integer = __builtin_convertvector(clamped, Int4);
+  for (int lane = 0; lane < 4; ++lane) {
+    out[lane] = static_cast<u8>(integer[lane]);
+  }
+}
+
+inline void transform_columns4(const float* workspace, u8* output) noexcept {
+  Float4 x[8];
+  for (int row = 0; row < 8; ++row) {
+    std::memcpy(&x[row], workspace + row * 8, sizeof(Float4));
+  }
+  const Float4 bias = splat4(kOutputBias);
+  const Float4 sqrt2 = splat4(kSqrt2);
+  // aan_even
+  const Float4 sum04 = (x[0] + x[4]) + bias;
+  const Float4 dif04 = (x[0] - x[4]) + bias;
+  const Float4 sum26 = x[2] + x[6];
+  const Float4 dif26 = x[2] - x[6];
+  const Float4 rotated = fma4(dif26, sqrt2, -sum26);
+  const Float4 even0 = sum04 + sum26;
+  const Float4 even1 = dif04 + rotated;
+  const Float4 even2 = dif04 - rotated;
+  const Float4 even3 = sum04 - sum26;
+  // aan_odd
+  const Float4 z10 = x[5] - x[3];
+  const Float4 z11 = x[1] + x[7];
+  const Float4 z12 = x[1] - x[7];
+  const Float4 z13 = x[5] + x[3];
+  const Float4 out7 = z11 + z13;
+  const Float4 z5 = (z10 + z12) * splat4(kC2);
+  const Float4 out6 = fma4(-z10, splat4(kC2PlusC6), z5) - out7;
+  const Float4 out5 = fma4(z11 - z13, sqrt2, -out6);
+  const Float4 out4 = fma4(-z12, splat4(kC2MinusC6), z5) - out5;
+  // combine
+  store_pixels4(output + 0 * 8, even0 + out7);
+  store_pixels4(output + 1 * 8, even1 + out6);
+  store_pixels4(output + 2 * 8, even2 + out5);
+  store_pixels4(output + 3 * 8, even3 + out4);
+  store_pixels4(output + 4 * 8, even3 - out4);
+  store_pixels4(output + 5 * 8, even2 - out5);
+  store_pixels4(output + 6 * 8, even1 - out6);
+  store_pixels4(output + 7 * 8, even0 - out7);
+}
+
 size_t row_extent(const s16* coefficients) noexcept {
   size_t extent = 8;
   while (extent > 0 && coefficients[extent - 1] == 0) {
@@ -498,15 +591,28 @@ size_t row_extent(const s16* coefficients) noexcept {
   return extent;
 }
 
-std::array<u8, 64> inverse_dct(const std::array<s16, 64>& coefficients,
-                               const QuantizationTable& quantization) noexcept {
-  std::array<float, 64> workspace{};
+// `rowMask` has a bit for every row that may hold a non-zero coefficient (row 0 always).
+void inverse_dct(const s16* coefficients, u32 rowMask, const QuantizationTable& quantization, u8* output) noexcept {
+  if (rowMask == 1 && coefficients[1] == 0 && row_extent(coefficients) <= 1) {
+    // Only the DC term: every column sees the same input, so one column gives all eight.
+    FloatRow column{};
+    column[0] = static_cast<float>(coefficients[0]) * quantization.values[0];
+    const FloatRow transformed = transform_column(column);
+    for (size_t row = 0; row < 8; ++row) {
+      std::memset(output + row * 8, to_pixel(transformed[row]), 8);
+    }
+    return;
+  }
+
+  alignas(16) float workspace[64];
   for (size_t row = 0; row < 8; ++row) {
     const s16* rowCoefficients = &coefficients[row * 8];
     const float* rowQuant = &quantization.values[row * 8];
     FloatRow transformed{};
-    switch (row_extent(rowCoefficients)) {
+    // A row with no coefficients transforms to all zeros (0 * quant).
+    switch ((rowMask >> row) & 1 ? row_extent(rowCoefficients) : 0) {
     case 0:
+      break;
     case 1:
       transformed.fill(static_cast<float>(rowCoefficients[0]) * rowQuant[0]);
       break;
@@ -527,22 +633,11 @@ std::array<u8, 64> inverse_dct(const std::array<s16, 64>& coefficients,
       transformed = transform_row(rowCoefficients, rowQuant);
       break;
     }
-    std::copy(transformed.begin(), transformed.end(), workspace.begin() + row * 8);
+    std::memcpy(workspace + row * 8, transformed.data(), sizeof(transformed));
   }
 
-  std::array<u8, 64> output{};
-  for (size_t column = 0; column < 8; ++column) {
-    FloatRow input{};
-    for (size_t row = 0; row < 8; ++row) {
-      input[row] = workspace[row * 8 + column];
-    }
-    const FloatRow transformed = transform_column(input);
-    for (size_t row = 0; row < 8; ++row) {
-      const float scaled = transformed[row] * 0.125f;
-      output[row * 8 + column] = scaled <= 0.0f ? 0 : scaled >= 255.0f ? 255 : static_cast<u8>(scaled);
-    }
-  }
-  return output;
+  transform_columns4(workspace, output);
+  transform_columns4(workspace + 4, output + 4);
 }
 
 void write_block(u8* output, u16 width, u16 height, u16 blockX, u16 blockY, const std::array<u8, 64>& pixels) noexcept {
@@ -568,19 +663,150 @@ void write_block(u8* output, u16 width, u16 height, u16 blockX, u16 blockY, cons
   }
 }
 
-bool decode_and_write_block(BitReader& reader, DecodeContext& context, size_t component, u8* output, u16 width,
-                            u16 height, u16 x, u16 y) noexcept {
-  std::array<s16, 64> coefficients;  // decode_block zero-fills it
-  if (!decode_block(reader, context, component, coefficients)) {
-    return false;
+// One entropy-decoded block waiting for its inverse DCT.
+struct BlockJob {
+  s16 coefficients[64];
+  u32 rowMask;
+};
+
+// Everything the inverse-DCT stage needs for one frame. Blocks are stored MCU row by MCU row, six
+// per MCU (four luma, U, V) in stream order; blockCounts[row] is how many of that row are valid
+// (all of them unless the stream broke off inside the row).
+struct FrameJob {
+  const DecodeContext* context = nullptr;
+  const BlockJob* blocks = nullptr;
+  const u32* blockCounts = nullptr;
+  u8* tileY = nullptr;
+  u8* tileU = nullptr;
+  u8* tileV = nullptr;
+  u16 chromaWidth = 0;
+  u16 chromaHeight = 0;
+  u16 mcuColumns = 0;
+};
+
+void transform_mcu_row(const FrameJob& job, u32 mcuY) noexcept {
+  const DecodeContext& context = *job.context;
+  const u32 blocksPerRow = u32{job.mcuColumns} * 6;
+  const BlockJob* blocks = job.blocks + static_cast<size_t>(mcuY) * blocksPerRow;
+  const u32 count = job.blockCounts[mcuY];
+  const QuantizationTable* quantization[3];
+  for (size_t component = 0; component < 3; ++component) {
+    quantization[component] = &context.quantizationTables[context.components[component].quantizationTable];
   }
-  const QuantizationTable& quantization = context.quantizationTables[context.components[component].quantizationTable];
-  if (!quantization.valid) {
-    return false;
+  std::array<u8, 64> pixels;
+  for (u32 index = 0; index < count; ++index) {
+    const u32 mcuX = index / 6;
+    const u32 part = index % 6;
+    const BlockJob& block = blocks[index];
+    if (part < 4) {
+      inverse_dct(block.coefficients, block.rowMask, *quantization[0], pixels.data());
+      write_block(job.tileY, context.width, context.height, static_cast<u16>(mcuX * 16 + (part & 1) * 8),
+                  static_cast<u16>(mcuY * 16 + (part >> 1) * 8), pixels);
+    } else {
+      inverse_dct(block.coefficients, block.rowMask, *quantization[part - 3], pixels.data());
+      write_block(part == 4 ? job.tileU : job.tileV, job.chromaWidth, job.chromaHeight, static_cast<u16>(mcuX * 8),
+                  static_cast<u16>(mcuY * 8), pixels);
+    }
   }
-  write_block(output, width, height, x, y, inverse_dct(coefficients, quantization));
-  return true;
 }
+
+// Runs the inverse DCT of finished MCU rows on helper threads while the calling thread is still
+// entropy-decoding the rest of the frame (that part is serial by nature: each code's position
+// depends on every code before it). Rows touch disjoint pixels and each is computed exactly as in
+// a single-threaded decode, so the picture is identical whichever thread does it.
+class TransformPool {
+public:
+  static TransformPool& instance() noexcept {
+    static TransformPool* pool = new TransformPool();  // never destroyed: the helpers outlive main()
+    return *pool;
+  }
+
+  std::vector<BlockJob>& block_storage() noexcept { return mBlocks; }
+  std::vector<u32>& count_storage() noexcept { return mCounts; }
+
+  void begin(const FrameJob* job) noexcept {
+    std::lock_guard lock{mMutex};
+    mJob = job;
+    mPublished = mClaimed = mDone = 0;
+  }
+
+  // Rows [0, rows) are ready to transform.
+  void publish(u32 rows) noexcept {
+    if (mThreads.empty()) {
+      mPublished = rows;
+      return;
+    }
+    {
+      std::lock_guard lock{mMutex};
+      mPublished = rows;
+    }
+    mWork.notify_one();
+  }
+
+  // Transforms whatever is left on the calling thread too, then waits for the helpers.
+  void finish() noexcept {
+    std::unique_lock lock{mMutex};
+    while (mClaimed < mPublished) {
+      const u32 row = mClaimed++;
+      lock.unlock();
+      transform_mcu_row(*mJob, row);
+      lock.lock();
+      ++mDone;
+    }
+    mIdle.wait(lock, [this] { return mDone == mPublished; });
+    mJob = nullptr;
+  }
+
+private:
+  TransformPool() noexcept {
+#if defined(__SWITCH__)
+    u32 helpers = 2;  // three application cores; std::thread::hardware_concurrency is not reliable here
+#else
+    const u32 cores = std::thread::hardware_concurrency();
+    u32 helpers = cores >= 4 ? 2 : cores >= 2 ? 1 : 0;
+#endif
+    for (u32 index = 0; index < helpers; ++index) {
+#if defined(__cpp_exceptions)
+      try {
+        mThreads.emplace_back([this] { run(); });
+      } catch (...) {
+        break;  // no threads available: the caller transforms everything itself
+      }
+#else
+      mThreads.emplace_back([this] { run(); });
+#endif
+    }
+  }
+
+  void run() noexcept {
+    std::unique_lock lock{mMutex};
+    for (;;) {
+      mWork.wait(lock, [this] { return mClaimed < mPublished; });
+      const u32 row = mClaimed++;
+      const FrameJob* job = mJob;
+      lock.unlock();
+      transform_mcu_row(*job, row);
+      lock.lock();
+      if (++mDone == mPublished) {
+        mIdle.notify_one();
+      }
+    }
+  }
+
+  std::mutex mMutex;
+  std::condition_variable mWork;
+  std::condition_variable mIdle;
+  const FrameJob* mJob = nullptr;
+  u32 mPublished = 0;
+  u32 mClaimed = 0;
+  u32 mDone = 0;
+  std::vector<std::thread> mThreads;
+  std::vector<BlockJob> mBlocks;
+  std::vector<u32> mCounts;
+};
+
+// THPVideoDecode is called from one thread at a time in practice; this makes that a guarantee.
+std::mutex g_decodeMutex;
 } // namespace
 
 extern "C" {
@@ -623,27 +849,54 @@ s32 THPVideoDecode(const void* file, void* tileY, void* tileU, void* tileV, void
   BitReader bits{static_cast<const uint8_t*>(file), context.scanOffset};
   const u16 mcuColumns = static_cast<u16>((context.width + 15) / 16);
   const u16 mcuRows = static_cast<u16>((context.height + 15) / 16);
-  u32 restartCount = 0;
-  for (u16 mcuY = 0; mcuY < mcuRows; ++mcuY) {
-    for (u16 mcuX = 0; mcuX < mcuColumns; ++mcuX) {
-      const u16 lumaX = static_cast<u16>(mcuX * 16);
-      const u16 lumaY = static_cast<u16>(mcuY * 16);
-      if (!decode_and_write_block(bits, context, 0, static_cast<uint8_t*>(tileY), context.width, context.height, lumaX,
-                                  lumaY) ||
-          !decode_and_write_block(bits, context, 0, static_cast<uint8_t*>(tileY), context.width, context.height,
-                                  static_cast<u16>(lumaX + 8), lumaY) ||
-          !decode_and_write_block(bits, context, 0, static_cast<uint8_t*>(tileY), context.width, context.height, lumaX,
-                                  static_cast<u16>(lumaY + 8)) ||
-          !decode_and_write_block(bits, context, 0, static_cast<uint8_t*>(tileY), context.width, context.height,
-                                  static_cast<u16>(lumaX + 8), static_cast<u16>(lumaY + 8)) ||
-          !decode_and_write_block(bits, context, 1, static_cast<uint8_t*>(tileU), chromaWidth, chromaHeight,
-                                  static_cast<u16>(mcuX * 8), static_cast<u16>(mcuY * 8)) ||
-          !decode_and_write_block(bits, context, 2, static_cast<uint8_t*>(tileV), chromaWidth, chromaHeight,
-                                  static_cast<u16>(mcuX * 8), static_cast<u16>(mcuY * 8))) {
-        return kBadSyntax;
-      }
+  const u32 blocksPerRow = u32{mcuColumns} * 6;
 
-      if (context.restartInterval != 0 && ++restartCount == context.restartInterval) {
+  std::lock_guard decodeLock{g_decodeMutex};
+  TransformPool& pool = TransformPool::instance();
+  std::vector<BlockJob>& blocks = pool.block_storage();
+  std::vector<u32>& blockCounts = pool.count_storage();
+  if (blocks.size() < static_cast<size_t>(blocksPerRow) * mcuRows) {
+    blocks.resize(static_cast<size_t>(blocksPerRow) * mcuRows);
+  }
+  if (blockCounts.size() < mcuRows) {
+    blockCounts.resize(mcuRows);
+  }
+
+  FrameJob job;
+  job.context = &context;
+  job.blocks = blocks.data();
+  job.blockCounts = blockCounts.data();
+  job.tileY = static_cast<u8*>(tileY);
+  job.tileU = static_cast<u8*>(tileU);
+  job.tileV = static_cast<u8*>(tileV);
+  job.chromaWidth = chromaWidth;
+  job.chromaHeight = chromaHeight;
+  job.mcuColumns = mcuColumns;
+  pool.begin(&job);
+
+  // Entropy decode on this thread, one MCU row at a time; each finished row is handed to the pool.
+  // A block that fails to decode ends the frame there: the blocks before it are still drawn, as
+  // they were when decode and transform were interleaved.
+  static constexpr u8 kBlockComponent[6]{0, 0, 0, 0, 1, 2};
+  bool ok = true;
+  u32 restartCount = 0;
+  u32 publishedRows = 0;
+  for (u16 mcuY = 0; ok && mcuY < mcuRows; ++mcuY) {
+    BlockJob* rowBlocks = blocks.data() + static_cast<size_t>(mcuY) * blocksPerRow;
+    u32 count = 0;
+    for (u16 mcuX = 0; ok && mcuX < mcuColumns; ++mcuX) {
+      for (u32 part = 0; part < 6; ++part) {
+        const size_t component = kBlockComponent[part];
+        BlockJob& block = rowBlocks[count];
+        block.rowMask = 1;
+        if (!decode_block(bits, context, component, block.coefficients, block.rowMask) ||
+            !context.quantizationTables[context.components[component].quantizationTable].valid) {
+          ok = false;
+          break;
+        }
+        ++count;
+      }
+      if (ok && context.restartInterval != 0 && ++restartCount == context.restartInterval) {
         bits.byte_align();
         restartCount = 0;
         for (Component& component : context.components) {
@@ -651,6 +904,12 @@ s32 THPVideoDecode(const void* file, void* tileY, void* tileU, void* tileV, void
         }
       }
     }
+    blockCounts[mcuY] = count;
+    pool.publish(++publishedRows);
+  }
+  pool.finish();
+  if (!ok) {
+    return kBadSyntax;
   }
   return 0;
 }

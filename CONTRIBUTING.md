@@ -93,15 +93,25 @@ leaves the player's working install alone.
 To add support for such a release:
 
 1. Re-translate against the new `Code.pul` (see the translator's `retro_rewind`
-   build shards under `runtime/generated/build_shards`) and rebuild.
-2. Append the new `Code.pul` SHA-256 to `SUPPORTED_CODE_PUL_SHA256` in
+   build shards under `generated/build_shards`) and rebuild. If the new release
+   patches different base-game functions, `translate-mod` refuses and says so:
+   re-translate the base game first (`translate-recursive`, then
+   `emit-base-manifest`), then `translate-mod`, then `emit-build-shards`.
+2. Put the new `Code.pul` SHA-256 in `SUPPORTED_CODE_PUL_SHA256` in
    `android/app/src/main/kotlin/com/driftdroid/android/RetroRewindRelease.kt`,
-   with the version in a trailing comment. It is a set, so older supported
-   releases keep working - don't replace the existing entries.
-3. If the fallback release used when the device is offline should move too,
-   update `VERSION`, `ARCHIVE_URL`, `ARCHIVE_BYTES` and `ARCHIVE_SHA256` in the
-   same file to the new full archive.
-4. Test both a fresh install and "Check for updates" on an existing install.
+   with the version in a trailing comment, in place of the old one: one build
+   carries the translated code of one `Code.pul`. Also add the release to
+   `KNOWN_CODE_PUL_SHA256`, so the app can judge it without downloading its
+   update archive. An install left on the old code is updated by the app before
+   it is launched.
+3. Move the fallback release used when the device is offline: update `VERSION`,
+   `ARCHIVE_URL`, `ARCHIVE_BYTES` and `ARCHIVE_SHA256` in the same file to the
+   new full archive. Not every release has one (6.13.1 only exists as an update
+   on top of 6.13.0); the app installs the newest full archive and applies the
+   updates above it.
+4. Check hand-written code that depends on the mod's own code addresses
+   (`runtime/src/hle/low_detail_karts.cpp`).
+5. Test both a fresh install and "Check for updates" on an existing install.
 
 Never relax the hash check to make a release install. It exists because an
 unsupported `Code.pul` desyncs from the recompiled logic at runtime instead of

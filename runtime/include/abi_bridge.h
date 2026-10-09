@@ -25,12 +25,44 @@ inline void InvokeIndirectCpu(uint32_t target, CpuContext* ctx);
 // static calls deliberately bypass InvokeDirectCpu for performance.
 // (used for the path mask filtering in ScnRenderer::createPath: depth of
 // field is always removed, bloom when the user disabled it)
-inline void ApplyRuntimeCallOptions(uint32_t target, CpuContext* ctx) {
+inline void ApplyIndirectRuntimeCallOptions(uint32_t target, CpuContext* ctx) {
     if (target == 0x8023BD38u) {
         // ScnRenderer::createPath receives the post-processing path mask in r4.
         ctx->gpr[4] = RuntimeGameGraphicsOptions::FilterScnRendererPathMask(ctx->gpr[4]);
     }
 }
+
+// The "low-detail computer karts" option (runtime/src/hle/low_detail_karts.cpp): four entry points
+// of the game's kart loading, all reached by direct calls only, so the test folds away at every
+// other call site and the indirect path above does not carry it.
+extern "C" void RuntimeLowDetailKartsHook(uint32_t target, CpuContext* ctx);
+
+// The "30 FPS races" option (runtime/src/hle/frame_rate_lock.cpp): GameScene::setFramerate, also
+// reached by direct calls only.
+extern "C" void RuntimeFrameRateLockHook(CpuContext* ctx);
+
+inline void ApplyRuntimeCallOptions(uint32_t target, CpuContext* ctx) {
+    ApplyIndirectRuntimeCallOptions(target, ctx);
+    if (target == 0x80540E3Cu || target == 0x80576D8Cu || target == 0x80576E90u || target == 0x807C7828u) {
+        RuntimeLowDetailKartsHook(target, ctx);
+    }
+    if (target == 0x8051AF84u) {
+        RuntimeFrameRateLockHook(ctx);
+    }
+}
+
+// Self-check for translated code built from a translator run with MKW_TRANSLATOR_VERIFY_RESIDENCY=1
+// (test builds only; normal generated code contains no such lines). The translator leaves a
+// nonvolatile GPR in its C++ local across a call when the callee is known or trusted to hand it
+// back unchanged; this compares the context slot with that local after the call.
+extern "C" void RuntimeReportPreservedGprMismatch(unsigned index, uint32_t expected, uint32_t actual,
+                                                   const char* function, uint32_t lr) noexcept;
+#define MKW_VERIFY_PRESERVED_GPR(ctx, index, local)                                                  \
+    do {                                                                                             \
+        if ((ctx)->gpr[index] != (local)) [[unlikely]] {                                             \
+            RuntimeReportPreservedGprMismatch(index, (local), (ctx)->gpr[index], __func__, (ctx)->lr); \
+        }                                                                                            \
+    } while (false)
 
 // Persistent per-thread CPU context used across translated function calls.
 CpuContext& GetPersistentCpuContext();
@@ -307,17 +339,19 @@ struct KnownTypedNativeCpuCall {
 #include "native_cpu_calls.inc"
 
 // Direct-mapped thread-local memo in front of the sorted registry lookup every bctrl performs;
-// a miss just re-runs the sorted lookup. 512 entries (12 KiB) covers the per-frame indirect
-// working set while staying L1/L2 resident, unlike 4096 which would thrash L2. Must stay a
-// power of two, the index masks with (size - 1).
-inline constexpr size_t kIndirectDispatchCacheEntries = 512;
+// a miss just re-runs the sorted lookup. Must stay a power of two.
+// 4096 entries, was 512 (chosen to stay L1-resident): on Switch the miss path, a binary search of
+// the dispatch table that itself touches a dozen cache lines, measured about 1% of a race frame,
+// i.e. the targets a race calls through pointers did not fit and kept evicting each other. Only
+// the slots actually used are ever touched, so the larger table costs cache only for real targets.
+inline constexpr size_t kIndirectDispatchCacheEntries = 4096;
 // Fibonacci hash: the multiply mixes every address bit into the HIGH bits of the product, so the
 // index must come from the top. Masking the low bits (as this used to) made the memo a plain
 // direct-mapped cache on address bits 2-10, where call targets 2 KiB apart always collide.
 MKW_PPC_FORCE_INLINE constexpr size_t IndirectDispatchCacheIndex(uint32_t address) noexcept {
-    return static_cast<size_t>(((address >> 2) * 2654435761u) >> 23);
+    return static_cast<size_t>(((address >> 2) * 2654435761u) >> 20);
 }
-static_assert(kIndirectDispatchCacheEntries == (size_t{1} << (32 - 23)),
+static_assert(kIndirectDispatchCacheEntries == (size_t{1} << (32 - 20)),
               "IndirectDispatchCacheIndex's shift must match the memo size");
 
 // Namespace-scope `inline thread_local`, not function-local `static thread_local`, to avoid a
@@ -679,7 +713,7 @@ inline void InvokeIndirectCpu(uint32_t target, CpuContext* ctx) {
     if (target == 0) {
         ReportMissingCpuTarget(target, cpu);
     }
-    ApplyRuntimeCallOptions(target, cpu);
+    ApplyIndirectRuntimeCallOptions(target, cpu);
     if (TryDispatchRawCpuTarget(TranslatedFunctionRegistry::FindRawByAddressPtr(target), cpu)) {
         return;
     }

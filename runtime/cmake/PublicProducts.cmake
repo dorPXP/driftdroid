@@ -126,6 +126,15 @@ if(MKW_CPPWINRT_INCLUDE_DIR)
     target_include_directories(mkw_runtime_common PRIVATE "${MKW_CPPWINRT_INCLUDE_DIR}")
 endif()
 
+# GCC's profile-guided build treats a function whose code changed since the recording run exactly
+# like one that never ran: it loses its counts and is then optimized for size, as cold code. For
+# the hand-written runtime that punishes every edit to a hot function until the next recording.
+# With this flag such functions are compiled as if there were no profile at all instead. Not
+# applied to the translated shards, where "never ran" really means cold and size matters.
+if(MKW_TARGET_SWITCH AND MKW_PGO STREQUAL "use")
+    target_compile_options(mkw_runtime_common PRIVATE -fprofile-partial-training)
+endif()
+
 # Keep runtime unity units small and semantically related. The old generated-TU
 # batch size put all 57 native runtime sources into one memory-heavy compiler job.
 foreach(source IN LISTS SOURCES)

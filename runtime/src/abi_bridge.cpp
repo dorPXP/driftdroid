@@ -4,6 +4,7 @@
 #include <array>
 #include <atomic>
 #include <cstddef>
+#include <cstdio>
 #include <cstring>
 #include <iomanip>
 #include <iostream>
@@ -590,5 +591,20 @@ void InitializePersistentCpuContext() {
     }
     if (g_persistentCpu.gpr[13] == 0) {
         g_persistentCpu.gpr[13] = RuntimeConfig::SDA1_BASE;
+    }
+}
+
+// See MKW_VERIFY_PRESERVED_GPR in abi_bridge.h. Only verification builds of the translated code
+// ever call this; it reports the first few distinct sites and keeps counting.
+extern "C" void RuntimeReportPreservedGprMismatch(unsigned index, uint32_t expected, uint32_t actual,
+                                                   const char* function, uint32_t lr) noexcept {
+    static std::atomic<uint64_t> total{0};
+    const uint64_t count = total.fetch_add(1, std::memory_order_relaxed) + 1;
+    if (count <= 200 || (count & (count - 1)) == 0) {
+        std::fprintf(stderr,
+                     "[verify-residency] #%llu r%u not preserved across a call in %s (lr=0x%08X): local=0x%08X ctx=0x%08X\n",
+                     static_cast<unsigned long long>(count), index, function != nullptr ? function : "?", lr,
+                     expected, actual);
+        std::fflush(stderr);
     }
 }

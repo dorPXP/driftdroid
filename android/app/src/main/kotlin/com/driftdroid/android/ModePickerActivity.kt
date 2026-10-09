@@ -2,17 +2,23 @@ package com.driftdroid.android
 
 import android.app.Activity
 import android.app.AlertDialog
+import android.content.BroadcastReceiver
+import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
+import android.content.pm.PackageInstaller
 import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.Drawable
 import android.graphics.drawable.GradientDrawable
 import android.graphics.drawable.LayerDrawable
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.provider.OpenableColumns
+import android.provider.Settings
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
@@ -62,6 +68,11 @@ class ModePickerActivity : Activity() {
     private lateinit var serverSettingsButton: Button
     private lateinit var modsButton: Button
     private lateinit var miiDataButton: Button
+    private lateinit var updateButton: Button
+    private var updateAfterSettings: AppUpdate.Update? = null
+    private var updateReceiver: BroadcastReceiver? = null
+    @Volatile private var updateCancelled = false
+    private var updateInstalling = false
     private val mainHandler = Handler(Looper.getMainLooper())
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -80,6 +91,12 @@ class ModePickerActivity : Activity() {
             beginImportUi(RetroRewindInstallStatus.label)
             startStatusPolling()
         }
+        checkForUpdate()
+        // Back from Android's "Install unknown apps" page: continue the update if it was allowed.
+        updateAfterSettings?.let { update ->
+            updateAfterSettings = null
+            if (packageManager.canRequestPackageInstalls()) downloadUpdate(update)
+        }
     }
 
     override fun onPause() {
@@ -87,7 +104,190 @@ class ModePickerActivity : Activity() {
         stopStatusPolling()
     }
 
+    override fun onDestroy() {
+        updateCancelled = true
+        updateReceiver?.let { runCatching { unregisterReceiver(it) } }
+        updateReceiver = null
+        super.onDestroy()
+    }
+
     private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
+
+    // --- DriftDroid updating itself (see AppUpdate; the flow is KartPad's) ---
+
+    /** Looks for a newer release in the background and shows the button when there is one.
+     * [force] skips the once-an-hour limit - used when something just said an update is needed. */
+    private fun checkForUpdate(force: Boolean = false) {
+        val context = applicationContext
+        Thread {
+            AppUpdate.refresh(context, force)
+            val update = AppUpdate.known(context)
+            if (update == null) AppUpdate.clear(context)
+            mainHandler.post {
+                if (!isFinishing && !isDestroyed) {
+                    updateButton.text = if (update != null) "Update available: ${update.version}" else "Update available"
+                    updateButton.visibility = if (update != null) View.VISIBLE else View.GONE
+                }
+            }
+        }.apply { isDaemon = true; name = "DriftDroidUpdateCheck" }.start()
+    }
+
+    private fun showUpdate() {
+        val update = AppUpdate.known(this) ?: return
+        val dialog =
+            AlertDialog.Builder(this)
+                .setTitle("DriftDroid ${update.version} is out")
+                .setMessage(
+                    "You have ${AppUpdate.installedVersionName(this)}. DriftDroid can download the update and " +
+                        "install it over this one. Your saves, game data and Retro Rewind stay.",
+                )
+                .setNeutralButton("Release Notes") { _, _ -> openWeb(update.pageUrl) }
+                .setNegativeButton("Later", null)
+        if (update.apkUrl != null) dialog.setPositiveButton("Update Now") { _, _ -> startUpdate(update) }
+        dialog.show()
+    }
+
+    private fun openWeb(url: String) {
+        runCatching { startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url))) }
+    }
+
+    /** Android asks once before an app may install its own updates. */
+    private fun startUpdate(update: AppUpdate.Update) {
+        if (packageManager.canRequestPackageInstalls()) {
+            downloadUpdate(update)
+            return
+        }
+        AlertDialog.Builder(this)
+            .setTitle("Allow DriftDroid to Install Updates")
+            .setMessage(
+                "Android asks once before an app can install its own updates. On the next screen, turn on " +
+                    "Allow from this source, then come back to DriftDroid.",
+            )
+            .setPositiveButton("Continue") { _, _ ->
+                updateAfterSettings = update
+                try {
+                    startActivity(Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:$packageName")))
+                } catch (_: Exception) {
+                    updateAfterSettings = null
+                    showUpdateFailed(update, "Android's settings couldn't be opened.")
+                }
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private fun downloadUpdate(update: AppUpdate.Update) {
+        val label = TextView(this)
+        label.text = "Connecting to GitHub..."
+        label.setPadding(0, 0, 0, dp(12))
+        val bar = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal)
+        bar.max = 1000
+        bar.isIndeterminate = true
+        val content = LinearLayout(this)
+        content.orientation = LinearLayout.VERTICAL
+        content.setPadding(dp(24), dp(8), dp(24), 0)
+        content.addView(label)
+        content.addView(bar)
+        updateCancelled = false
+        val dialog =
+            AlertDialog.Builder(this)
+                .setTitle("Updating to DriftDroid ${update.version}")
+                .setView(content)
+                .setNegativeButton("Cancel") { _, _ -> updateCancelled = true }
+                .setCancelable(false)
+                .show()
+        listenForInstall(update, dialog)
+        val context = applicationContext
+        Thread {
+            val result =
+                runCatching {
+                    val apk =
+                        AppUpdate.download(context, update, { done, total ->
+                            mainHandler.post {
+                                if (total > 0) {
+                                    bar.isIndeterminate = false
+                                    bar.progress = (done * 1000 / total).toInt()
+                                    label.text = "Downloading: ${done / 1_048_576} of ${total / 1_048_576} MB"
+                                } else {
+                                    label.text = "Downloading: ${done / 1_048_576} MB"
+                                }
+                            }
+                        }) { updateCancelled }
+                    mainHandler.post {
+                        label.text =
+                            "Download checked. Android will ask you to confirm the update. DriftDroid closes " +
+                                "when it's done; open it again."
+                        bar.isIndeterminate = true
+                        dialog.getButton(AlertDialog.BUTTON_NEGATIVE)?.isEnabled = false
+                    }
+                    updateInstalling = true
+                    AppUpdate.install(context, apk)
+                }
+            result.onFailure { error ->
+                updateInstalling = false
+                mainHandler.post {
+                    if (isFinishing || isDestroyed) return@post
+                    dialog.dismiss()
+                    if (error !is AppUpdate.Cancelled) showUpdateFailed(update, error.message)
+                }
+            }
+        }.apply { isDaemon = true; name = "DriftDroidUpdateDownload" }.start()
+    }
+
+    /** Android's installer reports here: ask the player to confirm, then it replaces DriftDroid. */
+    private fun listenForInstall(update: AppUpdate.Update, dialog: AlertDialog) {
+        updateReceiver?.let { runCatching { unregisterReceiver(it) } }
+        val receiver =
+            object : BroadcastReceiver() {
+                override fun onReceive(context: Context, intent: Intent) {
+                    if (!updateInstalling) return
+                    when (intent.getIntExtra(PackageInstaller.EXTRA_STATUS, PackageInstaller.STATUS_FAILURE)) {
+                        PackageInstaller.STATUS_PENDING_USER_ACTION -> {
+                            val confirm =
+                                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                                    intent.getParcelableExtra(Intent.EXTRA_INTENT, Intent::class.java)
+                                } else {
+                                    @Suppress("DEPRECATION")
+                                    intent.getParcelableExtra(Intent.EXTRA_INTENT)
+                                }
+                            // Only Android's own confirmation screen, never one of DriftDroid's.
+                            if (confirm != null && confirm.component?.packageName != packageName) {
+                                runCatching { startActivity(confirm) }
+                            }
+                        }
+                        PackageInstaller.STATUS_SUCCESS, PackageInstaller.STATUS_FAILURE_ABORTED -> {
+                            updateInstalling = false
+                            dialog.dismiss()
+                        }
+                        else -> {
+                            updateInstalling = false
+                            dialog.dismiss()
+                            showUpdateFailed(update, intent.getStringExtra(PackageInstaller.EXTRA_STATUS_MESSAGE))
+                        }
+                    }
+                }
+            }
+        updateReceiver = receiver
+        val filter = IntentFilter(AppUpdate.ACTION_INSTALL_STATUS)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            registerReceiver(receiver, filter, RECEIVER_NOT_EXPORTED)
+        } else {
+            registerReceiver(receiver, filter)
+        }
+    }
+
+    private fun showUpdateFailed(update: AppUpdate.Update, reason: String?) {
+        val dialog =
+            AlertDialog.Builder(this)
+                .setTitle("The Update Didn't Finish")
+                .setMessage(
+                    (reason?.takeIf { it.isNotBlank() } ?: "Something went wrong.") +
+                        "\n\nYou can also download the APK in your browser and install it over DriftDroid.",
+                )
+                .setNegativeButton("Close", null)
+        update.apkUrl?.let { url -> dialog.setPositiveButton("Download in Browser") { _, _ -> openWeb(url) } }
+        dialog.show()
+    }
 
 
     /** A rounded "channel" tile background, Wii Menu channel style. */
@@ -215,7 +415,7 @@ class ModePickerActivity : Activity() {
         retroButton = Button(this)
         retroButton.setOnClickListener {
             if (isRetroRewindInstalled()) {
-                launchProduct(MainActivity.PRODUCT_RETRO_REWIND)
+                launchRetroRewindOrUpdate()
             } else {
                 showInstallRetroRewindDialog()
             }
@@ -254,6 +454,16 @@ class ModePickerActivity : Activity() {
         statusText.textSize = 13f
         statusText.gravity = Gravity.CENTER
         statusText.setPadding(0, dp(16), 0, 0)
+
+        // Shown only once a newer DriftDroid release has been seen (see checkForUpdate).
+        updateButton = Button(this)
+        updateButton.text = "Update available"
+        updateButton.textSize = 13f
+        updateButton.setOnClickListener { showUpdate() }
+        val updateButtonParams = LinearLayout.LayoutParams(dp(260), dp(44))
+        updateButtonParams.topMargin = dp(12)
+        styleChannelButton(updateButton, Color.rgb(0x3F, 0xA9, 0x5A), Color.rgb(0x22, 0x7A, 0x3C), dp(12).toFloat())
+        updateButton.visibility = if (AppUpdate.known(this) != null) View.VISIBLE else View.GONE
 
         diagnosticsButton = Button(this)
         diagnosticsButton.text = "Export Diagnostics"
@@ -368,6 +578,7 @@ class ModePickerActivity : Activity() {
         root.addView(miiDataButton, miiDataButtonParams)
         root.addView(progressBar, progressParams)
         root.addView(statusText)
+        root.addView(updateButton, updateButtonParams)
         root.addView(diagnosticsButton, diagnosticsButtonParams)
         root.addView(graphicsButton, graphicsButtonParams)
         root.addView(iconButton, iconButtonParams)
@@ -434,6 +645,35 @@ class ModePickerActivity : Activity() {
         File(retroRewindRoot(), "Binaries/Code.pul").isFile
 
     private fun retroRewindRoot(): File = File(filesDir, MainActivity.RETRO_REWIND_STAGING_SUBDIR)
+
+    /**
+     * Starts Retro Rewind - unless the installed copy holds game code this build isn't compiled
+     * for, which is what an install made by an older DriftDroid looks like after the app has been
+     * updated for a newer Retro Rewind. Launching that would misbehave or crash, so it is brought
+     * up to date first (the small per-version updates, not a new 1.9GB download) and the player
+     * taps again once that has finished.
+     */
+    private fun launchRetroRewindOrUpdate() {
+        val root = retroRewindRoot()
+        retroButton.isEnabled = false
+        Thread {
+            val supported = RetroRewindCatalog.isSupportedCodePul(RetroRewindCatalog.installedCodePulSha256(root))
+            mainHandler.post {
+                retroButton.isEnabled = true
+                if (isFinishing || isDestroyed) return@post
+                if (supported) {
+                    launchProduct(MainActivity.PRODUCT_RETRO_REWIND)
+                } else {
+                    val installed = RetroRewindCatalog.installedVersion(root)
+                    beginImportUi(
+                        "Retro Rewind ${installed ?: ""} needs updating for this version of DriftDroid - updating it now...",
+                    )
+                    RetroRewindInstallService.startDeltaUpdate(this)
+                    startStatusPolling()
+                }
+            }
+        }.start()
+    }
 
     private fun launchProduct(product: String) {
         val intent = Intent(this, MainActivity::class.java)
@@ -958,10 +1198,18 @@ class ModePickerActivity : Activity() {
         } else {
             // Leave no half-copied install behind - isRetroRewindInstalled() only checks for
             // Code.pul, and a partial copy that happened to include it would then look
-            // "installed" while actually missing tracks/assets.
-            retroRewindRoot().deleteRecursively()
+            // "installed" while actually missing tracks/assets. Only when the install really was
+            // being rebuilt, though: a refused version or an update check that couldn't finish
+            // has not touched the working install, and deleting it then cost the player 1.9GB.
+            if (RetroRewindInstallStatus.installIncomplete) {
+                retroRewindRoot().deleteRecursively()
+            }
+            refreshChannelButtons()
             statusText.setTextColor(Color.rgb(190, 30, 30))
             statusText.text = "Install failed: $error"
+            // If the reason was a Retro Rewind release this build can't run, the fix is a newer
+            // DriftDroid: look for one now instead of at the next hourly check.
+            checkForUpdate(force = true)
         }
     }
 

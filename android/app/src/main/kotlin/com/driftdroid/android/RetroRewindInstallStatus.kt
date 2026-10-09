@@ -23,6 +23,13 @@ internal object RetroRewindInstallStatus {
      * that found nothing to do. Null means the generic installed-N-files wording. */
     @Volatile var successMessage: String? = null
 
+    /** True while the install directory is being rebuilt from scratch and is not yet whole, i.e.
+     * the one situation in which a failure leaves something that should be cleaned up. A failure
+     * at any other time (a refused version, a failed update check, no network) has not touched
+     * the player's install and must leave it where it is. Not reset by [start], which runs once
+     * per progress label - the service clears it when a run begins. */
+    @Volatile var installIncomplete: Boolean = false
+
     fun start(label: String) {
         running = true
         this.label = label

@@ -301,6 +301,9 @@ extern GxDisplayListState g_dlRecordState;
 
 inline bool IsDisplayListActive() noexcept { return g_dlRecordState.active; }
 
+// gx_vertex.cpp: keeps VI retraces, alarms and audio moving while a frame's display lists are drawn.
+void GxServiceDeferredTimingFromDisplayList();
+
 // Mirrors GX__BeginDisplayList_80172e00's guest-side initialization.
 void BeginDisplayListRecording(uint32_t listAddr, uint32_t sizeBytes);
 // Flushes the shadow cursor/count back into guest memory and stops recording.
