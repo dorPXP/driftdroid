@@ -98,6 +98,13 @@ vendored in `runtime/third_party/toml11`.
 Source: <https://github.com/ToruNiina/toml11/tree/v4.4.0>. Full license text:
 `runtime/third_party/toml11/LICENSE`.
 
+### minimp3 - CC0 1.0
+
+Single-header MP3 decoder, used by the Nintendo Switch build's music player
+(`runtime/src/music_player.cpp`). Vendored in `runtime/third_party/minimp3`.
+Source: <https://github.com/lieff/minimp3>. Full license text (a public domain dedication):
+`runtime/third_party/minimp3/LICENSE`.
+
 ### sse2neon - MIT
 
 Copyright (c) 2015-2026 SSE2NEON Contributors.

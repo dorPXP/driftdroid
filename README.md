@@ -25,7 +25,8 @@ file staging.
 - **Races, menus, audio, saves and online play work**, with touch controls or a
   physical controller.
 - **Both Original Mario Kart Wii and Retro Rewind** are supported, chosen from
-  the launcher screen.
+  the launcher screen. Retro Rewind 6.13.0 and 6.13.1 are the versions this
+  release runs.
 - **Getting the game onto the device is done in-app**: pick your disc image and
   DriftDroid verifies it's a clean PAL `RMCP01` disc and extracts it for you.
 
@@ -67,6 +68,19 @@ feel on high-refresh displays.
 > [!WARNING]
 > Interpolation is experimental and will show artifacts in specific scenarios.
 
+**A 30 FPS mode for phones that can't hold 60.** With **30 FPS races** turned
+on, every race uses the game's own 30 FPS mode - the one it uses for three- and
+four-player split-screen - so it plays at normal speed while drawing half as
+many frames, instead of running in slow motion. It works in the original game
+and in Retro Rewind, offline and online. Menus stay at 60, and Retro Rewind's
+time trials and ghost races stay at 60 because the mod requires it there.
+
+**It updates itself.** When a newer release is out, an **Update available**
+button appears on the launcher screen. DriftDroid downloads the new APK, checks
+it against the release's checksum and against its own signing key, and hands it
+to Android, which asks you to confirm. Saves and game data stay. (New in 1.3.0,
+so it first gets used by the release after it.)
+
 **It behaves like a phone app.** The game pauses when you background it instead
 of fast-forwarding through everything it missed, it can drop its render
 resolution when the device gets hot rather than sliding into a slideshow, and it
@@ -77,6 +91,7 @@ focus from your music app.
 button:
 - Internal resolution, display mode, and FPS counter
 - Frame interpolation, copy filter, and shader-compilation behavior
+- 30 FPS races, and simpler computer karts for lighter races
 - Thermal resolution scaling and experimental multithreaded graphics
 - Touch control visibility and double-tap auto-hold
 - Controller assignment and full per-button mapping, with presets
@@ -95,6 +110,11 @@ a phone, and the honest summary is:
   lowering the resolution only helps so much.
 - **Thermal resolution scaling** (on by default) trades pixels for frame rate
   automatically as the device heats up.
+- **30 FPS races** (off by default) is the setting for a phone that can't hold
+  60: the race stays at normal speed and the phone has half as many frames to
+  draw.
+- **Simpler computer karts** (off by default) gives computer players the
+  lighter kart models the game uses in split-screen.
 - The first few minutes after installing are the worst, because shaders are
   still compiling. It settles down. After an update the shaders are rebuilt in
   the background on a single low-priority thread, so the phone stays cool while
@@ -129,6 +149,10 @@ Grab the latest APK from this repo's [Releases](https://github.com/dorPXP/driftd
 page and sideload it - it isn't on the Play Store. On first launch the app asks you to pick your
 Mario Kart Wii disc image, checks it really is a clean PAL disc, and extracts it on the device.
 That's the whole setup.
+
+To update, install the new APK over the old one - saves, the extracted game and Retro Rewind all
+stay. From 1.3.0 on the app can do this itself: tap **Update available** on the launcher screen
+when it appears.
 
 > [!CAUTION]
 > Only take builds from this repository's own Releases page. Don't install an APK someone shared
@@ -178,8 +202,9 @@ Rewind before it's installed walks you through getting it set up, three ways:
 
 1. **Download it** - the app asks the mod's own official update service
    (`update.rwfc.net`, the same one Wheel Wizard and the Retro Rewind updater use) which release
-   is newest, and fetches it straight from there. Nothing is mirrored or re-hosted here, and every
-   download is hash-verified before it's installed.
+   is newest, and fetches it straight from there: the newest full download, then any small
+   updates released on top of it. Nothing is mirrored or re-hosted here, and the game code in
+   every download is checked against this build before it's installed.
 2. **Select the `.zip` file** you already downloaded - the app extracts it for you, no separate
    unzip step needed.
 3. **Select a folder**, if you've already extracted it yourself. Use this one if you're bringing
@@ -205,7 +230,14 @@ up on your phone at runtime. So:
   no app update at all.
 - A Retro Rewind update that changes **game code** needs a new DriftDroid build. The app detects
   this before downloading anything large, tells you, and leaves your working install alone rather
-  than replacing it with something that would crash.
+  than replacing it with something that would crash. When that new DriftDroid build is out, the
+  **Update available** button on the launcher screen gets it.
+- After DriftDroid itself has been updated for a newer Retro Rewind, an install still on the old
+  one is brought up to date when you tap Retro Rewind, before the game starts.
+
+Mods that replace Retro Rewind's own menu or race files are tied to the Retro Rewind version they
+were made from. One made for 6.12.8 can crash on 6.13 (for example when opening Retro WFC) until
+it is rebuilt.
 
 This is also why importing a Retro Rewind copy from somewhere else can be refused: it's checked
 against the code this build was compiled for. Character/track mods in an otherwise-supported
@@ -232,8 +264,13 @@ If it only changed assets, yes - the app picks it up on its own. If it changed g
 a DriftDroid update first; the app will say so instead of installing something broken. See
 [Retro Rewind versions](#retro-rewind-versions).
 
+**How do I update DriftDroid?**
+Install the new APK over the old one, or tap **Update available** on the launcher screen when it
+shows up. Nothing is lost either way.
+
 **Is there gonna be a Switch version?**
-Yes, it's actively being worked on.
+There is one: [DriftDroid for Nintendo Switch - Beta 1](https://github.com/dorPXP/driftdroid/releases/tag/switch-beta1)
+(a pre-release, original game only). Retro Rewind on Switch is being worked on.
 
 **Is it done?**
 No - this is an active, personal work-in-progress fork. It's playable start to finish, but
@@ -248,6 +285,15 @@ is exactly the information that's useful.
 That's thermal throttling, not a bug in the build. See [Performance](#performance). Leaving
 "Lower resolution when the phone gets hot" enabled keeps the frame rate steadier as the device
 heats up.
+
+**It never reaches 60, and everything looks like slow motion.**
+Turn on **30 FPS races** in the settings sidebar. The race then runs at normal speed with half
+the frames. It applies from the next race.
+
+**Retro Rewind crashes when I open Retro WFC or a menu after updating.**
+Most likely a mod that replaces Retro Rewind's own files and was made for an older Retro Rewind.
+Turn your mods off in **Mods...** and try again; if that fixes it, the mod needs a version made
+for the Retro Rewind you have now.
 
 **Characters or menu icons are stretched across the screen.**
 A driver bug on Snapdragon 8 Elite class GPUs (Adreno 8xx). The fix turns itself on for those
@@ -314,7 +360,7 @@ position-tracked).
 - **[KartPad](https://github.com/chrissotraidis/kartpad)** by Chris Sotraidis - the iOS/Android
   sibling port this fork's settings sidebar layout, touch control styling, and motion (tilt)
   steering calibration curve were directly modeled on, and the source of several GX command
-  processor fixes this fork carries.
+  processor fixes and the in-app updater this fork carries.
 - Everyone in the static recompilation community.
 
 Bundled third-party components and their licenses live in
