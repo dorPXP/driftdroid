@@ -5,6 +5,10 @@
 #include "guest_interrupt_context.h"
 #include "runtime_log.h"
 
+#if defined(__SWITCH__)
+#include <switch.h>
+#endif
+
 #include <cstdio>
 #include <cstdlib>
 
@@ -19,11 +23,19 @@ uint32_t CanonicalVtxAttr(uint32_t attr) {
 // buffering the whole primitive. Indexed attributes are therefore expanded into
 // the packed direct stream below (GX_INDEX8/16 -> GX_DIRECT).
 void ApplyAuroraVtxStateForBegin(GXVtxFmt fmt) {
+    // Nothing changed since the last primitive's full publish: see ImmediateVtxPublishMemo.
+    bool checking = false;
+    if (GxStream::TrySkipImmediateVtxPublish(fmt, checking)) {
+        return;
+    }
     GxStream::PublishAuroraVtxState(fmt,
                                     GxStream::AuroraVtxPublishOptions{
                                         /*includeNbt=*/false,
                                         /*fmtLoopFirst=*/static_cast<int>(GX_VA_POS),
                                         /*fmtLoopLast=*/static_cast<int>(GX_VA_TEX7)});
+    if (checking) {
+        GxStream::KeepImmediateVtxMemoForCheck();
+    }
 }
 }
 
@@ -236,19 +248,37 @@ PPC_NATIVE_OVERRIDE_VOID(8016f348, GX__SetPointSize_8016f348, (uint32_t pointSiz
 // ============================================================================
 
 namespace {
+#if defined(__SWITCH__)
+// This runs at the start of every immediate-mode primitive, hundreds of times a frame when
+// particles are on screen. On Switch a thread_local read is a function call and steady_clock::now
+// a trip through newlib; guest code only runs on the one emulation thread there (see
+// g_currentCpuContext in isa/ppc_isa_context.h), so plain statics and the CPU's own tick counter
+// (19.2 MHz) give the same once-a-millisecond gate for a few instructions.
+bool g_inGxBeginOrFifo = false;
+uint64_t g_nextDeferredTimingPollTick = 0;
+#else
 thread_local bool g_inGxBeginOrFifo = false;
 thread_local std::chrono::steady_clock::time_point g_nextDeferredTimingPoll{};
+#endif
 
 void ServiceDeferredTimingDuringGxWork() {
     if (g_inGxBeginOrFifo) {
         return;
     }
 
+#if defined(__SWITCH__)
+    const uint64_t nowTick = armGetSystemTick();
+    if (nowTick < g_nextDeferredTimingPollTick) {
+        return;
+    }
+    g_nextDeferredTimingPollTick = nowTick + armGetSystemTickFreq() / 1000u;
+#else
     const auto now = std::chrono::steady_clock::now();
     if (now < g_nextDeferredTimingPoll) {
         return;
     }
     g_nextDeferredTimingPoll = now + std::chrono::milliseconds(1);
+#endif
 
     g_inGxBeginOrFifo = true;
     try {
@@ -303,10 +333,11 @@ extern "C" void GX__Begin_8016f0f0(uint32_t t, uint32_t vf, uint32_t nv) {
     g_hleGxState.vertsRemaining=nv; g_hleGxState.inBegin=true; g_hleGxState.auroraBeginCalled=false;
     g_hleGxState.fifoReadOffset = 0;
     g_hleGxState.fifoByteCount=0; g_hleGxState.ResetVertex();
+    GxFifoBeginImmediatePrimitive(static_cast<GXPrimitive>(t), static_cast<GXVtxFmt>(vf), nv);
 }
 PPC_NATIVE_OVERRIDE_VOID(8016f0f0, GX__Begin_8016f0f0, (uint32_t t, uint32_t vf, uint32_t nv), (t, vf, nv));
 
-extern "C" void GX__End_80044b30() { g_hleGxState.inBegin=false; GXEnd(); }
+extern "C" void GX__End_80044b30() { GxFifoAbandonImmediatePrimitive(); g_hleGxState.inBegin=false; GXEnd(); }
 PPC_NATIVE_OVERRIDE_VOID(80044b30, GX__End_80044b30, (), ());
 
 extern "C" void GX__End_80048c30() { GX__End_80044b30(); }

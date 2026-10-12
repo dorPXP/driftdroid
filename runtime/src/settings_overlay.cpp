@@ -794,12 +794,43 @@ void DrawMusicPlayer() {
         std::snprintf(text, sizeof(text), "%d:%02d", total / 60, total % 60);
         return std::string(text);
     };
-    const float fraction =
-        status.durationSeconds > 0.0 ? static_cast<float>(status.positionSeconds / status.durationSeconds) : 0.0f;
-    const std::string times = clock(status.positionSeconds) + " / " + clock(status.durationSeconds);
-    ImGui::ProgressBar(fraction, ImVec2(width, 22.0f), status.loaded ? times.c_str() : "");
+    // Drag the bar to move through the track; it jumps when the finger (or stick) lets go, so the
+    // sound does not stutter along behind the drag.
+    static float scrub = 0.0f;
+    static bool scrubbing = false;
+    const float duration = static_cast<float>(status.durationSeconds);
+    float position = scrubbing ? scrub : static_cast<float>(status.positionSeconds);
+    const std::string times = clock(position) + " / " + clock(status.durationSeconds);
+    ImGui::BeginDisabled(!status.loaded || duration <= 0.0f);
+    ImGui::SetNextItemWidth(width);
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(ImGui::GetStyle().FramePadding.x, 12.0f));
+    if (ImGui::SliderFloat("##MusicPlayerPosition", &position, 0.0f, std::max(duration, 1.0f),
+                           status.loaded ? times.c_str() : "", ImGuiSliderFlags_NoInput)) {
+        scrub = position;
+        scrubbing = true;
+    }
+    if (scrubbing && !ImGui::IsItemActive()) {
+        MusicPlayer::Seek(scrub);
+        scrubbing = false;
+    }
+    ImGui::PopStyleVar();
 
     const float spacing = ImGui::GetStyle().ItemSpacing.x;
+    const float half = (width - spacing) / 2.0f;
+    if (ImGui::Button("Back 10 s", ImVec2(half, 48.0f))) {
+        MusicPlayer::Seek(status.positionSeconds - 10.0);
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Forward 10 s", ImVec2(half, 48.0f))) {
+        // Past the end would restart the last moment over and over; go to the next track instead.
+        if (status.positionSeconds + 10.0 >= status.durationSeconds) {
+            MusicPlayer::Next();
+        } else {
+            MusicPlayer::Seek(status.positionSeconds + 10.0);
+        }
+    }
+    ImGui::EndDisabled();
+
     const float third = (width - spacing * 2.0f) / 3.0f;
     if (ImGui::Button("Previous", ImVec2(third, 60.0f))) {
         MusicPlayer::Previous();

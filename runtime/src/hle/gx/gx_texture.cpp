@@ -464,6 +464,51 @@ extern "C" void GX__LoadTexObj_80170f2c(uint32_t oa, uint32_t tid) {
         return;
     }
     
+    // Bind-only path. A race frame loads a few hundred textures, nearly all of them objects that
+    // went through the full path below last frame and have not changed since; re-deriving and
+    // re-validating their metadata was about 0.7 ms of a Switch race frame (profile 2026-10-11).
+    // When the slot says its last full load is still current, the guest struct is byte-identical
+    // to the one that load decoded and no pixel upload is pending, the full path would compute
+    // the same metadata, find nothing to rebuild or upload, and reach the bind below with it.
+    // Palette textures stay on the full path (their TLUT binding is checked there).
+    // MKW_GX_TEXLOAD_CHECK=1 (desktop test runs) takes the full path anyway and reports any load
+    // the bind-only path would have got wrong.
+    bool bindOnlyWouldApply = false;
+    if (TexObjSlot* slot = FindTexObjSlot(oa);
+        slot != nullptr && slot->loadValidated && !slot->needsUpload && slot->hasGuestShadow && slot->host &&
+        slot->host->constructed && !IsPaletteTexFormat(slot->format)) {
+        uint64_t shadow[4];
+        if (ReadTexObjShadow(oa, shadow) && std::memcmp(shadow, slot->guestShadow, sizeof(shadow)) == 0) {
+            static const bool checkOnly =
+#if defined(__SWITCH__) || defined(__ANDROID__)
+                false;
+#else
+                std::getenv("MKW_GX_TEXLOAD_CHECK") != nullptr;
+#endif
+            if (!checkOnly) {
+                BoundTexInfo newBound{};
+                static_cast<GxTextureBindingContract::SamplerState&>(newBound) = *slot;
+                newBound.objAddr = oa;
+                newBound.dataAddr = CanonicalizeGxMainRamAddress(slot->dataAddr);
+                const bool canSkipHostLoad =
+                    GxTextureBindingContract::CanSkipHostLoad(g_boundTexMaps[tid], newBound, false, false, false);
+                g_boundTexMaps[tid] = newBound;
+                if (!canSkipHostLoad) {
+                    GXLoadTexObj(slot->host->PublicPtr(), (GXTexMapID)tid);
+                }
+                try { uint32_t gd = Memory::Read32(kGXDataPtrAddr); if (gd) { Memory::Write32(gd + 0x5FCu, Memory::Read32(gd + 0x5FCu) | 1u); Memory::Write16(gd + 2, 0); } } catch (...) {}
+                return;
+            }
+            bindOnlyWouldApply = true;
+        }
+    }
+    static uint64_t s_bindOnlyChecked = 0;
+    static uint64_t s_bindOnlyWrong = 0;
+    TexObjMeta slotMetaBefore;
+    if (bindOnlyWouldApply) {
+        slotMetaBefore = *FindTexObjSlot(oa);
+    }
+
     // Check if we have metadata for this texture, or try to extract it from guest memory
     TexObjMeta meta;
     if (!TryGetOrExtractTexObjMeta(oa, meta)) {
@@ -609,8 +654,34 @@ extern "C" void GX__LoadTexObj_80170f2c(uint32_t oa, uint32_t tid) {
         const bool canSkipHostLoad = GxTextureBindingContract::CanSkipHostLoad(
             oldBound, newBound, needsInit, tlutChanged, textureDataUploaded);
 
+        if (bindOnlyWouldApply) {
+            // What the bind-only path assumed: nothing rebuilt or uploaded, and the same sampler
+            // state and data address as the slot already held.
+            BoundTexInfo fromSlot{};
+            static_cast<GxTextureBindingContract::SamplerState&>(fromSlot) = slotMetaBefore;
+            fromSlot.objAddr = oa;
+            fromSlot.dataAddr = CanonicalizeGxMainRamAddress(slotMetaBefore.dataAddr);
+            const bool sameDecision = GxTextureBindingContract::CanSkipHostLoad(oldBound, fromSlot, false, false, false) ==
+                                      canSkipHostLoad;
+            const bool sameBinding = GxTextureBindingContract::CanSkipHostLoad(fromSlot, newBound, false, false, false);
+            ++s_bindOnlyChecked;
+            if (needsInit || tlutChanged || textureDataUploaded || !sameDecision || !sameBinding) {
+                if (++s_bindOnlyWrong <= 10) {
+                    std::fprintf(stderr, "[gx-texload-check] bind-only would be WRONG: oa=%08X tid=%u init=%d tlut=%d upload=%d decision=%d binding=%d\n",
+                                 oa, tid, needsInit, tlutChanged, textureDataUploaded, sameDecision, sameBinding);
+                }
+            }
+            if ((s_bindOnlyChecked % 50000u) == 0) {
+                std::fprintf(stderr, "[gx-texload-check] %llu bind-only loads checked, %llu would be wrong\n",
+                             static_cast<unsigned long long>(s_bindOnlyChecked), static_cast<unsigned long long>(s_bindOnlyWrong));
+            }
+        }
+
         g_boundTexMaps[tid] = newBound;
         GetTexObjMeta(oa) = meta;
+        if (TexObjSlot* validated = FindTexObjSlot(oa)) {
+            validated->loadValidated = true;
+        }
         if (!canSkipHostLoad) {
             GXLoadTexObj(obj, (GXTexMapID)tid);
         }

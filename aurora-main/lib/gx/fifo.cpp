@@ -325,7 +325,10 @@ void drain_async() {
   flush_buffer_to_worker();
 }
 
+uint32_t g_vtxLayoutEpoch = 0;
+
 void submit_stream(const uint8_t* data, uint32_t size, bool bigEndian) {
+  note_vtx_layout_event();
   if (!sThreaded.load(std::memory_order_relaxed)) {
     drain_inline();
     process(data, size, bigEndian);

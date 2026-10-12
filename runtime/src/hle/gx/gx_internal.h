@@ -152,6 +152,12 @@ struct TexObjSlot : TexObjMeta {
     uint64_t guestShadow[4] = {0, 0, 0, 0};
     bool hasGuestShadow = false;
 
+    // Set by GX__LoadTexObj when a full load of this object finished with the metadata now in
+    // this slot (validated, sanitized, host object built, pixels uploaded); cleared by every
+    // writer of the slot. While it holds, the guest struct still matches guestShadow and no
+    // upload is pending, the next GX__LoadTexObj only has to bind.
+    bool loadValidated = false;
+
     // DCStoreRange interval-index bookkeeping: what this slot currently
     // contributes to g_texObjIntervals, so a pending update that turns out to
     // be a no-op costs a compare instead of an erase + insert.
@@ -303,6 +309,9 @@ inline bool IsDisplayListActive() noexcept { return g_dlRecordState.active; }
 
 // gx_vertex.cpp: keeps VI retraces, alarms and audio moving while a frame's display lists are drawn.
 void GxServiceDeferredTimingFromDisplayList();
+// Whole-primitive path for immediate mode (gx_fifo.cpp).
+void GxFifoBeginImmediatePrimitive(GXPrimitive prim, GXVtxFmt fmt, uint32_t vertexCount);
+void GxFifoAbandonImmediatePrimitive();
 
 // Mirrors GX__BeginDisplayList_80172e00's guest-side initialization.
 void BeginDisplayListRecording(uint32_t listAddr, uint32_t sizeBytes);

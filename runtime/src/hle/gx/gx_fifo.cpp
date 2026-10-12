@@ -13,6 +13,10 @@ HleGxState g_hleGxState;
 namespace aurora::gx::fifo {
 bool submit_raw_draw(GXPrimitive prim, GXVtxFmt fmt, const uint8_t* vertices, uint16_t vtxCount,
                      uint32_t vertexBytes);
+bool submit_draw_in_stream(GXPrimitive prim, GXVtxFmt fmt, const uint8_t* vertices, uint16_t vtxCount,
+                           uint32_t vertexBytes);
+const uint8_t* get_buffer_data();
+uint32_t get_buffer_size();
 }
 
 void HleGxState::ResetVertex() {
@@ -41,9 +45,18 @@ static void ApplyAuroraVtxStateForRawBegin(GXVtxFmt fmt) {
     // publishes GX_VA_NBT after GX_VA_NRM, which makes aurora's SETVAT fall-through clobber the
     // NRM VAT with the default. Raw-FIFO geometry renders correctly with it; do not "fix" without
     // an in-race A/B run.
+    // Nothing changed since the last primitive's publish here: see ImmediateVtxPublishMemo.
+    bool checking = false;
+    if (TrySkipImmediateVtxPublish(fmt, checking)) {
+        return;
+    }
     PublishAuroraVtxState(fmt, AuroraVtxPublishOptions{/*includeNbt=*/true,
                                                        /*fmtLoopFirst=*/0,
                                                        /*fmtLoopLast=*/25});
+    if (checking) {
+        FinishImmediateVtxPublishCheck(fmt);
+    }
+    NoteImmediateVtxPublished(fmt);
 }
 
 // There is deliberately no indexed-aurora path here. Immediate-mode indexed
@@ -343,6 +356,132 @@ void SubmitAttribute(GXAttr attr, float* comps, const VtxAttrFmt& fmt, const u32
     }
 }
 
+// --- Whole-primitive path for immediate mode --------------------------------
+//
+// Between GXBegin and GXEnd the game writes a primitive to the FIFO one value at a time: three
+// floats and a byte per particle vertex, each through HleFifoWrite. The incremental parser below
+// buffers every value, works out which attribute and component it belongs to, converts it and
+// hands it to aurora's own GXPosition/GXColor/GXTexCoord writers - which put the same bytes back
+// into aurora's command stream. When every enabled attribute is direct data, the bytes the game
+// writes ARE the draw packet's payload, so collect them and hand the finished primitive over in
+// one piece (aurora::gx::fifo::submit_draw_in_stream: opcode, count, payload - what GXBegin, the
+// attribute writers and GXEnd produce together).
+//
+// MKW_GX_PRIMITIVE_CHECK=1 (desktop test runs) keeps the incremental path and compares the bytes
+// it left in aurora's stream with the bytes collected here, primitive by primitive.
+namespace {
+struct ImmediatePrimitive {
+    bool collecting = false;  // bytes go to `bytes`, nothing reaches the incremental parser
+    bool checking = false;    // incremental parser runs; `bytes` is kept for comparison
+    GXPrimitive prim = GX_TRIANGLES;
+    GXVtxFmt fmt = GX_VTXFMT0;
+    uint16_t vertexCount = 0;
+    uint32_t expectedBytes = 0;
+    uint32_t auroraSizeAtBegin = 0;
+    std::vector<uint8_t> bytes;
+};
+ImmediatePrimitive s_immediate;
+constexpr uint32_t kImmediatePrimitiveMaxBytes = 256u * 1024u;
+
+uint64_t s_immediateCheckSame = 0;
+uint64_t s_immediateCheckDifferent = 0;
+uint64_t s_immediateCheckUncheckable = 0;
+
+bool ImmediatePrimitiveCheckEnabled() {
+#if defined(__SWITCH__) || defined(__ANDROID__)
+    return false;
+#else
+    static const bool enabled = std::getenv("MKW_GX_PRIMITIVE_CHECK") != nullptr;
+    return enabled;
+#endif
+}
+
+void FinishImmediatePrimitive() {
+    ImmediatePrimitive& p = s_immediate;
+    p.collecting = false;
+    EnsureAuroraFrameActive();
+    ApplyAuroraVtxStateForRawBegin(p.fmt);
+    EnsureDefaultGxAlphaCompare();
+    aurora::gx::fifo::submit_draw_in_stream(p.prim, p.fmt, p.bytes.data(), p.vertexCount, p.expectedBytes);
+    GXMarkFrameWork();
+    // Exactly the state the incremental parser leaves after the last vertex.
+    g_hleGxState.vertsRemaining = 0;
+    g_hleGxState.inBegin = false;
+    g_hleGxState.auroraBeginCalled = false;
+    g_hleGxState.ResetVertex();
+    g_hleGxState.fifoReadOffset = 0;
+    g_hleGxState.fifoByteCount = 0;
+}
+
+inline void AppendImmediateBytes(u32 val, uint32_t count) {
+    uint8_t be[4] = {static_cast<uint8_t>(val >> 24), static_cast<uint8_t>(val >> 16),
+                     static_cast<uint8_t>(val >> 8), static_cast<uint8_t>(val)};
+    s_immediate.bytes.insert(s_immediate.bytes.end(), be + (4u - count), be + 4u);
+}
+
+// Called by the incremental parser in check mode, just before it ends the primitive.
+void CheckImmediatePrimitive() {
+    ImmediatePrimitive& p = s_immediate;
+    if (!p.checking) {
+        return;
+    }
+    p.checking = false;
+    const uint32_t now = aurora::gx::fifo::get_buffer_size();
+    const bool comparable = p.bytes.size() == p.expectedBytes && now >= p.auroraSizeAtBegin &&
+                            now - p.auroraSizeAtBegin == p.expectedBytes;
+    if (!comparable) {
+        if (++s_immediateCheckUncheckable <= 10) {
+            std::fprintf(stderr, "[gx-primitive-check] not comparable: prim=%d fmt=%d verts=%u expected=%u collected=%zu aurora=%d\n",
+                         static_cast<int>(p.prim), static_cast<int>(p.fmt), p.vertexCount, p.expectedBytes, p.bytes.size(),
+                         static_cast<int>(now) - static_cast<int>(p.auroraSizeAtBegin));
+        }
+    } else if (std::memcmp(aurora::gx::fifo::get_buffer_data() + p.auroraSizeAtBegin, p.bytes.data(), p.expectedBytes) == 0) {
+        ++s_immediateCheckSame;
+    } else if (++s_immediateCheckDifferent <= 10) {
+        std::fprintf(stderr, "[gx-primitive-check] DIFFERENT bytes: prim=%d fmt=%d verts=%u bytes=%u\n",
+                     static_cast<int>(p.prim), static_cast<int>(p.fmt), p.vertexCount, p.expectedBytes);
+    }
+    const uint64_t total = s_immediateCheckSame + s_immediateCheckDifferent + s_immediateCheckUncheckable;
+    if ((total % 20000u) == 0) {
+        std::fprintf(stderr, "[gx-primitive-check] %llu primitives: %llu identical, %llu different, %llu not comparable\n",
+                     static_cast<unsigned long long>(total), static_cast<unsigned long long>(s_immediateCheckSame),
+                     static_cast<unsigned long long>(s_immediateCheckDifferent),
+                     static_cast<unsigned long long>(s_immediateCheckUncheckable));
+    }
+}
+}  // namespace
+
+// From GX__Begin, after it has reset the parser for a new primitive.
+void GxFifoBeginImmediatePrimitive(GXPrimitive prim, GXVtxFmt fmt, uint32_t vertexCount) {
+    ImmediatePrimitive& p = s_immediate;
+    p.collecting = false;
+    p.checking = false;
+    uint32_t vertexBytes = 0;
+    if (vertexCount == 0 || vertexCount > 0xFFFFu || !TryGetRawDirectFifoVertexSize(fmt, vertexBytes)) {
+        return;
+    }
+    const uint32_t total = vertexCount * vertexBytes;
+    if (total > kImmediatePrimitiveMaxBytes) {
+        return;
+    }
+    p.prim = prim;
+    p.fmt = fmt;
+    p.vertexCount = static_cast<uint16_t>(vertexCount);
+    p.expectedBytes = total;
+    p.bytes.clear();
+    if (ImmediatePrimitiveCheckEnabled()) {
+        p.checking = true;
+    } else {
+        p.collecting = true;
+    }
+}
+
+// GXEnd from the game with a primitive still open: nothing complete to draw.
+void GxFifoAbandonImmediatePrimitive() {
+    s_immediate.collecting = false;
+    s_immediate.checking = false;
+}
+
 // `val` is a raw big-endian bit pattern: the FIFO stream is type-agnostic, and
 // the float entry point converts before it gets here.
 void HleFifoWrite(u32 val, uint32_t sizeBytes) {
@@ -350,6 +489,33 @@ void HleFifoWrite(u32 val, uint32_t sizeBytes) {
     if (recordOnly) {
         WriteDisplayListData(val, sizeBytes);
         return;
+    }
+
+    if (s_immediate.collecting) {
+        const uint32_t count = (sizeBytes == 0 || sizeBytes > 4) ? 4u : sizeBytes;
+        const uint32_t room = s_immediate.expectedBytes - static_cast<uint32_t>(s_immediate.bytes.size());
+        if (count <= room) [[likely]] {
+            AppendImmediateBytes(val, count);
+            if (count == room) {
+                FinishImmediatePrimitive();
+            }
+            return;
+        }
+        // A write that straddles the end of the primitive: its first bytes finish it, the rest
+        // is whatever follows in the stream.
+        const uint32_t rest = count - room;
+        AppendImmediateBytes(val >> (8u * rest), room);
+        FinishImmediatePrimitive();
+        HleFifoWrite(rest == 4u ? val : (val & ((1u << (8u * rest)) - 1u)), rest);
+        return;
+    }
+    if (s_immediate.checking) {
+        const uint32_t count = (sizeBytes == 0 || sizeBytes > 4) ? 4u : sizeBytes;
+        if (s_immediate.bytes.size() + count <= s_immediate.expectedBytes) {
+            AppendImmediateBytes(val, count);
+        } else {
+            s_immediate.bytes.resize(s_immediate.expectedBytes + 1u);  // marks it not comparable
+        }
     }
 
     auto resetFifoBuffer = [&]() {
@@ -526,6 +692,7 @@ void HleFifoWrite(u32 val, uint32_t sizeBytes) {
         ApplyAuroraVtxStateForRawBegin(g_hleGxState.currentVtxFmt);
         EnsureDefaultGxAlphaCompare();
         GXBegin(g_hleGxState.currentPrim, g_hleGxState.currentVtxFmt, static_cast<u16>(g_hleGxState.vertsRemaining));
+        s_immediate.auroraSizeAtBegin = aurora::gx::fifo::get_buffer_size();
         g_hleGxState.auroraBeginCalled = true;
         GXMarkFrameWork();
     }
@@ -541,6 +708,7 @@ void HleFifoWrite(u32 val, uint32_t sizeBytes) {
                     g_hleGxState.inBegin = false;
                     g_hleGxState.auroraBeginCalled = false;
                     if (!recordOnly) {
+                        CheckImmediatePrimitive();
                         GXEnd();
                     }
                 }

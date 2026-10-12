@@ -76,6 +76,7 @@ GXFifoObj* GXInit(void* base, u32 size) {
 
   __gx->dirtyState = 0;
   __gx->dirtyVAT = 0;
+  aurora::gx::fifo::note_vtx_layout_event();
 
   // VAT initialization: set default bits and write vatB to CP
   for (i = 0; i < GX_MAX_VTXFMT; i++) {

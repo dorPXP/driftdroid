@@ -177,6 +177,7 @@ static inline bool AuroraVtxAttrFmtDiffers(GXVtxFmt vtxfmt, GXAttr attr, GXCompC
 extern "C" {
 
 void GXSetVtxDesc(GXAttr attr, GXAttrType type) {
+  aurora::gx::fifo::note_vtx_layout_event();
   const u32 oldVcdLo = __gx->vcdLo;
   const u32 oldVcdHi = __gx->vcdHi;
   const u8 oldHasNrms = __gx->hasNrms;
@@ -201,6 +202,7 @@ void GXSetSourceVtxDesc(GXAttr attr, GXAttrType type) {
   if (attr < GX_VA_PNMTXIDX || attr >= GX_VA_MAX_ATTR) {
     return;
   }
+  aurora::gx::fifo::note_vtx_layout_event();
   // Through the stream so it stays ordered with the CP VCD writes that also reset it.
   GX_WRITE_AURORA(GX_LOAD_AURORA_SOURCE_VTXDESC);
   GX_WRITE_U8(static_cast<u8>(attr));
@@ -208,6 +210,7 @@ void GXSetSourceVtxDesc(GXAttr attr, GXAttrType type) {
 }
 
 void GXSetVtxDescv(GXVtxDescList* list) {
+  aurora::gx::fifo::note_vtx_layout_event();
   const u32 oldVcdLo = __gx->vcdLo;
   const u32 oldVcdHi = __gx->vcdHi;
   const u8 oldHasNrms = __gx->hasNrms;
@@ -233,6 +236,7 @@ void GXSetVtxDescv(GXVtxDescList* list) {
 }
 
 void GXClearVtxDesc() {
+  aurora::gx::fifo::note_vtx_layout_event();
   __gx->vcdLo = 0;
   SET_REG_FIELD(0, __gx->vcdLo, 2, 9, 1); // GX_VA_POS = GX_DIRECT
   __gx->vcdHi = 0;
@@ -242,6 +246,7 @@ void GXClearVtxDesc() {
 }
 
 void GXSetVtxAttrFmt(GXVtxFmt vtxfmt, GXAttr attr, GXCompCnt cnt, GXCompType type, u8 frac) {
+  aurora::gx::fifo::note_vtx_layout_event();
   CHECK(vtxfmt >= GX_VTXFMT0 && vtxfmt < GX_MAX_VTXFMT, "invalid vtxfmt {}", underlying(vtxfmt));
   CHECK(attr >= GX_VA_POS && attr < GX_VA_MAX_ATTR, "invalid attr {}", underlying(attr));
 
@@ -261,6 +266,7 @@ void GXSetVtxAttrFmt(GXVtxFmt vtxfmt, GXAttr attr, GXCompCnt cnt, GXCompType typ
 }
 
 void GXSetVtxAttrFmtv(GXVtxFmt vtxfmt, const GXVtxAttrFmtList* list) {
+  aurora::gx::fifo::note_vtx_layout_event();
   CHECK(vtxfmt >= GX_VTXFMT0 && vtxfmt < GX_MAX_VTXFMT, "invalid vtxfmt {}", underlying(vtxfmt));
   CHECK(list != nullptr, "null vtx attr fmt list");
 

@@ -3,6 +3,10 @@
 #include "isa/big_endian.h"
 #include "gx_internal.h"
 
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+
 // Shared GX command-stream helpers used verbatim by gx_fifo.cpp, gx_dl.cpp and gx_vertex.cpp
 // instead of forked per-file copies; genuine per-caller differences are explicit parameters here.
 // Header-inline throughout: the shipped clang/llvm-mingw build has no LTO across runtime shards,
@@ -33,6 +37,12 @@ constexpr uint8_t GX_DRAW_LINE_STRIP_CMD     = 0xB0;
 constexpr uint8_t GX_DRAW_POINTS_CMD         = 0xB8;
 
 } // namespace GxCmd
+
+// aurora's own counters for the skip-an-unchanged-publish memo below (lib/gx/fifo.hpp).
+namespace aurora::gx::fifo {
+extern uint32_t g_vtxLayoutEpoch;
+bool in_display_list();
+}
 
 namespace GxStream {
 
@@ -384,6 +394,123 @@ inline void PublishAuroraVtxState(GXVtxFmt fmt, const AuroraVtxPublishOptions& o
         }
         const auto& f = g_hleGxState.vtxAttrFmt[fmt][attr];
         GXSetVtxAttrFmt(fmt, gxAttr, f.cnt, f.type, f.frac);
+    }
+}
+
+// --- Skipping an unchanged immediate-mode publish ---------------------------
+//
+// Immediate-mode drawing (particles, the HUD, anything between GXBegin and GXEnd) publishes the
+// whole vertex layout before every primitive: once in GX__Begin and again when the first vertex
+// byte arrives, about 90 aurora calls for one quad. With the threaded FIFO each of those calls
+// also marks the registers dirty, so every quad re-sent five identical CP registers to the GX
+// worker as well. A race frame draws hundreds of such quads back to back with nothing in between
+// that touches the layout.
+//
+// The memo records the last complete publish (the one made when vertex data starts). A later
+// publish is skipped only when it could not change anything:
+//  - the HLE layout is the same (HleGxState::vtxStateGeneration counts every real change),
+//  - it is for the same vertex format,
+//  - nothing has touched aurora's layout since (aurora::gx::fifo::g_vtxLayoutEpoch counts every
+//    descriptor/format setter and every command stream handed over, display lists included),
+//  - and aurora is not recording a display list (there every setter is recorded, not applied).
+// Then aurora's registers already hold exactly what the publish would write, and the GX worker
+// has them (or has them pending in the dirty flags of the publish that set the memo).
+// MKW_GX_PUBLISH_CHECK=1 (desktop test runs) publishes anyway and reports any register that a
+// skipped publish would have changed.
+struct ImmediateVtxPublishMemo {
+    uint32_t auroraEpoch = 0;
+    uint32_t hleGeneration = 0;
+    GXVtxFmt fmt = GX_VTXFMT0;
+    bool valid = false;
+};
+inline ImmediateVtxPublishMemo g_immediateVtxPublishMemo;
+inline uint64_t g_immediateVtxPublishSkips = 0;
+inline uint64_t g_immediateVtxPublishCheckFailures = 0;
+
+inline bool ImmediateVtxPublishIsCurrent(GXVtxFmt fmt) {
+    const ImmediateVtxPublishMemo& memo = g_immediateVtxPublishMemo;
+    return memo.valid && memo.fmt == fmt && memo.hleGeneration == g_hleGxState.vtxStateGeneration &&
+           memo.auroraEpoch == aurora::gx::fifo::g_vtxLayoutEpoch && !aurora::gx::fifo::in_display_list();
+}
+
+inline void NoteImmediateVtxPublished(GXVtxFmt fmt) {
+    g_immediateVtxPublishMemo = {aurora::gx::fifo::g_vtxLayoutEpoch, g_hleGxState.vtxStateGeneration, fmt, true};
+}
+
+// Everything a publish can change in aurora's register shadow, read back through the getters.
+struct AuroraVtxLayoutReadback {
+    GXAttrType desc[GX_VA_TEX7 + 1]{};
+    GXCompCnt cnt[GX_VA_TEX7 + 1]{};
+    GXCompType type[GX_VA_TEX7 + 1]{};
+    u8 frac[GX_VA_TEX7 + 1]{};
+    bool operator==(const AuroraVtxLayoutReadback& other) const {
+        return std::memcmp(this, &other, sizeof(*this)) == 0;
+    }
+};
+
+inline AuroraVtxLayoutReadback ReadAuroraVtxLayout(GXVtxFmt fmt) {
+    AuroraVtxLayoutReadback out;
+    std::memset(&out, 0, sizeof(out));
+    for (int attr = GX_VA_PNMTXIDX; attr <= GX_VA_TEX7; ++attr) {
+        GXGetVtxDesc(static_cast<GXAttr>(attr), &out.desc[attr]);
+        if (attr >= GX_VA_POS) {
+            GXGetVtxAttrFmt(fmt, static_cast<GXAttr>(attr), &out.cnt[attr], &out.type[attr], &out.frac[attr]);
+        }
+    }
+    return out;
+}
+
+inline bool ImmediateVtxPublishCheckEnabled() {
+#if defined(__SWITCH__) || defined(__ANDROID__)
+    return false;
+#else
+    static const bool enabled = std::getenv("MKW_GX_PUBLISH_CHECK") != nullptr;
+    return enabled;
+#endif
+}
+
+// Check mode keeps the layout as it was before the first publish of a primitive that would have
+// been skipped, to compare with what the primitive's last publish leaves behind.
+inline AuroraVtxLayoutReadback g_immediateVtxCheckBefore;
+inline bool g_immediateVtxCheckPending = false;
+
+// Returns true when the publish may be skipped. In check mode it never is: `checking` tells the
+// caller to publish and then report through the two helpers below.
+inline bool TrySkipImmediateVtxPublish(GXVtxFmt fmt, bool& checking) {
+    checking = false;
+    if (!ImmediateVtxPublishIsCurrent(fmt)) {
+        return false;
+    }
+    ++g_immediateVtxPublishSkips;
+    if (ImmediateVtxPublishCheckEnabled()) [[unlikely]] {
+        if (!g_immediateVtxCheckPending) {
+            g_immediateVtxCheckBefore = ReadAuroraVtxLayout(fmt);
+            g_immediateVtxCheckPending = true;
+        }
+        checking = true;
+        return false;
+    }
+    return true;
+}
+
+// After the first of a primitive's two publishes ran in check mode: it moved aurora's counter, so
+// re-arm the memo for the second one (which the comparison belongs to).
+inline void KeepImmediateVtxMemoForCheck() {
+    g_immediateVtxPublishMemo.auroraEpoch = aurora::gx::fifo::g_vtxLayoutEpoch;
+}
+
+inline void FinishImmediateVtxPublishCheck(GXVtxFmt fmt) {
+    g_immediateVtxCheckPending = false;
+    if (!(ReadAuroraVtxLayout(fmt) == g_immediateVtxCheckBefore)) {
+        if (++g_immediateVtxPublishCheckFailures <= 20) {
+            std::fprintf(stderr, "[gx-publish-check] a skipped publish would have changed aurora's layout (fmt %d)\n",
+                         static_cast<int>(fmt));
+        }
+    }
+    if ((g_immediateVtxPublishSkips % 50000u) == 0) {
+        std::fprintf(stderr, "[gx-publish-check] %llu skippable publishes checked, %llu would have changed something\n",
+                     static_cast<unsigned long long>(g_immediateVtxPublishSkips),
+                     static_cast<unsigned long long>(g_immediateVtxPublishCheckFailures));
     }
 }
 

@@ -74,6 +74,15 @@ inline void write_f32(const float val) {
   write_data(&out, sizeof(out));
 }
 
+// Counts every event after which the vertex descriptor and formats the command processor holds
+// may no longer be what the caller last published: each GXSetVtxDesc/GXSetVtxAttrFmt-family call,
+// each GXSetSourceVtxDesc, and each foreign command stream handed over (display lists can carry
+// their own CP writes). A caller that published a layout, sees the same count again and has not
+// changed its own inputs knows a republish would only re-send identical registers. Written on
+// the game thread only.
+extern uint32_t g_vtxLayoutEpoch;
+inline void note_vtx_layout_event() { ++g_vtxLayoutEpoch; }
+
 // Display list recording
 void begin_display_list(uint8_t* buf, uint32_t size);
 uint32_t end_display_list();

@@ -94,6 +94,7 @@ void StartAndroidPgoRecording();
 extern std::atomic_bool g_auroraFrameActive;
 extern "C" int g_gxFrameCount;
 extern "C" const char* DVDResolveHostPathForTest(const char* dvdPath);
+extern "C" void NativeMath_ReadFlags();  // hle/native_math.cpp
 bool OS_HLE_InterruptsEnabled() noexcept;
 
 #if defined(__SWITCH__)
@@ -2663,6 +2664,7 @@ int RuntimeMain(int argc, char** argv) {
             RT_LOG(RT_TAG_GX) << "write tracking disabled by no_write_tracking.flag: every GX cache "
                                  "re-digests on every use" << std::endl;
         }
+        NativeMath_ReadFlags();
 #endif
         UpdateMkwDynamicAspectSurface(auroraInfo.windowSize.native_fb_width,
                                       auroraInfo.windowSize.native_fb_height);

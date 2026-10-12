@@ -334,6 +334,7 @@ struct KnownNativeCpuCall {
 template <uint32_t Target>
 struct KnownTypedNativeCpuCall {
     static constexpr bool kAvailable = false;
+    static constexpr bool kLeaf = false;
 };
 
 #include "native_cpu_calls.inc"
@@ -633,6 +634,12 @@ inline void InvokeDirectCpu(CpuContext* ctx) {
             PpcNonvolatileFprGuard fprGuard(cpu, KnownNativeCpuCall<Target>::kNonvolatileFprWriteMask);
             invokeKnownNative();
         }
+        return;
+    }
+
+    if constexpr (KnownTypedNativeCpuCall<Target>::kLeaf) {
+        // See MKW_KNOWN_LEAF_NATIVE in native_cpu_calls.inc.
+        KnownTypedNativeCpuCall<Target>::Invoke(cpu);
         return;
     }
 

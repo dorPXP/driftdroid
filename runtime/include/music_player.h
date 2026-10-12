@@ -28,6 +28,8 @@ void Play(int index);
 void TogglePause();
 void Next();
 void Previous();
+// Jumps to a position in the track that is loaded.
+void Seek(double seconds);
 void Stop();
 
 float Volume();

@@ -540,18 +540,33 @@ struct DlScanCacheState {
     // valid until `entries.clear()`, which also clears this array.
     // The slot also carries copies of the fields every probe reads, so a hit on a register-only
     // list never touches the (large, cold) record: those loads were ~20% of the handler's time.
-    struct FrontSlot {
+    //
+    // Successor hint (next*): a frame calls the same lists in the same order as the frame before,
+    // and by the next frame everything a call reads - this slot, the record, the list's own bytes
+    // - has left the CPU cache; the handler's own time was mostly those misses (profile
+    // 2026-10-11: 0.8-1.0 ms of a Switch race frame, hottest at the slot and record loads). Each
+    // slot remembers which call followed it last time, so a hit can ask for that call's memory
+    // one whole call early. The hint is only ever used as a prefetch address, never read through,
+    // so a stale one costs nothing but a wasted fetch. One slot is exactly one cache line.
+    struct alignas(64) FrontSlot {
         uint64_t key = 0;
         DlScanCacheRecord* record = nullptr;
         uint64_t writeGeneration = 0;
         uint64_t contentDigest = 0;
         uint64_t layoutHash = 0;
+        const DlScanCacheRecord* nextRecord = nullptr;
         uint32_t listAddr = 0;
         uint32_t nbytes = 0;
+        uint32_t nextListAddr = 0;
+        uint16_t nextSlot = 0;
         bool mayContainDraw = false;
+        uint8_t nextListLines = 0;
     };
+    static_assert(sizeof(FrontSlot) == 64);
     static constexpr size_t kFrontSlots = 4096;
     std::array<FrontSlot, kFrontSlots> front{};
+    // The slot the previous cached call resolved to, or null after a miss or a clear.
+    FrontSlot* previousHitSlot = nullptr;
 };
 
 // The game changes the vertex layout between most display lists (every material sets its own VCD),
@@ -626,6 +641,13 @@ static DlScanCacheState::FrontSlot& DlScanCacheFrontSlot(DlScanCacheState& cache
 
 static void FillDlScanCacheFrontSlot(DlScanCacheState::FrontSlot& slot, uint64_t key,
                                      DlScanCacheRecord& record) {
+    if (slot.key != key) {
+        // A different list now owns this slot: its successor is not known yet.
+        slot.nextRecord = nullptr;
+        slot.nextListAddr = 0;
+        slot.nextSlot = 0;
+        slot.nextListLines = 0;
+    }
     slot.key = key;
     slot.record = &record;
     slot.writeGeneration = record.writeGeneration;
@@ -656,6 +678,8 @@ static uint64_t DlContentDigest(const uint8_t* list, uint32_t nbytes) {
 
 
 struct DlScanCacheProbe {
+    // The front slot the key resolved to (hit or stale), for the successor hint.
+    DlScanCacheState::FrontSlot* slot = nullptr;
     const DlScanCacheRecord* record = nullptr;
     // Copy of record->mayContainDraw, valid whenever record is set.
     bool mayContainDraw = false;
@@ -672,6 +696,7 @@ static DlScanCacheProbe ProbeDlScanCache(const uint8_t* list, uint32_t listAddr,
     auto& s_cache = DlScanCache();
     const uint64_t key = DlScanCacheKey(listAddr, nbytes, layoutHash);
     if (DlScanCacheState::FrontSlot* slot = FindDlScanCacheSlot(s_cache, key)) {
+        probe.slot = slot;
         const bool identityMatches = slot->listAddr == CanonicalizeGxMainRamAddress(listAddr) &&
                                      slot->nbytes == nbytes && slot->layoutHash == layoutHash;
         if (identityMatches && probe.writeGeneration != kDlWriteGenerationUntracked &&
@@ -702,6 +727,38 @@ static DlScanCacheProbe ProbeDlScanCache(const uint8_t* list, uint32_t listAddr,
     return probe;
 }
 
+// Links the previous cached call to this one and asks for the memory of the call that followed
+// this one last frame. See FrontSlot's successor hint.
+static inline void LinkAndPrefetchDlSuccessor(const DlScanCacheProbe& probe, uint32_t listAddr, uint32_t nbytes) {
+    auto& cache = DlScanCache();
+    DlScanCacheState::FrontSlot* slot = probe.record != nullptr ? probe.slot : nullptr;
+    DlScanCacheState::FrontSlot* previous = cache.previousHitSlot;
+    cache.previousHitSlot = slot;
+    if (slot == nullptr) {
+        return;
+    }
+    if (previous != nullptr && previous != slot) {
+        // A register-only list is answered from its slot alone; its record stays cold.
+        previous->nextRecord = slot->mayContainDraw ? slot->record : nullptr;
+        previous->nextListAddr = listAddr;
+        previous->nextSlot = static_cast<uint16_t>(slot - cache.front.data());
+        previous->nextListLines = static_cast<uint8_t>(std::min<uint32_t>(8u, (nbytes + 63u) / 64u));
+    }
+    if (slot->nextListLines == 0) {
+        return;  // no successor recorded yet
+    }
+    __builtin_prefetch(&cache.front[slot->nextSlot]);
+    if (const char* record = reinterpret_cast<const char*>(slot->nextRecord)) {
+        for (size_t offset = 0; offset < sizeof(DlScanCacheRecord); offset += 64) {
+            __builtin_prefetch(record + offset);
+        }
+    }
+    const uint8_t* list = MKW_FLAT_GUEST_BASE + slot->nextListAddr;
+    for (uint32_t line = 0; line < slot->nextListLines; ++line) {
+        __builtin_prefetch(list + line * 64u);
+    }
+}
+
 static size_t DlScanCacheRecordBytes(const DlScanCacheRecord& record) {
     return record.flattened.size() + record.cpWrites.size() * sizeof(DlCpWrite);
 }
@@ -723,6 +780,7 @@ static void StoreDlScanCache(uint32_t listAddr, uint32_t nbytes, uint64_t layout
         ++g_dlScanCacheCounters.clears;
         s_cache.entries.clear();
         s_cache.front.fill({});
+        s_cache.previousHitSlot = nullptr;
         s_cache.storedCommandBytes = 0;
         replacing = false;
         replacedBytes = 0;
@@ -1469,6 +1527,15 @@ extern "C" void GX__CallDisplayList_80172f64(uint32_t listAddr, uint32_t nbytes)
             allowScanCache ? ProbeDlScanCache(list, listAddr, nbytes, scanLayoutHash)
                            : DlScanCacheProbe{};
         const DlScanCacheRecord* cached = probe.record;
+        if (allowScanCache) {
+            LinkAndPrefetchDlSuccessor(probe, listAddr, nbytes);
+            if (cached != nullptr && probe.mayContainDraw) {
+                // This call's own second-level blocks: known only now, asked for before the work
+                // below reaches them. (Not for register-only lists, which never open the record.)
+                __builtin_prefetch(cached->cpWrites.data());
+                __builtin_prefetch(cached->flattened.data());
+            }
+        }
         g_dlScanCacheCounters.calls += allowScanCache ? 1 : 0;
         g_dlScanCacheCounters.hits += cached != nullptr ? 1 : 0;
 

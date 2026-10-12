@@ -39,6 +39,9 @@ struct Track {
     int channels = 0;
     uint64_t totalFrames = 0;    // sample frames in the whole file
     uint64_t decodedFrames = 0;  // sample frames handed to SDL so far
+    std::vector<uint32_t> frameOffsets;  // byte offset of every MP3 frame that holds audio, for seeking
+    int discard = 0;       // MP3 frames still to decode silently after a seek
+    bool flushed = false;  // SDL has been told the track is over
     mp3dec_t decoder{};
 };
 
@@ -51,6 +54,7 @@ bool g_settingsLoaded = false;
 // Requests from the UI, picked up by the worker.
 int g_requestIndex = -1;
 bool g_requestStop = false;
+double g_requestSeek = -1.0;  // seconds
 
 // Owned by the worker once loaded; read by the UI under the mutex.
 Track g_track;
@@ -119,6 +123,25 @@ std::vector<std::string> ScanLocked() {
     return names;
 }
 
+// An MP3 frame can borrow bits from the ones before it, so a seek starts decoding a little early.
+constexpr int kSeekLeadInFrames = 4;
+
+// Moves the loaded track to a position. The caller empties the SDL stream.
+void SeekLocked(double seconds) {
+    const size_t count = g_track.frameOffsets.size();
+    if (count == 0 || g_track.hz <= 0) {
+        return;
+    }
+    const double wanted = std::max(0.0, seconds) * g_track.hz / static_cast<double>(g_track.totalFrames);
+    const size_t target = std::min(count - 1, static_cast<size_t>(wanted * static_cast<double>(count)));
+    const size_t first = target > kSeekLeadInFrames ? target - kSeekLeadInFrames : 0;
+    mp3dec_init(&g_track.decoder);
+    g_track.cursor = g_track.frameOffsets[first];
+    g_track.discard = static_cast<int>(target - first);
+    g_track.decodedFrames = g_track.totalFrames * target / count;
+    g_track.flushed = false;
+}
+
 // Reads and measures a file. Runs on the worker without the mutex held.
 bool LoadFile(const fs::path& path, Track& track) {
     FILE* file = std::fopen(path.string().c_str(), "rb");
@@ -152,6 +175,9 @@ bool LoadFile(const fs::path& path, Track& track) {
         const int samples = mp3dec_decode_frame(&track.decoder, d + at, static_cast<int>(track.data.size() - at), nullptr, &info);
         if (info.frame_bytes <= 0) {
             break;
+        }
+        if (samples > 0) {
+            track.frameOffsets.push_back(static_cast<uint32_t>(at + static_cast<size_t>(info.frame_offset)));
         }
         at += static_cast<size_t>(info.frame_bytes);
         if (samples > 0) {
@@ -192,6 +218,7 @@ void Worker() {
         if (g_requestStop) {
             g_requestStop = false;
             g_requestIndex = -1;
+            g_requestSeek = -1.0;
             g_loaded = false;
             g_index = -1;
             g_track = Track{};
@@ -206,6 +233,7 @@ void Worker() {
         if (g_requestIndex >= 0) {
             const int index = g_requestIndex;
             g_requestIndex = -1;
+            g_requestSeek = -1.0;
             if (index >= static_cast<int>(g_tracks.size())) {
                 continue;
             }
@@ -247,6 +275,15 @@ void Worker() {
             UpdateGameMusicLocked();
         }
 
+        if (g_requestSeek >= 0.0) {
+            const double seconds = g_requestSeek;
+            g_requestSeek = -1.0;
+            if (g_loaded && g_stream != nullptr) {
+                SDL_ClearAudioStream(g_stream);
+                SeekLocked(seconds);
+            }
+        }
+
         if (!g_loaded || g_paused || g_stream == nullptr) {
             continue;
         }
@@ -263,13 +300,23 @@ void Worker() {
             }
             g_track.cursor += static_cast<size_t>(info.frame_bytes);
             // A stray frame in another format (rare, damaged files) would play at the wrong speed.
-            if (samples > 0 && info.hz == g_track.hz && info.channels == g_track.channels) {
+            if (samples > 0 && g_track.discard > 0) {
+                --g_track.discard;
+            } else if (samples > 0 && info.hz == g_track.hz && info.channels == g_track.channels) {
                 SDL_PutAudioStreamData(g_stream, pcm.data(), samples * info.channels * 2);
                 g_track.decodedFrames += static_cast<uint64_t>(samples);
             }
         }
-        if (g_track.cursor >= g_track.data.size() && SDL_GetAudioStreamQueued(g_stream) == 0 && g_requestIndex < 0) {
-            g_requestIndex = PickNextLocked(1);  // the track ended
+        if (g_track.cursor >= g_track.data.size()) {
+            // Without this SDL keeps the last few samples back for its resampler (the Switch always
+            // resamples, to 48 kHz), the queue never empties and the next track never starts.
+            if (!g_track.flushed) {
+                g_track.flushed = true;
+                SDL_FlushAudioStream(g_stream);
+            }
+            if (SDL_GetAudioStreamQueued(g_stream) == 0 && g_requestIndex < 0) {
+                g_requestIndex = PickNextLocked(1);  // the track ended
+            }
         }
     }
 }
@@ -378,6 +425,14 @@ void Previous() {
     EnsureWorkerLocked();
     g_requestIndex = PickNextLocked(-1);
     g_wake.notify_all();
+}
+
+void Seek(double seconds) {
+    std::lock_guard lock(g_mutex);
+    if (g_loaded) {
+        g_requestSeek = std::max(0.0, seconds);
+        g_wake.notify_all();
+    }
 }
 
 void Stop() {

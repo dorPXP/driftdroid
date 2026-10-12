@@ -17,6 +17,9 @@
 #include "libco.h"
 #endif
 
+bool OS_HLE_InterruptsEnabled() noexcept;
+extern "C" int32_t OS__RestoreInterrupts_801a65d4(int32_t level);
+
 namespace Fiber {
 
 #if !defined(_WIN32)
@@ -503,6 +506,18 @@ void GuestFiberManager::SwitchToThread(uint32_t guestThreadAddr, CpuContext* cpu
         MkwApplyHostNiMode(cpu->fpscr);
     }
 
+    // The interrupt-enable state belongs to the guest thread (it lives in each thread's MSR on a
+    // console), but the HLE keeps one flag for all of them. A thread that goes to sleep saves and
+    // restores it itself, around its own sleep call. A thread that is switched away from without
+    // asking - the sound thread woken by an audio block, say - does not, and used to come back
+    // with whatever the other thread left behind: "disabled", since every thread blocks with
+    // interrupts off. From then on its own disable/restore pairs kept restoring "disabled", and
+    // the main thread ran whole frames that way. Every deferred service that checks the flag
+    // (retraces, alarms and audio blocks during drawing and frame waits) was silently off; audio
+    // blocks piled up three at a time and each waited for the mixer (about 1 ms of a race frame on
+    // Switch). Carry the flag across the switch like the rest of the thread's state.
+    const bool interruptsEnabledAtSwitch = OS_HLE_InterruptsEnabled();
+
     // Switch to the target fiber (the target fiber will load its own context)
 #if defined(_WIN32)
     SwitchToFiber(fiberHandle);
@@ -513,6 +528,8 @@ void GuestFiberManager::SwitchToThread(uint32_t guestThreadAddr, CpuContext* cpu
     s_pendingFiberArg = guestThreadAddr;
     co_switch(static_cast<cothread_t>(fiberHandle));
 #endif
+
+    OS__RestoreInterrupts_801a65d4(interruptsEnabledAtSwitch ? 1 : 0);
 
     // When we return here, the fiber that issued SwitchToThread has resumed.
     // That does not automatically mean the previous guest thread became runnable

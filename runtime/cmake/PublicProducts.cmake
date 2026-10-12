@@ -169,11 +169,19 @@ set(MKW_PPC_SEMANTIC_RUNTIME_SOURCES
     # fmuls/fadds semantics unenforced there. The compile-flag override below is portable across
     # every compiler this project targets; the pragma is left in place too since it's harmless on
     # Clang platforms, but this flag is what actually guarantees the behavior on Switch.
-    "${MKW_RUNTIME_SOURCE_DIR}/src/hle/audio/ax_effects.cpp")
+    "${MKW_RUNTIME_SOURCE_DIR}/src/hle/audio/ax_effects.cpp"
+    # Hand-written replacements for translated maths routines: must round exactly like them.
+    "${MKW_RUNTIME_SOURCE_DIR}/src/hle/native_math.cpp")
 set_source_files_properties(${MKW_PPC_SEMANTIC_RUNTIME_SOURCES} PROPERTIES
     SKIP_UNITY_BUILD_INCLUSION ON
     SKIP_PRECOMPILE_HEADERS ON
     COMPILE_OPTIONS "${MKW_TRANSLATED_PPC_FP_OPTIONS}")
+# Only where the link wraps the translated routines (MKW_NATIVE_MATH_WRAPS, Switch). Set on the one
+# file rather than globally: a new global definition would recompile every translated shard.
+if(MKW_NATIVE_MATH_WRAPS)
+    set_source_files_properties("${MKW_RUNTIME_SOURCE_DIR}/src/hle/native_math.cpp" PROPERTIES
+        COMPILE_DEFINITIONS MKW_NATIVE_MATH)
+endif()
 # guest_flat_memory.cpp defines MKW_GUEST_FLAT_BASE_WRITER before including guest_flat_memory.h
 # (it owns the only write to the Switch guest base); a unity batch or the PCH would include the
 # reader's const declaration first.
