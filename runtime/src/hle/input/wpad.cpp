@@ -1,8 +1,11 @@
 #include "hle_stubs.h"
 #include "memory.h"
 #include "hle/controller_status_contract.h"
+#include "wii_remote_input.h"
 
 #include <cstdint>
+
+#include <dolphin/pad.h>
 
 void NandQueueIosCallback(uint32_t callbackPtr, int32_t result, uint32_t callbackArg);
 
@@ -11,6 +14,9 @@ namespace {
 constexpr uint32_t kDefaultWorkMemSize = 0x20000;
 constexpr uint8_t kDefaultDpdSensitivity = 3;
 constexpr int32_t kStatusOk = 0;
+constexpr uint32_t kWpadInfoSize = 0x18;
+constexpr uint32_t kWpadInfoBattery = 0x14;
+constexpr uint8_t kWpadBatteryFull = 4;
 
 struct WpadStubState {
     bool initSubRan = false;
@@ -100,6 +106,9 @@ PPC_NATIVE_OVERRIDE(801C0B54, WPADGetDataFormat_HLE, int32_t, (uint32_t chan), (
 
 extern "C" int32_t WPADSetDataFormat_HLE(uint32_t chan, int32_t format)
 {
+    if (chan == 0 && WiiRemoteInput::Active() && g_state.contract.IsInitialized()) {
+        return kStatusOk;
+    }
     return g_state.contract.SetDataFormat(chan, format);
 }
 PPC_NATIVE_OVERRIDE(801C0B9C, WPADSetDataFormat_HLE, int32_t, (uint32_t chan, int32_t format), (chan, format));
@@ -113,14 +122,20 @@ extern "C" int32_t WPADProbe_HLE(uint32_t chan, uint32_t typePtr)
     if (typePtr != 0) {
         Memory::Write32(typePtr, WpadContract::kExtensionCore);
     }
+    if (chan == 0 && WiiRemoteInput::Active()) {
+        return kStatusOk;
+    }
     return WpadContract::kErrorNoController;
 }
 PPC_NATIVE_OVERRIDE(801C0990, WPADProbe_HLE, int32_t, (uint32_t chan, uint32_t typePtr), (chan, typePtr));
 
 extern "C" void WPADControlMotor_HLE(uint32_t chan, uint32_t command)
 {
-    (void)chan;
-    (void)command;
+    // The emulated Wii Wheel rumbles the player's real controller (WPAD_MOTOR_STOP/RUMBLE are
+    // PAD_MOTOR_STOP/RUMBLE).
+    if (chan == 0 && WiiRemoteInput::Active()) {
+        PADControlMotor(0, command != 0 ? PAD_MOTOR_RUMBLE : PAD_MOTOR_STOP);
+    }
 }
 PPC_NATIVE_OVERRIDE(801C0EC4, WPADControlMotor_HLE, void, (uint32_t chan, uint32_t command), (chan, command));
 
@@ -130,6 +145,17 @@ extern "C" int32_t WPADGetInfoAsync_HLE(uint32_t chan, uint32_t infoPtr, uint32_
         return CompleteWpadRequest(chan, callback, WpadContract::kErrorBadChannel);
     }
 
+    if (chan == 0 && WiiRemoteInput::Active()) {
+        if (infoPtr != 0) {
+            // WPADInfo: dpd, speaker, attach, lowBat, nearempty (BOOL each), then battery, led,
+            // protocol, firmware (u8 each). A full battery and nothing else.
+            for (uint32_t offset = 0; offset < kWpadInfoSize; offset += 4) {
+                Memory::Write32(infoPtr + offset, 0);
+            }
+            Memory::Write8(infoPtr + kWpadInfoBattery, kWpadBatteryFull);
+        }
+        return CompleteWpadRequest(chan, callback, kStatusOk);
+    }
     (void)infoPtr;
     return CompleteWpadRequest(chan, callback, WpadContract::kErrorNoController);
 }
@@ -142,6 +168,9 @@ extern "C" int32_t WPADControlLed_HLE(uint32_t chan, uint32_t ledMask, uint32_t 
         return CompleteWpadRequest(chan, callback, WpadContract::kErrorBadChannel);
     }
     (void)ledMask;
+    if (chan == 0 && WiiRemoteInput::Active()) {
+        return CompleteWpadRequest(chan, callback, kStatusOk);
+    }
     return CompleteWpadRequest(chan, callback, WpadContract::kErrorNoController);
 }
 PPC_NATIVE_OVERRIDE(801C0FF8, WPADControlLed_HLE, int32_t,

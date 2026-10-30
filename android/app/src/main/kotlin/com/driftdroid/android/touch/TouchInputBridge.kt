@@ -34,4 +34,24 @@ object TouchInputBridge {
 
     @JvmStatic
     external fun nativeSetTouchAxis(axis: Int, value: Float)
+
+    /** A race is under way and not paused (runtime/src/hle/input/pad.cpp): tilt steering only
+     * steers then. */
+    @JvmStatic
+    external fun nativeIsDriving(): Boolean
+
+    /** Tilt steering's value (-1..1) and whether it is steering now (MotionSteering.kt). The
+     * native side also applies it to a real controller that is player 1, which the touch axis
+     * above does not reach. */
+    @JvmStatic
+    external fun nativeSetMotionSteer(steering: Boolean, value: Float)
+
+    /** Wii Wheel mode: one accelerometer reading in g, already in the Wii Remote's axes
+     * (runtime/src/hle/input/wii_remote_input.cpp). */
+    @JvmStatic
+    external fun nativePublishWiiRemoteMotion(x: Float, y: Float, z: Float)
+
+    /** Wii Wheel mode: a shake was detected; the runtime holds the same trick pulse as a D-pad press. */
+    @JvmStatic
+    external fun nativeWiiRemoteTrickPulse()
 }

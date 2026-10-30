@@ -376,7 +376,7 @@ static wgpu::BindGroupLayout g_depthBindGroupLayout;
 static wgpu::Sampler g_nearestSampler;
 static wgpu::Sampler g_linearSampler;
 static absl::flat_hash_map<GXTexFmt, wgpu::RenderPipeline> g_pipelines;
-static wgpu::RenderPipeline g_blitPipeline;
+static absl::flat_hash_map<wgpu::TextureFormat, wgpu::RenderPipeline> g_blitPipelines;
 
 static wgpu::RenderPipeline create_pipeline(const ConvPipeline& conv, const std::string_view shaderPreamble,
                                             const wgpu::BindGroupLayout& bindGroupLayout) {
@@ -490,9 +490,15 @@ void initialize() {
   };
   g_depthBindGroupLayout = g_device.CreateBindGroupLayout(&depthBindGroupLayoutDescriptor);
 
-  g_blitPipeline = create_pipeline(
-      {GX_TF_RGBA8, FragPassthrough, webgpu::g_graphicsConfig.surfaceConfiguration.format, "TexCopyConv Blit"},
-      ShaderPreamble, g_bindGroupLayout);
+  // Native RAM readback uses RGBA even when the EFB/surface uses BGRA.
+  // Build both variants here; frame workers only read the completed map. Only the surface's own
+  // format besides RGBA: the Switch's deko3d shim has no BGRA.
+  for (const auto format : {wgpu::TextureFormat::RGBA8Unorm, webgpu::g_graphicsConfig.surfaceConfiguration.format}) {
+    if (!g_blitPipelines.contains(format)) {
+      g_blitPipelines[format] = create_pipeline(
+          {GX_TF_RGBA8, FragPassthrough, format, "TexCopyConv Blit"}, ShaderPreamble, g_bindGroupLayout);
+    }
+  }
   for (const auto& conv : ConvPipelines) {
     g_pipelines[conv.fmt] = create_pipeline(conv, ShaderPreamble, g_bindGroupLayout);
     if (conv.outputFormat != to_wgpu(conv.fmt)) {
@@ -523,7 +529,7 @@ void initialize() {
 
 void shutdown() {
   g_pipelines.clear();
-  g_blitPipeline = {};
+  g_blitPipelines.clear();
   g_bindGroupLayout = {};
   g_depthBindGroupLayout = {};
   g_nearestSampler = {};
@@ -605,6 +611,19 @@ void run(const wgpu::CommandEncoder& cmd, const ConvRequest& req) {
   execute(cmd, req, it->second);
 }
 
-void blit(const wgpu::CommandEncoder& cmd, const ConvRequest& req) { execute(cmd, req, g_blitPipeline); }
+void blit(const wgpu::CommandEncoder& cmd, const ConvRequest& req) {
+  auto it = g_blitPipelines.find(req.dst->format);
+  if (it == g_blitPipelines.end()) UNLIKELY {
+    // Keep the old single-pipeline behavior rather than abort on a format nobody built.
+    static bool warned = false;
+    if (!warned) {
+      warned = true;
+      Log.warn("No blit pipeline for destination format {}; using the surface format's",
+               static_cast<int>(req.dst->format));
+    }
+    it = g_blitPipelines.find(webgpu::g_graphicsConfig.surfaceConfiguration.format);
+  }
+  execute(cmd, req, it->second);
+}
 
 } // namespace aurora::gfx::tex_copy_conv

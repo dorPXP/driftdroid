@@ -1,22 +1,19 @@
 package com.driftdroid.android
 
 import android.app.Activity
-import android.app.AlertDialog
 import android.content.Intent
-import android.graphics.Color
 import android.net.Uri
 import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
-import android.widget.Button
-import android.widget.CheckBox
-import android.widget.EditText
 import android.widget.LinearLayout
-import android.widget.ScrollView
 import android.widget.TextView
 import androidx.recyclerview.widget.ItemTouchHelper
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
+import com.driftdroid.android.ui.DriftSheet
+import com.driftdroid.android.ui.DriftUi
+import com.driftdroid.android.ui.PillSwitch
 import java.io.File
 import java.util.zip.ZipInputStream
 
@@ -182,29 +179,26 @@ object ModManager {
     /** Call from the activity's onActivityResult for [REQUEST_CODE_PICK_ZIP]. */
     fun onZipPicked(activity: Activity, uri: Uri?) {
         if (uri == null) return
-        val nameInput = EditText(activity)
-        nameInput.hint = "Mod name"
-        AlertDialog.Builder(activity)
-            .setTitle("Name this mod")
-            .setView(nameInput)
-            .setPositiveButton("Import") { _, _ ->
-                val name = nameInput.text?.toString().orEmpty()
-                val progress = AlertDialog.Builder(activity)
-                    .setTitle("Importing mod...")
-                    .setCancelable(false)
-                    .show()
-                importZip(activity, uri, name) { error ->
-                    progress.dismiss()
-                    if (error != null) {
-                        AlertDialog.Builder(activity).setTitle("Import failed").setMessage(error)
-                            .setPositiveButton("OK", null).show()
-                    } else {
-                        showManagerDialog(activity)
-                    }
+        val sheet = DriftSheet(activity, T("Name this mod"), compact = true)
+        val nameInput = sheet.textField("Mod name")
+        sheet.button("Cancel") { sheet.dismiss() }
+        sheet.button("Import", DriftUi.Style.PRIMARY) {
+            val name = nameInput.text?.toString().orEmpty()
+            sheet.dismiss()
+            val progress = DriftSheet(activity, T("Importing mod..."), compact = true)
+            progress.progress()
+            progress.dialog.setCancelable(false)
+            progress.show()
+            importZip(activity, uri, name) { error ->
+                progress.dismiss()
+                if (error != null) {
+                    DriftSheet.message(activity, "Import failed", error)
+                } else {
+                    showManagerDialog(activity)
                 }
             }
-            .setNegativeButton("Cancel", null)
-            .show()
+        }
+        sheet.show()
     }
 
     // The dialog currently on screen, if any. Every refresh (after import/delete/toggle) used to
@@ -213,70 +207,41 @@ object ModManager {
     // stacked ON TOP of the still-open, stale pre-import one, so closing it (which looked like
     // "close the dialog") actually just revealed the stale copy underneath, making the import look
     // like it never took effect until the user backed out and reopened the whole thing fresh.
-    private var currentDialog: AlertDialog? = null
+    private var currentDialog: DriftSheet? = null
 
-    /** Lists installed mods with enable/disable + delete, and an Import button. Restart-required
-     * note matches the same limitation Retro Rewind's own install/update flow already has. */
+    /** Lists installed mods with on/off switches, drag handles and delete, and an Import button.
+     * Restart-required note matches the same limitation Retro Rewind's own install/update flow
+     * already has. */
     fun showManagerDialog(activity: Activity) {
         currentDialog?.dismiss()
         val dp: (Int) -> Int = { (it * activity.resources.displayMetrics.density).toInt() }
-        val container = LinearLayout(activity)
-        container.orientation = LinearLayout.VERTICAL
-        val pad = dp(16)
-        container.setPadding(pad, pad, pad, pad)
-
-        val note = TextView(activity)
-        note.text = "Enabled mods load next time you start a race. Higher mods in the list win " +
-            "when two mods replace the same file."
-        note.setTextColor(Color.GRAY)
-        note.textSize = 13f
-        note.setPadding(0, 0, 0, dp(12))
-        container.addView(note)
-
+        val sheet = DriftSheet(activity, "Mods")
+        sheet.note(
+            "Turned-on mods load the next time you start a race. Drag ≡ to reorder: a mod higher in " +
+                "the list wins when two replace the same file.",
+        )
         val packs = installedPacks(activity)
-        val emptyLabel = TextView(activity)
-        emptyLabel.text = "No mods installed yet."
-        emptyLabel.setPadding(0, dp(8), 0, dp(8))
-        emptyLabel.visibility = if (packs.isEmpty()) View.VISIBLE else View.GONE
-        container.addView(emptyLabel)
-
-        val recyclerView = RecyclerView(activity)
-        recyclerView.layoutManager = LinearLayoutManager(activity)
-        recyclerView.visibility = if (packs.isEmpty()) View.GONE else View.VISIBLE
-        val adapter = PackAdapter(activity, packs.toMutableList())
-        recyclerView.adapter = adapter
-        val itemTouchHelper = ItemTouchHelper(DragCallback(adapter))
-        itemTouchHelper.attachToRecyclerView(recyclerView)
-        adapter.dragStarter = { holder -> itemTouchHelper.startDrag(holder) }
-        // Bounded rather than wrap_content: RecyclerView would otherwise measure every row
-        // unbounded and grow the dialog past the screen with enough mods installed. Fixed height
-        // here means the LIST scrolls internally - the outer ScrollView below (wrapping the whole
-        // dialog body, note/button included) handles the separate case where even a short list
-        // plus the surrounding text doesn't fit a small/landscape screen. Missing that outer
-        // ScrollView is exactly what broke this before: an AlertDialog's setView content is NOT
-        // auto-wrapped in a scroll container the way plain setMessage() text is, so on a screen
-        // too short for note + list + button, the button (and part of the list) just got clipped
-        // off entirely with nothing to scroll - looked like "mods disappeared and there's no
-        // Import button" when every mod was actually still on disk and in .mod_order untouched.
-        container.addView(recyclerView, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(220)))
-
-        val importButton = Button(activity)
-        importButton.text = "Import Mod (.zip)"
-        importButton.setPadding(0, dp(16), 0, 0)
-        importButton.setOnClickListener { startPickZip(activity) }
-        container.addView(importButton)
-
-        val scroll = ScrollView(activity)
-        scroll.addView(container)
-
-        val dialog =
-            AlertDialog.Builder(activity)
-                .setTitle("Mods")
-                .setView(scroll)
-                .setPositiveButton("Close", null)
-                .setOnDismissListener { if (currentDialog === it) currentDialog = null }
-                .show()
-        currentDialog = dialog
+        if (packs.isEmpty()) {
+            sheet.note("No mods yet. Import one from a .zip (for example a GameBanana download).")
+        } else {
+            val recyclerView = RecyclerView(activity)
+            recyclerView.layoutManager = LinearLayoutManager(activity)
+            recyclerView.overScrollMode = View.OVER_SCROLL_NEVER
+            val adapter = PackAdapter(activity, packs.toMutableList())
+            recyclerView.adapter = adapter
+            val itemTouchHelper = ItemTouchHelper(DragCallback(adapter))
+            itemTouchHelper.attachToRecyclerView(recyclerView)
+            adapter.dragStarter = { holder -> itemTouchHelper.startDrag(holder) }
+            // Bounded height: the list scrolls inside the sheet instead of growing past the screen.
+            recyclerView.layoutParams =
+                LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(minOf(packs.size, 5) * 64))
+            sheet.custom(recyclerView)
+        }
+        sheet.button("Import .zip") { startPickZip(activity) }
+        sheet.button("Done", DriftUi.Style.PRIMARY) { sheet.dismiss() }
+        sheet.onDismiss = { if (currentDialog === sheet) currentDialog = null }
+        sheet.show()
+        currentDialog = sheet
     }
 
     // Drag-to-reorder priority: a dedicated "≡" handle per row starts the drag (rather than
@@ -289,7 +254,7 @@ object ModManager {
 
         var dragStarter: ((RecyclerView.ViewHolder) -> Unit)? = null
 
-        class VH(val row: LinearLayout, val handle: TextView, val checkBox: CheckBox, val deleteButton: Button) :
+        class VH(val row: LinearLayout, val handle: TextView, val name: TextView, val toggle: PillSwitch, val deleteButton: TextView) :
             RecyclerView.ViewHolder(row)
 
         override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): VH {
@@ -297,33 +262,46 @@ object ModManager {
             val row = LinearLayout(activity)
             row.orientation = LinearLayout.HORIZONTAL
             row.gravity = android.view.Gravity.CENTER_VERTICAL
-            row.setPadding(0, dp(6), 0, dp(6))
+            row.setPadding(dp(6), 0, dp(12), 0)
+            row.background = DriftUi.pressable(activity, DriftUi.ROW)
+            row.layoutParams =
+                RecyclerView.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(58)).apply { bottomMargin = dp(6) }
 
             val handle = TextView(activity)
             handle.text = "≡"
-            handle.textSize = 20f
-            handle.setPadding(dp(4), 0, dp(12), 0)
+            handle.textSize = 22f
+            handle.setTextColor(DriftUi.MUTED)
+            handle.setPadding(dp(10), 0, dp(12), 0)
             row.addView(handle)
 
-            val checkBox = CheckBox(activity)
-            val checkParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
-            row.addView(checkBox, checkParams)
+            val name = TextView(activity)
+            name.textSize = 16f
+            name.setTextColor(DriftUi.TEXT)
+            name.isSingleLine = true
+            name.ellipsize = android.text.TextUtils.TruncateAt.END
+            row.addView(name, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
 
-            val deleteButton = Button(activity)
-            deleteButton.text = "Delete"
-            row.addView(deleteButton)
+            val toggle = PillSwitch(activity)
+            row.addView(toggle, LinearLayout.LayoutParams(dp(52), dp(30)).apply { marginStart = dp(10) })
 
-            return VH(row, handle, checkBox, deleteButton)
+            val deleteButton = DriftUi.button(activity, "Delete", DriftUi.Style.DANGER) {}
+            deleteButton.textSize = 13f
+            deleteButton.minHeight = dp(38)
+            row.addView(deleteButton, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, dp(38)).apply { marginStart = dp(10) })
+
+            return VH(row, handle, name, toggle, deleteButton)
         }
 
         override fun getItemCount(): Int = items.size
 
         override fun onBindViewHolder(holder: VH, position: Int) {
             val pack = items[position]
-            holder.checkBox.text = pack.name
-            holder.checkBox.setOnCheckedChangeListener(null)
-            holder.checkBox.isChecked = pack.enabled
-            holder.checkBox.setOnCheckedChangeListener { _, checked -> setEnabled(pack, checked) }
+            holder.name.text = pack.name
+            holder.toggle.isOn = pack.enabled
+            holder.row.setOnClickListener {
+                holder.toggle.isOn = !holder.toggle.isOn
+                setEnabled(pack, holder.toggle.isOn)
+            }
 
             holder.handle.setOnTouchListener { _, event ->
                 if (event.action == MotionEvent.ACTION_DOWN) {
@@ -333,19 +311,15 @@ object ModManager {
             }
 
             holder.deleteButton.setOnClickListener {
-                AlertDialog.Builder(activity)
-                    .setTitle("Delete \"${pack.name}\"?")
-                    .setPositiveButton("Delete") { _, _ ->
-                        val index = items.indexOf(pack)
-                        if (index >= 0) {
-                            items.removeAt(index)
-                            notifyItemRemoved(index)
-                            delete(pack)
-                            setOrder(activity, items.map { it.name })
-                        }
+                DriftSheet.confirm(activity, T("Delete \"%s\"?").format(pack.name), "The mod's files are removed from the app.", "Delete", danger = true) {
+                    val index = items.indexOf(pack)
+                    if (index >= 0) {
+                        items.removeAt(index)
+                        notifyItemRemoved(index)
+                        delete(pack)
+                        setOrder(activity, items.map { it.name })
                     }
-                    .setNegativeButton("Cancel", null)
-                    .show()
+                }
             }
         }
 

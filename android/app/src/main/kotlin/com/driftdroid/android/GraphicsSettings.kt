@@ -1,7 +1,8 @@
 package com.driftdroid.android
 
 import android.app.Activity
-import android.app.AlertDialog
+import com.driftdroid.android.ui.DriftSheet
+import com.driftdroid.android.ui.DriftUi
 import java.io.File
 
 /**
@@ -22,14 +23,14 @@ object GraphicsSettings {
         listOf(
             Option(
                 "auto",
-                "Automatic (recommended)",
-                "Vulkan when the device supports it, OpenGL ES otherwise.",
+                T("Automatic (recommended)"),
+                T("Vulkan when the device supports it, OpenGL ES otherwise."),
             ),
-            Option("vulkan", "Vulkan", "Fastest on devices with a working Vulkan driver."),
+            Option("vulkan", "Vulkan", T("Fastest on devices with a working Vulkan driver.")),
             Option(
                 "opengles",
                 "OpenGL ES",
-                "For devices whose Vulkan driver is missing or broken. Slower, but it runs.",
+                T("For devices whose Vulkan driver is missing or broken. Slower, but it runs."),
             ),
         )
 
@@ -69,19 +70,31 @@ object GraphicsSettings {
         }
     }
 
+    /** One panel: the graphics choice (saved on tap), vertical mode and the GPU driver. Each
+     * applies the next time the game starts. */
     fun show(activity: Activity) {
+        val sheet = DriftSheet(activity, "Graphics", T("Changes apply the next time the game starts"))
         val current = currentValue(activity)
-        var selected = options.indexOfFirst { it.value == current }.coerceAtLeast(0)
-        val labels = options.map { "${it.label}\n${it.description}" }.toTypedArray()
-
-        AlertDialog.Builder(activity)
-            .setTitle("Graphics")
-            .setSingleChoiceItems(labels, selected) { _, which -> selected = which }
-            .setNegativeButton("Cancel", null)
-            .setNeutralButton("GPU driver...") { _, _ -> GpuDriverSettings.show(activity) }
-            .setPositiveButton("Save") { _, _ ->
-                write(activity, options[selected].value)
-            }
-            .show()
+        sheet.section("Drawing")
+        val rows = ArrayList<android.widget.LinearLayout>()
+        options.forEachIndexed { index, option ->
+            rows +=
+                sheet.radio(option.label, option.description, option.value == current) {
+                    write(activity, option.value)
+                    rows.forEachIndexed { i, row -> sheet.setPicked(row, i == index) }
+                }
+        }
+        sheet.section("More")
+        sheet.toggle(
+            "Vertical mode",
+            "Experimental: play upright like Mario Kart Tour. The touch controls get their own layout.",
+            VerticalMode.isEnabled(activity),
+        ) { VerticalMode.setEnabled(activity, it) }
+        sheet.action("GPU driver", "Snapdragon phones only") {
+            sheet.dismiss()
+            GpuDriverSettings.show(activity)
+        }
+        sheet.button("Done", DriftUi.Style.PRIMARY) { sheet.dismiss() }
+        sheet.show()
     }
 }

@@ -1,0 +1,171 @@
+# Strings the extractor cannot see (used through tables or conditionals). One per line.
+# Quick panel
+Vibration
+Show FPS
+Tilt steer
+Shake trick
+Music
+All settings
+Touch buttons
+Motion
+Quick settings
+On
+Off
+Playing
+Paused
+No track
+Shown
+Hidden
+# Button hints
+Change
+Close
+Resume
+Flip
+# Drawer pages
+Display
+Controls
+Sound
+Advanced
+# Player names and controller types
+Player 1
+Player 2
+Player 3
+Player 4
+Pro Controller
+Joy-Cons on the console
+Two Joy-Cons
+Left Joy-Con
+Right Joy-Con
+GameCube controller
+Controller
+# Tables
+Auto (window size)
+Native (1x)
+Widescreen (16:9)
+4:3 (original Wii)
+Windowed
+Borderless fullscreen
+Exclusive fullscreen
+Off
+120 FPS
+180 FPS
+None
+Waiting for media playback detection...
+Media playback detection is unavailable.
+Nothing playing
+# Language setting
+Language
+Automatic
+Applies the next time the game starts.
+# Android
+Language...
+The game's menus follow it the next time the game starts.
+# Switch launcher
+Download Retro Rewind (1.8 GB)
+Kart Channel
+Import your own Mario Kart Wii (PAL) disc image to get started.
+Mario Kart Wii (PAL) is ready to play.
+A previous import did not complete. Import again to finish it.
+This version needs your game files unpacked again.
+Mario Kart Wii (PAL) and the Retro Rewind pack are ready.
+The Retro Rewind pack is not on the SD card yet. Select the banner to download it.
+Install with ISO/WBFS
+Needs RetroRewind.nro
+Install the game first
+Put RetroRewind.nro in /switch/WiiCompiled on the SD card.
+Install Mario Kart Wii first.
+Could not start Retro Rewind from here.
+Reinstall game...
+Import game...
+Mods...
+Mii data...
+Browse SD card...
+Quit
+Select
+Import game
+Choose your Mario Kart Wii (PAL) disc image
+No disc images found
+Copy your Mario Kart Wii (PAL) .wbfs or .iso file to the SD card,
+Or use Browse below to pick a file stored anywhere on the card.
+Not a readable Wii disc image
+Only PAL Mario Kart Wii (game ID RMCP01) is supported.
+Browse the SD card...
+Pick a disc image stored somewhere else
+Back
+Install Mario Kart Wii?
+This replaces the game data that is already installed.
+It takes about 6 minutes. Keep the console on.
+Cancel
+Install
+Preparing...
+Keep the console on and leave the SD card in.
+Installing
+Download Retro Rewind again?
+Download Retro Rewind?
+Continues the download that was started before.
+About 1.8 GB to download; needs Wi-Fi and 2.3 GB free on the SD card.
+It can take 10 to 30 minutes. Keep the console on.
+The pack you have now stays in use until the new one is complete.
+Continue
+Download
+Downloading Retro Rewind
+Stopping...
+Connection lost. Trying again...
+Stop (progress is kept)
+Installed
+Download not finished
+Install failed
+Retro Rewind is ready.
+Mario Kart Wii is ready to play.
+Try again
+Back to menu
+Play now
+Back to import
+Mods
+Unpacking a mod that was copied over as a .zip file.
+Folders in /switch/WiiCompiled/Mods. The one at the top wins when two change the same file.
+No mods yet.
+Copy each mod, as a .zip or as its folder (the one with "riivolution" inside),
+Mod changes apply the next time the game starts.
+On / off
+Move up
+Delete
+Mii data
+Everything goes through the folder /switch/WiiCompiled/Mii on the SD card.
+Save my Miis to the SD card
+Copies the game's Mii database there as RFL_DB.dat.
+Add single Miis
+Adds every .rcd, .mii or .miigx file in the folder to a free slot.
+Replace all my Miis
+Uses the RFL_DB.dat in the folder instead. The old one is kept as a backup.
+Up one folder
+Browse SD card
+SD card
+This folder is empty.
+That is not a Wii disc image (.iso, .wbfs or .gcm).
+Open
+Disable bloom
+makes DriftDroid's game files from your own Mario Kart Wii disc
+The 'toolkit' folder is missing. Unpack the whole DriftDroid Builder download, not just the program.
+Unsupported game (ID %s)
+%d parts
+Not enough free space on the SD card: about %s is needed, %s is free. Free up some space on the SD card and try again.
+Unpacks to %s and uses about 2.7 GB.
+Unpacks over %s; little extra space is needed.
+Deleted %s.
+Could not delete %s.
+Press Y again to delete %s from the SD card.
+Mario Kart Wii (PAL)  -  %s
+Game ID %s  -  %s
+unknown
+Version %s, straight from the official Retro Rewind server.
+Wii Wheel
+Base
+Fill
+Knob
+Layouts
+Outline
+Graphics
+Stick
+Tilt
+%s  -  priority %d of %d

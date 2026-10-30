@@ -362,7 +362,7 @@ struct IndirectResolvedDispatchMemoEntry {
     uint32_t address;
     const TranslatedFunctionInfo* info;
 };
-#if defined(__SWITCH__) || defined(__ANDROID__)
+#if defined(MKW_GUEST_STATE_GLOBAL)
 // See g_currentCpuContext: guest dispatch only happens on the emulation thread.
 inline IndirectResolvedDispatchMemoEntry
     g_indirectResolvedDispatchMemo[kIndirectDispatchCacheEntries]{};
@@ -376,13 +376,20 @@ struct IndirectRawDispatchMemoEntry {
     uint32_t address;
     const RawDispatchRecord* record;
 };
-#if defined(__SWITCH__) || defined(__ANDROID__)
+#if defined(MKW_GUEST_STATE_GLOBAL)
 inline IndirectRawDispatchMemoEntry
     g_indirectRawDispatchMemo[kIndirectDispatchCacheEntries]{};
 #else
 inline thread_local IndirectRawDispatchMemoEntry
     g_indirectRawDispatchMemo[kIndirectDispatchCacheEntries]{};
 #endif
+
+// The sound host thread's own memos (see MkwIsSoundCpu): entries are written field by field, so
+// two threads sharing a table could pair one address with another target.
+inline IndirectResolvedDispatchMemoEntry
+    g_soundIndirectResolvedDispatchMemo[kIndirectDispatchCacheEntries]{};
+inline IndirectRawDispatchMemoEntry
+    g_soundIndirectRawDispatchMemo[kIndirectDispatchCacheEntries]{};
 
 class TranslatedFunctionRegistry {
 public:
@@ -400,12 +407,14 @@ public:
         return lookupPublished_.load(std::memory_order_acquire);
     }
     static std::optional<TranslatedFunctionInfo> FindNearestByAddress(uint32_t address);
-    static inline const TranslatedFunctionInfo* FindByAddressPtr(uint32_t address) {
+    static inline const TranslatedFunctionInfo* FindByAddressPtr(uint32_t address,
+                                                                 const CpuContext* cpu = nullptr) {
         if (!lookupPublished_.load(std::memory_order_acquire)) {
             return FindByAddressPtrSlow(address);
         }
 
-        auto& cached = g_indirectResolvedDispatchMemo[
+        auto& cached = (MkwIsSoundCpu(cpu) ? g_soundIndirectResolvedDispatchMemo
+                                           : g_indirectResolvedDispatchMemo)[
             IndirectDispatchCacheIndex(address)];
         if (cached.valid && cached.address == address) {
             return cached.info;
@@ -420,12 +429,14 @@ public:
     // generated-table binary search alongside it pushed the whole function past
     // the inliner's budget and out-of-lined the probe itself, which is the part
     // every bctrl executes.
-    static MKW_PPC_FORCE_INLINE const RawDispatchRecord* FindRawByAddressPtr(uint32_t address) {
+    static MKW_PPC_FORCE_INLINE const RawDispatchRecord* FindRawByAddressPtr(
+        uint32_t address, const CpuContext* cpu = nullptr) {
         if (!lookupPublished_.load(std::memory_order_acquire)) {
             return nullptr;
         }
 
-        auto& cached = g_indirectRawDispatchMemo[
+        auto& cached = (MkwIsSoundCpu(cpu) ? g_soundIndirectRawDispatchMemo
+                                           : g_indirectRawDispatchMemo)[
             IndirectDispatchCacheIndex(address)];
         if (cached.valid && cached.address == address) {
             return cached.record;
@@ -499,7 +510,7 @@ MKW_PPC_FORCE_INLINE bool TryDispatchResolvedCpuTarget(const TranslatedFunctionI
     RecompMod::ScopedTranslatedExecutionAddress translatedExecution(info->address);
     PpcNonvolatileFprGuard fprGuard(cpu, NonvolatileFprGuardMaskFor(info));
     PpcNonvolatileGprGuard gprGuard(cpu, ShouldPreserveNonvolatileGprsForRawCpuCall(info));
-    if (TryGetCpuContext() != cpu) {
+    if (TryGetCpuContext() != cpu && !MkwIsSoundCpu(cpu)) {
         CpuContextScope scope(cpu);
         info->rawCpuInvoker(cpu);
         return true;
@@ -515,7 +526,7 @@ inline bool TryDispatchRawCpuTarget(const RawDispatchRecord* record, CpuContext*
     RecompMod::ScopedTranslatedExecutionAddress translatedExecution(record->address);
     PpcNonvolatileGprGuard gprGuard(cpu, record->preserveNonvolatileGprs);
     PpcNonvolatileFprGuard fprGuard(cpu, record->nonvolatileFprWriteMask);
-    if (TryGetCpuContext() != cpu) {
+    if (TryGetCpuContext() != cpu && !MkwIsSoundCpu(cpu)) {
         CpuContextScope scope(cpu);
         record->entry(cpu);
     } else {
@@ -621,7 +632,7 @@ inline void InvokeDirectCpu(CpuContext* ctx) {
     if constexpr (KnownNativeCpuCall<Target>::kAvailable) {
         const auto invokeKnownNative = [&]() {
             PpcNonvolatileGprGuard gprGuard(cpu);
-            if (TryGetCpuContext() != cpu) {
+            if (TryGetCpuContext() != cpu && !MkwIsSoundCpu(cpu)) {
                 CpuContextScope scope(cpu);
                 KnownNativeCpuCall<Target>::Entry(cpu);
                 return;
@@ -645,7 +656,7 @@ inline void InvokeDirectCpu(CpuContext* ctx) {
 
     if constexpr (KnownTypedNativeCpuCall<Target>::kAvailable) {
         PpcNonvolatileGprGuard gprGuard(cpu);
-        if (TryGetCpuContext() != cpu) {
+        if (TryGetCpuContext() != cpu && !MkwIsSoundCpu(cpu)) {
             CpuContextScope scope(cpu);
             KnownTypedNativeCpuCall<Target>::Invoke(cpu);
         } else {
@@ -673,12 +684,12 @@ inline void InvokeIndirectJump(uint32_t target, CpuContext* ctx) {
     // This is essential for tail calls via bctr where the 'this' pointer (r3)
     // must be passed correctly to the target function.
     CpuContext* cpu = ctx ? ctx : &GetPersistentCpuContext();
-    if (TryDispatchRawCpuTarget(TranslatedFunctionRegistry::FindRawByAddressPtr(target), cpu)) {
+    if (TryDispatchRawCpuTarget(TranslatedFunctionRegistry::FindRawByAddressPtr(target, cpu), cpu)) {
         return;
     }
 
     // Cold fallback for dynamically registered or signature-only targets.
-    const auto* info = TranslatedFunctionRegistry::FindByAddressPtr(target);
+    const auto* info = TranslatedFunctionRegistry::FindByAddressPtr(target, cpu);
     if (info) {
         if (TryDispatchResolvedCpuTarget(info, cpu)) {
             return;
@@ -721,10 +732,10 @@ inline void InvokeIndirectCpu(uint32_t target, CpuContext* ctx) {
         ReportMissingCpuTarget(target, cpu);
     }
     ApplyIndirectRuntimeCallOptions(target, cpu);
-    if (TryDispatchRawCpuTarget(TranslatedFunctionRegistry::FindRawByAddressPtr(target), cpu)) {
+    if (TryDispatchRawCpuTarget(TranslatedFunctionRegistry::FindRawByAddressPtr(target, cpu), cpu)) {
         return;
     }
-    if (TryDispatchResolvedCpuTarget(TranslatedFunctionRegistry::FindByAddressPtr(target), cpu)) {
+    if (TryDispatchResolvedCpuTarget(TranslatedFunctionRegistry::FindByAddressPtr(target, cpu), cpu)) {
         return;
     }
     ReportMissingCpuTarget(target, cpu);

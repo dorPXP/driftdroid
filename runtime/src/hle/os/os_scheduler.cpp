@@ -1,6 +1,13 @@
 // SelectThread scheduler, OSWakeupThread and the OSMutex primitives.
 
 #include <cstdint>
+#include <chrono>
+#include <thread>
+#include <cstdio>
+#include <mutex>
+#include <set>
+#include <utility>
+#include "sound_core.h"
 #include <iostream>
 
 #include "abi_bridge.h"
@@ -481,6 +488,37 @@ extern "C" void OSLockMutex_HLE_801a7ee4(CpuContext* ctx)
     if (mutexPtr == 0) {
         return;
     }
+    if (SoundCore::OnSoundThread()) {
+        if (SoundCore::HandleLockMutex(mutexPtr)) {
+            return;
+        }
+        // Another subsystem's mutex (a DVD stream being closed): stop the emulation thread and
+        // take the guest mutex as the sound thread. If a guest thread holds it, let the world
+        // run until it does not: sleeping here the guest way would switch fibers on this thread.
+        // Which subsystems the sound thread reaches is the open question behind the Retro Rewind
+        // room crash with the sound core on (sound_core.cpp, RouteToHostLocked): each new mutex
+        // and caller goes to the log once.
+        {
+            static std::mutex seenMutex;
+            static std::set<std::pair<uint32_t, uint32_t>> seen;
+            std::lock_guard<std::mutex> lock(seenMutex);
+            if (seen.size() < 64 && seen.insert({mutexPtr, cpu->lr}).second) {
+                std::printf("[sound_core] sound thread takes guest mutex %08X (caller %08X)\n", mutexPtr, cpu->lr);
+                std::fflush(stdout);
+            }
+        }
+        while (true) {
+            SoundCore::StopWorld();
+            const uint32_t owner = ::Memory::Read32(mutexPtr + kMutexOwnerOffset);
+            if (owner == 0 || owner == SoundCore::kSoundThreadObject) {
+                break;
+            }
+            // Also tells the emulation thread, which may be blocked on the sound mutex on behalf
+            // of a different guest thread, that this owner has to run (StopWorld clears it).
+            SoundCore::ResumeWorldWaitingFor(owner);
+            std::this_thread::sleep_for(std::chrono::microseconds(200));
+        }
+    }
 
     const int32_t irqState = OS__DisableInterrupts_801a65ac();
 
@@ -521,6 +559,11 @@ extern "C" void OSLockMutex_HLE_801a7ee4(CpuContext* ctx)
     }
 
     OS__RestoreInterrupts_801a65d4(irqState);
+    if (SoundCore::OnSoundThread()) {
+        return;  // world stays stopped until the matching unlock
+    }
+    // After the guest mutex: that one orders the guest threads, this one the sound host thread.
+    SoundCore::LockFromGuest(cpu, mutexPtr);
 }
 PPC_NATIVE_OVERRIDE_VOID(801A7EE4, OSLockMutex_HLE_801a7ee4, (CpuContext* ctx), (ctx));
 
@@ -530,6 +573,21 @@ extern "C" void OSUnlockMutex_HLE_801a7fc0(CpuContext* ctx)
     const uint32_t mutexPtr = cpu->gpr[3];
     if (mutexPtr == 0) {
         return;
+    }
+    const bool onSoundThread = SoundCore::OnSoundThread();
+    if (onSoundThread) {
+        if (SoundCore::HandleUnlockMutex(mutexPtr)) {
+            return;
+        }
+    } else {
+        // The host half of the sound mutex is released only by an unlock the guest mutex accepts: on
+        // a console an unlock by a thread that does not own the mutex does nothing.
+        uint32_t owner = 0;
+        uint32_t running = 0;
+        if (::Memory::TryRead32(mutexPtr + kMutexOwnerOffset, owner) &&
+            ::Memory::TryRead32(kOSRunningContextAddr, running) && owner == running && owner != 0) {
+            SoundCore::HandleUnlockMutex(mutexPtr);
+        }
     }
 
     const int32_t irqState = OS__DisableInterrupts_801a65ac();
@@ -567,6 +625,9 @@ extern "C" void OSUnlockMutex_HLE_801a7fc0(CpuContext* ctx)
     }
 
     OS__RestoreInterrupts_801a65d4(irqState);
+    if (onSoundThread) {
+        SoundCore::ResumeWorld();
+    }
 }
 PPC_NATIVE_OVERRIDE_VOID(801A7FC0, OSUnlockMutex_HLE_801a7fc0, (CpuContext* ctx), (ctx));
 

@@ -13,6 +13,7 @@
 #include "hle/net/network.h"
 #include "generated/RuntimeConfig.h"
 #include "os_internal.h"
+#include "runtime_debug_flags.h"
 
 extern "C" void func_801AADE0(CpuContext* ctx);
 extern "C" void func_801A0620(CpuContext* ctx);
@@ -160,6 +161,17 @@ extern "C" void OS_HLE_RunDeferredReschedule(CpuContext* cpu)
     RunDeferredReschedule(cpu);
 }
 
+// The alarm / RFL polling code of 1.3.0: callbacks run on the current guest thread's own context, and
+// a thread woken by an alarm callback or a completion is scheduled right away. The Mii library
+// (RFLiIsWorking) depends on this: with the alarm callbacks on a private register copy and woken
+// threads left for the next frame wait, Retro Rewind crashed in MiiHeadsModel::Init on the online
+// globe (the Mii models were not ready yet). new_rfl_pump.flag selects the private-copy version.
+static bool LegacyRflPump()
+{
+    static const bool legacy = !RuntimeDebugFlags::Present("new_rfl_pump.flag");
+    return legacy;
+}
+
 namespace OsHleInternal {
 bool ProcessAlarmQueue(CpuContext* cpu, int maxToProcess)
 {
@@ -240,7 +252,9 @@ bool ProcessAlarmQueue(CpuContext* cpu, int maxToProcess)
                         throw;
                     }
                     DecrementSchedulerDisableCount();
-                    RunDeferredReschedule(cpu);
+                    if (LegacyRflPump()) {
+                        RunDeferredReschedule(cpu);
+                    }
                 }
             }
         } catch (const ::Memory::AccessViolation& e) {
@@ -251,7 +265,7 @@ bool ProcessAlarmQueue(CpuContext* cpu, int maxToProcess)
     // Host DNS workers never touch guest memory. Commit their output here on
     // the scheduler thread, waking synchronous IOS waiters or queuing async IOS
     // callbacks before the callback drain below.
-    bool completionNeedsReschedule = false;
+    bool completionNeedsReschedule = LegacyRflPump() ? false : handledAny;
     if (Network_HLE_ProcessCompletions(cpu)) {
         handledAny = true;
         completionNeedsReschedule = true;
@@ -464,15 +478,36 @@ PPC_NATIVE_OVERRIDE_VOID(801A08E0, OS__SetPeriodicAlarm_801a08e0, (CpuContext* c
 // returning 0 when the manager pointer (0x80386298) is null.
 extern "C" uint32_t RFLiIsWorking_HLE_800bd860()
 {
-    // Pump alarms/callbacks on the current guest thread when available. Using a
-    // detached persistent context here can leave the busy loop waiting on work
-    // that completed on the wrong scheduling context.
-    CpuContext* cpu = TryGetCpuContext();
-    if (!cpu) {
-        cpu = &GetPersistentCpuContext();
+    if (LegacyRflPump()) {
+        CpuContext* legacyCpu = TryGetCpuContext();
+        if (!legacyCpu) {
+            legacyCpu = &GetPersistentCpuContext();
+        }
+        EnsureSda1Base(legacyCpu);
+        ProcessAlarmQueue(legacyCpu, 32);
+    } else {
+        // Alarm callbacks interrupt the caller; keep their register writes private.
+        GuestInterruptCallbackContext interrupt;
+        CpuContext* cpu = interrupt.get();
+        EnsureSda1Base(cpu);
+        IncrementSchedulerDisableCount();
+        try {
+            ProcessAlarmQueue(cpu, 32);
+        } catch (...) {
+            DecrementSchedulerDisableCount();
+            throw;
+        }
+        DecrementSchedulerDisableCount();
+        // The callbacks above ran on a private register copy with the scheduler held, so a thread they
+        // (or the NAND and network completions) woke could not run yet. Left for the next frame wait,
+        // the Mii library's own work thread was still waiting when the game used the Mii models
+        // (Retro Rewind crashed in MiiHeadsModel::Init on the online globe). The game calls this
+        // function at a call boundary, as it calls OSSleepThread, so switching threads with its real
+        // context is safe here.
+        if (CpuContext* callerCpu = TryGetCpuContext()) {
+            RunDeferredReschedule(callerCpu);
+        }
     }
-    EnsureSda1Base(cpu);
-    ProcessAlarmQueue(cpu, 32);
 
     // Now return the actual "working" status
     constexpr uint32_t kRflManagerPtrAddr = 0x80386298u;

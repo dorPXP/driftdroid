@@ -53,14 +53,40 @@ struct CpuContext {
     uint32_t msr;       // Machine State Register
 };
 
-// Switch: guest code only ever runs on the emulation host thread, and every thread_local access
-// there is an out-of-line __aarch64_read_tp call (Horizon resets TPIDR_EL0, so -mtp=el0 is not
-// an option). A plain global keeps this hot variable to one load.
-#if defined(__SWITCH__) || defined(__ANDROID__)
+// The current guest CPU context is per host thread: out-of-line ISA helpers find the registers
+// through it, so the emulation thread and the sound host thread (sound_core.h) each need their
+// own. A thread_local access on Switch is an out-of-line __aarch64_read_tp call (Horizon resets
+// TPIDR_EL0, so -mtp=el0 is not an option), so there it lives in one of libnx's per-thread slots
+// instead, read inline: slot i is at TLS + 0x180 + 8 * i (threadTlsGet). Android keeps a plain
+// global and does not run the sound host thread.
+#if defined(__SWITCH__)
+// TLS offset of the slot. Allocated by MkwAllocCurrentCpuTlsSlot (main.cpp) during static
+// initialisation, before any guest code runs.
+uint32_t MkwAllocCurrentCpuTlsSlot() noexcept;
+inline const uint32_t g_mkwCurrentCpuTlsOffset = MkwAllocCurrentCpuTlsSlot();
+
+MKW_PPC_FORCE_INLINE CpuContext*& MkwCurrentCpuRef() noexcept
+{
+    uint64_t tls;
+    __asm__("mrs %0, tpidrro_el0" : "=r"(tls));
+    return *reinterpret_cast<CpuContext**>(tls + g_mkwCurrentCpuTlsOffset);
+}
+#define g_currentCpuContext (MkwCurrentCpuRef())
+#elif defined(__ANDROID__)
 inline CpuContext* g_currentCpuContext = nullptr;
 #else
 inline thread_local CpuContext* g_currentCpuContext = nullptr;
 #endif
+
+// The sound host thread's one guest CPU context. It is that thread's current context for its
+// whole life (set once, never scoped: CpuContextScope also rewrites the NI mirror, which belongs
+// to the emulation thread), and it selects that thread's own dispatch memos.
+inline CpuContext g_mkwSoundCpuContext{};
+
+MKW_PPC_FORCE_INLINE bool MkwIsSoundCpu(const CpuContext* cpu) noexcept
+{
+    return cpu == &g_mkwSoundCpuContext;
+}
 
 class CpuContextScope {
 public:

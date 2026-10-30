@@ -208,6 +208,12 @@ static std::string color_arg_reg(GXTevColorArg arg, size_t stageIdx, const Shade
   case GX_CC_KONST: {
     switch (stage.kcSel) {
       DEFAULT_FATAL("invalid kcSel {}", underlying(stage.kcSel));
+    // Unsourced encodings evaluate to zero in hardware.
+    case static_cast<GXTevKColorSel>(0x08):
+    case static_cast<GXTevKColorSel>(0x09):
+    case static_cast<GXTevKColorSel>(0x0A):
+    case static_cast<GXTevKColorSel>(0x0B):
+      return "vec3f(0.0)";
     case GX_TEV_KCSEL_8_8:
       return "vec3f(1.0)";
     case GX_TEV_KCSEL_7_8:
@@ -309,6 +315,16 @@ static std::string alpha_arg_reg(GXTevAlphaArg arg, size_t stageIdx, const Shade
   case GX_CA_KONST: {
     switch (stage.kaSel) {
       DEFAULT_FATAL("invalid kaSel {}", underlying(stage.kaSel));
+    // Unsourced encodings evaluate to zero in hardware.
+    case static_cast<GXTevKAlphaSel>(0x08):
+    case static_cast<GXTevKAlphaSel>(0x09):
+    case static_cast<GXTevKAlphaSel>(0x0A):
+    case static_cast<GXTevKAlphaSel>(0x0B):
+    case static_cast<GXTevKAlphaSel>(0x0C):
+    case static_cast<GXTevKAlphaSel>(0x0D):
+    case static_cast<GXTevKAlphaSel>(0x0E):
+    case static_cast<GXTevKAlphaSel>(0x0F):
+      return "0.0";
     case GX_TEV_KASEL_8_8:
       return "1.0";
     case GX_TEV_KASEL_7_8:
@@ -1230,6 +1246,10 @@ wgpu::ShaderModule build_shader(const ShaderConfig& config) noexcept {
     if (tcg.src >= GX_TG_TEX0 && tcg.src <= GX_TG_TEX7) {
       vtxXfrAttrs += fmt::format("\n    var tc{} = vec4f({}, 1.0, 1.0);", i,
                                  vtx_attr(config, GXAttr(GX_VA_TEX0 + (tcg.src - GX_TG_TEX0))));
+    } else if (tcg.src >= GX_TG_TEXCOORD0 && tcg.src <= GX_TG_TEXCOORD6 && tcg.src - GX_TG_TEXCOORD0 < i &&
+               info.sampledTexCoords.test(tcg.src - GX_TG_TEXCOORD0)) {
+      // An earlier texgen's input (aurora 0857ad8); a later or unused one is not declared.
+      vtxXfrAttrs += fmt::format("\n    var tc{} = tc{};", i, (tcg.src - GX_TG_TEXCOORD0));
     } else if (tcg.src == GX_MAX_TEXGENSRC) {
       vtxXfrAttrs += fmt::format("\n    var tc{} = vec4f({}, 1.0, 1.0);", i,
                                  vtx_attr(config, GXAttr(GX_VA_TEX0 + i)));
@@ -1244,9 +1264,10 @@ wgpu::ShaderModule build_shader(const ShaderConfig& config) noexcept {
       // GX source row 4 is Dolphin's binormal group in NBT normal arrays.
       vtxXfrAttrs += fmt::format("\n    var tc{} = vec4f({}, 1.0);", i, normal_group_load(config, 2, vidxAttr));
     } else if (tcg.src == GX_TG_COLOR0) {
-      vtxXfrAttrs += fmt::format("\n    var tc{} = vec4f({}.rgb, 1.0);", i, vtx_attr(config, GX_VA_CLR0));
+      // The lit channel color, not the raw vertex color (aurora e938637).
+      vtxXfrAttrs += fmt::format("\n    var tc{} = out.cc0;", i);
     } else if (tcg.src == GX_TG_COLOR1) {
-      vtxXfrAttrs += fmt::format("\n    var tc{} = vec4f({}.rgb, 1.0);", i, vtx_attr(config, GX_VA_CLR1));
+      vtxXfrAttrs += fmt::format("\n    var tc{} = out.cc1;", i);
     } else
       UNLIKELY FATAL("unhandled tcg src {}", underlying(tcg.src));
     if (tcg.inputFormAB11) {
@@ -1886,8 +1907,22 @@ fn load_u16(p: ptr<storage, array<u32>>, byte_off: u32, le: bool) -> u32 {{
   return bswap16(raw, le);
 }}
 
+fn load_u24_raw(p: ptr<storage, array<u32>>, byte_off: u32) -> u32 {{
+  let word_idx = byte_off >> 2u;
+  let sub = byte_off & 3u;
+  let word = p[word_idx];
+  // Three bytes at offsets zero or one fit entirely in this word. Do not
+  // access the next word: this attribute may end at the binding boundary.
+  if (sub <= 1u) {{
+    return (word >> (sub * 8u)) & 0x00FFFFFFu;
+  }}
+  let next = p[word_idx + 1u];
+  let shift = sub * 8u;
+  return ((word >> shift) | (next << (32u - shift))) & 0x00FFFFFFu;
+}}
+
 fn load_u24(p: ptr<storage, array<u32>>, byte_off: u32, le: bool) -> u32 {{
-  let raw = load_u32_raw(p, byte_off) & 0x00FFFFFFu;
+  let raw = load_u24_raw(p, byte_off);
   if (le) {{
     return raw;
   }}
@@ -1927,7 +1962,7 @@ fn raw_fetch_u8_2(p: ptr<storage, array<u32>>, byte_off: u32) -> vec2u {{
 }}
 
 fn raw_fetch_u8_3(p: ptr<storage, array<u32>>, byte_off: u32) -> vec3u {{
-  let raw = load_u32_raw(p, byte_off);
+  let raw = load_u24_raw(p, byte_off);
   return vec3u(
     extractBits(raw, 0u, 8u),
     extractBits(raw, 8u, 8u),

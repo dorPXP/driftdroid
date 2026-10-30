@@ -296,6 +296,7 @@ static DeferredDnsCompletion ResolveDeferredDns(DeferredDnsWork work) {
         return completion;
     }
 
+    NetFail("dns %s '%s' ok", DeferredDnsKindName(completion.work.kind), completion.work.node.c_str());
     // The host resolver's linked list and sockaddr pointers are owned by its
     // allocator. Normalize everything to POD before leaving the worker.
     const size_t maxAddresses = completion.work.kind == DeferredDnsKind::GetHostByName
@@ -1156,12 +1157,12 @@ bool Network_HLE_ProcessCompletions(CpuContext* cpu) {
         // Every blocking connect settles here exactly once, whether it was
         // resolved at submission, probed, timed out or aborted by a close - so
         // this is the single place a failed WFC connect becomes visible.
-        if (result != 0) {
+        {
             char peer[INET_ADDRSTRLEN]{};
             inet_ntop(AF_INET, &work.peerAddress.sin_addr, peer, sizeof(peer));
-            NetFail("SO_CONNECT fd=%u -> %s:%u FAILED wii=%d", work.wiiFd,
-                    peer[0] ? peer : "0.0.0.0",
-                    static_cast<unsigned>(ntohs(work.peerAddress.sin_port)), result);
+            NetFail("SO_CONNECT fd=%u -> %s:%u %s wii=%d", work.wiiFd, peer[0] ? peer : "0.0.0.0",
+                    static_cast<unsigned>(ntohs(work.peerAddress.sin_port)), result != 0 ? "FAILED" : "ok",
+                    result);
         }
         it = store.pendingConnects.erase(it);
         DeliverDeferredNetworkResult(cpu, store, route, result);

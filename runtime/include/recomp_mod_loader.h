@@ -7,6 +7,8 @@
 #include <string_view>
 #include <vector>
 
+#include "isa/ppc_isa_config.h"
+
 struct CpuContext;
 
 namespace RecompMod {
@@ -24,7 +26,7 @@ struct MemoryReservation {
 // Defined here as `inline thread_local` with a constant initializer, not `extern thread_local`
 // in the .cpp: every indirect dispatch scopes this, so an out-of-line ctor/dtor would cost two
 // un-inlinable calls plus a register spill each for three instructions of work.
-#if defined(__SWITCH__) || defined(__ANDROID__)
+#if defined(MKW_GUEST_STATE_GLOBAL)
 inline uint32_t g_currentTranslatedExecutionAddress = 0;  // see g_currentCpuContext
 #else
 inline thread_local uint32_t g_currentTranslatedExecutionAddress = 0;

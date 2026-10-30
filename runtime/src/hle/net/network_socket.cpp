@@ -29,6 +29,7 @@ static int32_t NewWiiSocket(uint32_t af, uint32_t type, uint32_t protocol) {
                      sizeof(nodelay));
     }
     const int32_t wiiFd = AddWiiSocket(s, nativeAf, nativeType, static_cast<int>(protocol));
+    NetFail("socket fd=%d af=%u type=%u proto=%u host=%d", wiiFd, af, type, protocol, hostError);
     if (wiiFd < 0) {
         NetFail("SO_SOCKET af=%u type=%u proto=%u failed host=%d wii=%d", af, type, protocol,
                 hostError, wiiFd);
@@ -195,6 +196,10 @@ int32_t HandleIpTopIoctl(uint32_t cmd, uint32_t inBuf, uint32_t inLen, uint32_t 
             ? bind(s->native, reinterpret_cast<sockaddr*>(&addr), sizeof(addr))
             : connect(s->native, reinterpret_cast<sockaddr*>(&addr), sizeof(addr));
         int32_t result = 0;
+        if (cmd == IOCTL_SO_BIND) {
+            NetFail("bind fd=%u port=%u -> %d (host %d)", Memory::Read32(inBuf), static_cast<unsigned>(ntohs(addr.sin_port)),
+                    ret, ret < 0 ? NativeLastError() : 0);
+        }
         if (cmd == IOCTL_SO_CONNECT && ret < 0) {
             // Nonblocking connects only (blocking ones go through
             // Network_HLE_StartIoctl*). Dolphin passes the raw error through here
@@ -262,7 +267,16 @@ int32_t HandleIpTopIoctl(uint32_t cmd, uint32_t inBuf, uint32_t inLen, uint32_t 
         const int optname = MapSockOptName(Memory::Read32(inBuf + 8));
         const uint32_t optLen = std::min<uint32_t>(Memory::Read32(inBuf + 0x0C), inLen - 0x10);
         const char* optVal = reinterpret_cast<const char*>(Memory::GetPointer(inBuf + 0x10, optLen));
-        return SocketResult(setsockopt(s->native, level, optname, optVal, static_cast<int>(optLen)), false);
+        const int ret = setsockopt(s->native, level, optname, optVal, static_cast<int>(optLen));
+        if (ret < 0) {
+            uint32_t value = 0;
+            if (optVal != nullptr && optLen >= 4) {
+                std::memcpy(&value, optVal, 4);
+            }
+            NetFail("setsockopt fd=%u wii level=%#x name=%#x len=%u value=%u -> host errno %d", Memory::Read32(inBuf),
+                    Memory::Read32(inBuf + 4), Memory::Read32(inBuf + 8), optLen, value, NativeLastError());
+        }
+        return SocketResult(ret, false);
     }
     case IOCTL_SO_LISTEN: {
         if (!inBuf || inLen < 8) return -SO_EINVAL;
@@ -487,6 +501,15 @@ int32_t HandleIpTopIoctlv(uint32_t cmd, const std::vector<IoVector>& in, const s
         if (patchedWrite && ret == static_cast<int>(sendSize)) {
             result = static_cast<int32_t>(in[0].size);
         }
+        if (s->type == SOCK_DGRAM) {
+            static std::atomic<uint32_t> udpSends{0};
+            if (udpSends.fetch_add(1, std::memory_order_relaxed) < 60) {
+                char ip[INET_ADDRSTRLEN]{};
+                inet_ntop(AF_INET, &dest.sin_addr, ip, sizeof(ip));
+                NetFail("udp send fd=%u -> %s:%u size=%u -> %d (host %d)", fd, destPtr ? ip : "(connected)",
+                        destPtr ? static_cast<unsigned>(ntohs(dest.sin_port)) : 0u, sendSize, result, hostError);
+            }
+        }
         // A blocked send is routine; anything else aborts the connection, and
         // the SDK retries it, so only a change of error is reported.
         if (ret < 0 && result != -SO_EAGAIN && result != s->lastLoggedSendError) {
@@ -549,6 +572,15 @@ int32_t HandleIpTopIoctlv(uint32_t cmd, const std::vector<IoVector>& in, const s
         }
 
         const int32_t result = ret >= 0 ? SocketResult(ret) : SocketErrorResult(nativeErr);
+        if (s->type == SOCK_DGRAM && ret >= 0) {
+            static std::atomic<uint32_t> udpRecvs{0};
+            if (udpRecvs.fetch_add(1, std::memory_order_relaxed) < 60) {
+                char ip[INET_ADDRSTRLEN]{};
+                inet_ntop(AF_INET, &from.sin_addr, ip, sizeof(ip));
+                NetFail("udp recv fd=%u <- %s:%u size=%d", fd, fromPtr ? ip : "(unknown)",
+                        fromPtr ? static_cast<unsigned>(ntohs(from.sin_port)) : 0u, ret);
+            }
+        }
         if (ret < 0 && result != -SO_EAGAIN && result != s->lastLoggedRecvError) {
             s->lastLoggedRecvError = result;
             NetFail("recv failed fd=%u host=%d wii=%d", fd, nativeErr, result);

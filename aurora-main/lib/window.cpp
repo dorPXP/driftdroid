@@ -7,6 +7,7 @@
 #include "input.hpp"
 #include "internal.hpp"
 
+#include <cstdlib>
 #include <aurora/aurora.h>
 #include <aurora/event.h>
 #include <aurora/gfx.h>
@@ -551,8 +552,11 @@ void show_window() {
 
 bool initialize() {
   /* We don't want to initialize anything input related here, otherwise the add events will get lost to the void */
-  TRY(SDL_SetHint(SDL_HINT_ORIENTATIONS, "LandscapeLeft LandscapeRight"), "Error setting {}: {}", SDL_HINT_ORIENTATIONS,
-      SDL_GetError());
+  // Android vertical mode (VerticalMode.kt sets DRIFTDROID_VERTICAL before the game starts).
+  const char* vertical = std::getenv("DRIFTDROID_VERTICAL");
+  const bool portrait = vertical != nullptr && vertical[0] == '1';
+  TRY(SDL_SetHint(SDL_HINT_ORIENTATIONS, portrait ? "Portrait PortraitUpsideDown" : "LandscapeLeft LandscapeRight"),
+      "Error setting {}: {}", SDL_HINT_ORIENTATIONS, SDL_GetError());
 #if defined(__SWITCH__)
   // SDL3 has no Switch video backend. Presentation goes through deko3d on nwindowGetDefault()
   // regardless, so SDL only needs to supply a window object and event loop; its offscreen driver

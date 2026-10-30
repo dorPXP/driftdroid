@@ -6,7 +6,9 @@
 #include <dolphin/si.h>
 #include <SDL3/SDL_mouse.h>
 
+#include <algorithm>
 #include <array>
+#include <atomic>
 #include <sys/stat.h>
 #include <ranges>
 
@@ -300,6 +302,19 @@ bool is_mouse_button_pressed(const s32 scancode) {
   float x, y;
   const auto buttons = SDL_GetMouseState(&x, &y);
   return (buttons & 1u << (buttonNum - 1)) != 0u;
+}
+
+std::atomic<bool> g_rumbleEnabled{true};
+std::atomic<uint32_t> g_rumbleStrengthPercent{100};
+std::atomic<PADDeviceRumbleCallback> g_deviceRumble{nullptr};
+std::atomic<uint32_t> g_deviceRumbleStrength{0};
+
+void set_device_rumble(uint32_t strengthPercent) {
+  const auto callback = g_deviceRumble.load(std::memory_order_relaxed);
+  if (callback != nullptr && g_deviceRumbleStrength.exchange(strengthPercent, std::memory_order_relaxed) !=
+                                 strengthPercent) {
+    callback(strengthPercent);
+  }
 }
 } // namespace
 
@@ -629,6 +644,20 @@ static Sint16 _get_axis_value(const aurora::input::GameController* controller, /
   return 0;
 }
 
+// SDL button, or one of the PAD_NATIVE_BUTTON_*_TRIGGER pseudo-buttons (GitHub issue #15: L2/R2
+// could not be remapped because they are axes, not buttons).
+static bool native_button_pressed(const aurora::input::GameController* controller, const u32 nativeButton) {
+  if (nativeButton == PAD_NATIVE_BUTTON_LEFT_TRIGGER) {
+    return SDL_GetGamepadAxis(controller->m_controller, SDL_GAMEPAD_AXIS_LEFT_TRIGGER) >
+           controller->m_deadZones.leftTriggerActivationZone;
+  }
+  if (nativeButton == PAD_NATIVE_BUTTON_RIGHT_TRIGGER) {
+    return SDL_GetGamepadAxis(controller->m_controller, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER) >
+           controller->m_deadZones.rightTriggerActivationZone;
+  }
+  return SDL_GetGamepadButton(controller->m_controller, static_cast<SDL_GamepadButton>(nativeButton));
+}
+
 static void neutralize_status(PADStatus& status) {
   status.button = 0;
   status.stickX = 0;
@@ -686,6 +715,77 @@ u32 PADRead(PADStatus* status) {
     // Unattended test runs on desktop: MKW_TEST_PAD_AUTOPRESS=<seconds> makes port 0 a pad that,
     // after that many seconds, holds A for 900 ms of every second. That walks the menus into a
     // Grand Prix and keeps accelerating, with no window focus or real controller needed.
+    // MKW_TEST_PAD_SCRIPT="12000:A;16000:A;22000:D;22500:D;23500:A" presses the listed buttons
+    // (A B U D L R S=start, X Y, I=L trigger) for 200 ms at each time in milliseconds since the first
+    // read, or for <n> ms with a "+<n>" suffix ("60000:I+3000" holds L for 3 s).
+    if (i == 0) {
+      struct ScriptStep {
+        long long ms;
+        uint16_t buttons;
+        long long holdMs;
+      };
+      static const std::vector<ScriptStep> script = [] {
+        std::vector<ScriptStep> steps;
+        const char* value = std::getenv("MKW_TEST_PAD_SCRIPT");
+        if (value == nullptr) {
+          return steps;
+        }
+        const char* p = value;
+        while (*p != 0) {
+          char* end = nullptr;
+          const long long ms = std::strtoll(p, &end, 10);
+          uint16_t buttons = 0;
+          p = (*end == ':') ? end + 1 : end;
+          for (; *p != 0 && *p != ';'; ++p) {
+            switch (*p) {
+            case 'A': buttons |= PAD_BUTTON_A; break;
+            case 'B': buttons |= PAD_BUTTON_B; break;
+            case 'U': buttons |= PAD_BUTTON_UP; break;
+            case 'D': buttons |= PAD_BUTTON_DOWN; break;
+            case 'L': buttons |= PAD_BUTTON_LEFT; break;
+            case 'R': buttons |= PAD_BUTTON_RIGHT; break;
+            case 'S': buttons |= PAD_BUTTON_START; break;
+            case 'X': buttons |= PAD_BUTTON_X; break;
+            case 'Y': buttons |= PAD_BUTTON_Y; break;
+            case 'I': buttons |= PAD_TRIGGER_L; break;
+            default: break;
+            }
+            if (p[1] == '+') {
+              break;
+            }
+          }
+          long long holdMs = 200;
+          if (*p != 0 && p[1] == '+') {
+            holdMs = std::strtoll(p + 2, &end, 10);
+            p = end;
+          }
+          steps.push_back({ms, buttons, holdMs});
+          if (*p == ';') {
+            ++p;
+          }
+        }
+        return steps;
+      }();
+      if (!script.empty()) {
+        using TestClock = std::chrono::steady_clock;
+        static const TestClock::time_point start = TestClock::now();
+        const auto elapsed =
+            std::chrono::duration_cast<std::chrono::milliseconds>(TestClock::now() - start).count();
+        status[i].err = PAD_ERR_NONE;
+        for (const ScriptStep& step : script) {
+          if (elapsed >= step.ms && elapsed < step.ms + step.holdMs) {
+            status[i].button |= step.buttons;
+            if ((step.buttons & PAD_TRIGGER_L) != 0) {
+              status[i].triggerL = 255;
+            }
+          }
+        }
+        // TEMP-WHEEL: with MKW_TEST_PAD_AUTOPRESS also set, the autopress below adds its A presses.
+        if (std::getenv("MKW_TEST_PAD_AUTOPRESS") == nullptr) {
+          continue;
+        }
+      }
+    }
     if (i == 0) {
       static const int autoPressDelay = [] {
         const char* value = std::getenv("MKW_TEST_PAD_AUTOPRESS");
@@ -697,8 +797,19 @@ u32 PADRead(PADStatus* status) {
         const auto elapsed =
             std::chrono::duration_cast<std::chrono::milliseconds>(TestClock::now() - start).count();
         status[i].err = PAD_ERR_NONE;
-        if (elapsed >= static_cast<long long>(autoPressDelay) * 1000 && (elapsed % 1000) < 900) {
+        // TEMP-WHEEL: MKW_TEST_PAD_AUTOPRESS_UNTIL=<ms> stops the A presses then.
+        static const long long autoPressUntil = std::getenv("MKW_TEST_PAD_AUTOPRESS_UNTIL")
+                                                    ? std::atoll(std::getenv("MKW_TEST_PAD_AUTOPRESS_UNTIL"))
+                                                    : -1;
+        if (elapsed >= static_cast<long long>(autoPressDelay) * 1000 && (elapsed % 1000) < 900 &&
+            (autoPressUntil < 0 || elapsed < autoPressUntil)) {
           status[i].button |= PAD_BUTTON_A;
+        }
+        // TEMP-WHEEL: MKW_TEST_PAD_ITEM_EVERY=<ms> also presses L for 200 ms every <ms>.
+        static const long long itemEvery = std::getenv("MKW_TEST_PAD_ITEM_EVERY") ? std::atoll(std::getenv("MKW_TEST_PAD_ITEM_EVERY")) : 0;
+        if (itemEvery > 0 && elapsed >= static_cast<long long>(autoPressDelay) * 1000 && (elapsed % itemEvery) < 200) {
+          status[i].button |= PAD_TRIGGER_L;
+          status[i].triggerL = 255;
         }
         continue;
       }
@@ -782,11 +893,19 @@ u32 PADRead(PADStatus* status) {
       EnsureMappingLoaded(controller);
       bool leftTriggerSet = false;
       bool rightTriggerSet = false;
+      // An analog trigger bound to a button stops being the analog L/R.
+      bool leftTriggerRemapped = false;
+      bool rightTriggerRemapped = false;
+      const auto noteTriggerBinding = [&](const u32 nativeButton) {
+        leftTriggerRemapped |= nativeButton == PAD_NATIVE_BUTTON_LEFT_TRIGGER;
+        rightTriggerRemapped |= nativeButton == PAD_NATIVE_BUTTON_RIGHT_TRIGGER;
+      };
       std::ranges::for_each(controller->m_buttonMapping, [&controller, &i, &status, &leftTriggerSet,
-                                                          &rightTriggerSet](const auto& mapping) {
-        if (SDL_GetGamepadButton(controller->m_controller, static_cast<SDL_GamepadButton>(mapping.nativeButton))) {
+                                                          &rightTriggerSet, &noteTriggerBinding](const auto& mapping) {
+        if (mapping.nativeButton != PAD_NATIVE_BUTTON_INVALID && native_button_pressed(controller, mapping.nativeButton)) {
           status[i].button |= mapping.padButton;
         }
+        noteTriggerBinding(mapping.nativeButton);
 
         if (mapping.padButton == PAD_TRIGGER_L && mapping.nativeButton != PAD_NATIVE_BUTTON_INVALID) {
           leftTriggerSet = true;
@@ -797,13 +916,14 @@ u32 PADRead(PADStatus* status) {
       });
 
       std::ranges::for_each(controller->m_altButtonMapping, [&controller, &i, &status, &leftTriggerSet,
-                                                             &rightTriggerSet](const auto& mapping) {
+                                                             &rightTriggerSet, &noteTriggerBinding](const auto& mapping) {
         if (mapping.nativeButton == PAD_NATIVE_BUTTON_INVALID) {
           return;
         }
-        if (SDL_GetGamepadButton(controller->m_controller, static_cast<SDL_GamepadButton>(mapping.nativeButton))) {
+        if (native_button_pressed(controller, mapping.nativeButton)) {
           status[i].button |= mapping.padButton;
         }
+        noteTriggerBinding(mapping.nativeButton);
 
 #if !defined(__SWITCH__)
         if (mapping.padButton == PAD_TRIGGER_L) {
@@ -898,8 +1018,8 @@ u32 PADRead(PADStatus* status) {
       status[i].substickX = static_cast<int8_t>(xr);
       status[i].substickY = static_cast<int8_t>(yr);
 
-      Sint16 tl = std::max(static_cast<Sint16>(0), _get_axis_value(controller, PAD_AXIS_TRIGGER_L));
-      Sint16 tr = std::max(static_cast<Sint16>(0), _get_axis_value(controller, PAD_AXIS_TRIGGER_R));
+      Sint16 tl = leftTriggerRemapped ? 0 : std::max(static_cast<Sint16>(0), _get_axis_value(controller, PAD_AXIS_TRIGGER_L));
+      Sint16 tr = rightTriggerRemapped ? 0 : std::max(static_cast<Sint16>(0), _get_axis_value(controller, PAD_AXIS_TRIGGER_R));
 
       if (controller->m_deadZones.emulateTriggers) {
         if (!leftTriggerSet && tl > controller->m_deadZones.leftTriggerActivationZone) {
@@ -915,7 +1035,8 @@ u32 PADRead(PADStatus* status) {
       status[i].triggerLeft = static_cast<int8_t>(tl);
       status[i].triggerRight = static_cast<int8_t>(tr);
 
-      if (controller->m_hasRumble) {
+      // Player one also reports a motor when the device can vibrate in place of the controller's.
+      if (controller->m_hasRumble || (i == 0 && g_deviceRumble.load(std::memory_order_relaxed) != nullptr)) {
         rumbleSupport |= PAD_CHAN0_BIT >> i;
       }
 
@@ -937,9 +1058,44 @@ u32 PADRead(PADStatus* status) {
   return rumbleSupport;
 }
 
-void PADControlMotor(const u32 chan, const u32 cmd) {
+void PADSetRumbleStrength(u32 percent) {
+  g_rumbleStrengthPercent.store(std::min<u32>(percent, 200), std::memory_order_relaxed);
+}
+
+u32 PADGetRumbleStrength() { return g_rumbleStrengthPercent.load(std::memory_order_relaxed); }
+
+void PADSetDeviceRumbleCallback(PADDeviceRumbleCallback callback) {
+  g_deviceRumble.store(callback, std::memory_order_relaxed);
+}
+
+void PADSetRumbleEnabled(BOOL enabled) {
+  g_rumbleEnabled.store(enabled != FALSE, std::memory_order_relaxed);
+  if (!enabled) {
+    for (u32 i = 0; i < PAD_CHANMAX; ++i) {
+      PADControlMotor(i, PAD_MOTOR_STOP_HARD);
+    }
+  }
+}
+
+BOOL PADGetRumbleEnabled() { return g_rumbleEnabled.load(std::memory_order_relaxed) ? TRUE : FALSE; }
+
+static uint16_t scaled_rumble_intensity(uint16_t intensity, uint32_t percent) {
+  return static_cast<uint16_t>(std::min<uint32_t>(uint32_t{intensity} * percent / 100u, 0xFFFFu));
+}
+
+void PADControlMotor(const u32 chan, u32 cmd) {
+  const uint32_t strength = g_rumbleStrengthPercent.load(std::memory_order_relaxed);
+  if (cmd == PAD_MOTOR_RUMBLE && (!g_rumbleEnabled.load(std::memory_order_relaxed) || strength == 0)) {
+    cmd = PAD_MOTOR_STOP_HARD;
+  }
   const auto controller = aurora::input::get_controller_for_player(chan);
   const auto instance = aurora::input::get_instance_for_player(chan);
+  if (chan == 0) {
+    // The device stands in only for a connected controller without a motor; touch-only play stays
+    // quiet and a controller that rumbles itself keeps the device still (KartPad's rule).
+    const bool deviceActive = cmd == PAD_MOTOR_RUMBLE && controller != nullptr && !controller->m_hasRumble;
+    set_device_rumble(deviceActive ? strength : 0);
+  }
   if (controller == nullptr) {
     return;
   }
@@ -956,8 +1112,8 @@ void PADControlMotor(const u32 chan, const u32 cmd) {
     if (cmd == PAD_MOTOR_STOP) {
       aurora::input::controller_rumble(instance, 0, 0, 1);
     } else if (cmd == PAD_MOTOR_RUMBLE) {
-      aurora::input::controller_rumble(instance, controller->m_rumbleIntensityLow, controller->m_rumbleIntensityHigh,
-                                       0);
+      aurora::input::controller_rumble(instance, scaled_rumble_intensity(controller->m_rumbleIntensityLow, strength),
+                                       scaled_rumble_intensity(controller->m_rumbleIntensityHigh, strength), 0);
     } else if (cmd == PAD_MOTOR_STOP_HARD) {
       aurora::input::controller_rumble(instance, 0, 0, 0);
     }

@@ -69,7 +69,11 @@ project.lock.json
 /.vs/
 /.vscode/
 /.idea/
-/tools/
+/tools/*
+!/tools/pc-builder/
+/tools/pc-builder/**/bin/
+/tools/pc-builder/**/obj/
+/switch-build-ninja/
 /TEMP/
 /tmp/
 /test_output/

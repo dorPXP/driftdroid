@@ -1,4 +1,5 @@
 #include "common.hpp"
+#include "staging_map.hpp"
 #include "../gx/shader_info.hpp"
 
 #include "clear.hpp"
@@ -128,12 +129,7 @@ wgpu::Buffer g_storageBuffer;
 constexpr size_t FrameSlotCount = 3;
 static std::array<wgpu::Buffer, FrameSlotCount> g_stagingBuffers;
 static size_t currentStagingBuffer = 0;
-enum class BufferMapState {
-  Unmapped,
-  Mapping,
-  Mapped,
-};
-static std::atomic s_mappingState{BufferMapState::Unmapped};
+static StagingMapState s_mappingState;
 static wgpu::Limits g_cachedLimits;
 // Advanced once per logical frame in the seal prologue, under the renderer GPU mutex and with the
 // producer blocked, so every later reader sees a value that no longer moves.
@@ -852,7 +848,7 @@ void initialize() {
                  label.c_str());
   }
   currentStagingBuffer = 0;
-  s_mappingState.store(BufferMapState::Unmapped, std::memory_order_release);
+  s_mappingState.reset();
   map_staging_buffer();
 
   {
@@ -958,6 +954,8 @@ void shutdown() {
   g_uniformBuffer = {};
   g_indexBuffer = {};
   g_storageBuffer = {};
+  // Invalidate outstanding callbacks before releasing their buffers.
+  s_mappingState.reset();
   g_stagingBuffers.fill({});
   for (auto& pool : g_resolveSourceSnapshotPools) {
     pool.entry.reset();
@@ -976,27 +974,26 @@ void shutdown() {
   g_inOffscreen = false;
   g_frameIndex = UINT32_MAX;
   currentStagingBuffer = 0;
-  s_mappingState.store(BufferMapState::Unmapped, std::memory_order_release);
 }
 
 void map_staging_buffer() {
-  auto expected = BufferMapState::Unmapped;
-  if (!s_mappingState.compare_exchange_strong(expected, BufferMapState::Mapping, std::memory_order_acq_rel,
-                                              std::memory_order_acquire)) {
+  const auto generation = s_mappingState.request();
+  if (generation == 0) {
     return;
   }
 
   g_stagingBuffers[currentStagingBuffer].MapAsync(
       wgpu::MapMode::Write, 0, StagingBufferSize, wgpu::CallbackMode::AllowSpontaneous,
-      [](wgpu::MapAsyncStatus status, wgpu::StringView message) {
+      [generation](wgpu::MapAsyncStatus status, wgpu::StringView message) {
+        const auto result = status == wgpu::MapAsyncStatus::Success
+            ? BufferMapState::Mapped : BufferMapState::Unmapped;
+        if (!s_mappingState.complete(generation, result)) return;
         if (status == wgpu::MapAsyncStatus::CallbackCancelled || status == wgpu::MapAsyncStatus::Aborted) {
           Log.warn("Buffer mapping {}: {}", magic_enum::enum_name(status), message);
-          s_mappingState.store(BufferMapState::Unmapped, std::memory_order_release);
           return;
         }
         ASSERT(status == wgpu::MapAsyncStatus::Success, "Buffer mapping failed: {} {}", magic_enum::enum_name(status),
                message);
-        s_mappingState.store(BufferMapState::Mapped, std::memory_order_release);
       });
 }
 
@@ -1006,7 +1003,7 @@ static bool begin_frame_impl(bool clearEfb) {
     ZoneScopedN("Wait for buffer map");
     map_staging_buffer();
     while (true) {
-      const auto mappingState = s_mappingState.load(std::memory_order_acquire);
+      const auto mappingState = s_mappingState.state();
       if (mappingState == BufferMapState::Mapped) {
         break;
       }
@@ -1022,6 +1019,7 @@ static bool begin_frame_impl(bool clearEfb) {
         return false;
       }
       g_instance.ProcessEvents();
+      s_mappingState.wait_for_progress();
     }
   }
   g_recordingSnapshotSlot = currentStagingBuffer;
@@ -1087,12 +1085,12 @@ void abort_frame() noexcept {
     g_textureUploads.clear();
     g_textureUpload.release();
   }
-  if (s_mappingState.load(std::memory_order_acquire) == BufferMapState::Mapped) {
+  if (s_mappingState.state() == BufferMapState::Mapped) {
     // Pending interpolation tasks hold raw pointers into the mapped staging
     // range; they must be dropped before the buffer is unmapped and rotated.
     gx::drop_pending_frame_interpolation_uniforms();
     g_stagingBuffers[currentStagingBuffer].Unmap();
-    s_mappingState.store(BufferMapState::Unmapped, std::memory_order_release);
+    s_mappingState.reset();
     currentStagingBuffer = (currentStagingBuffer + 1) % g_stagingBuffers.size();
     map_staging_buffer();
   }
@@ -1129,7 +1127,7 @@ static void end_batch_impl(const wgpu::CommandEncoder& cmd, bool advanceFrame) {
     return writeSize;
   };
   g_stagingBuffers[currentStagingBuffer].Unmap();
-  s_mappingState.store(BufferMapState::Unmapped, std::memory_order_release);
+  s_mappingState.reset();
   g_stats.drawCallCount = g_drawCallCount;
   g_stats.mergedDrawCallCount = g_mergedDrawCallCount;
   g_stats.lastVertSize = writeBuffer(g_verts, g_vertexBuffer, VertexBufferSize, "Vertex");

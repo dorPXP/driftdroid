@@ -11,9 +11,12 @@
 #include <SDL3/SDL_joystick.h>
 #include <switch.h>
 
+#include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <iterator>
 
 namespace aurora::input::switch_pad {
@@ -65,11 +68,18 @@ Sint16 clamp_axis(s32 value) {
 // ~0.9% of a race frame in lock traffic, so only send the ones that changed.
 struct Player {
   PadState pad{};
+  // Vibration devices of the controller this player last rumbled with (re-made when it changes).
+  HidVibrationDeviceHandle vibration[2]{};
+  HidNpadIdType vibrationId = HidNpadIdType_No1;
+  u32 vibrationStyle = 0;
+  s32 vibrationCount = 0;
   SDL_Joystick* joystick = nullptr;
   SDL_JoystickID joystickId = 0;
   bool sentButtons[std::size(kButtons)]{};
   Sint16 sentAxes[kSentAxisCount]{};
   bool sentAny = false;
+  // Any button held, for the settings menu's player list (read on another thread).
+  std::atomic<bool> pressing{false};
 };
 
 Player g_players[kPlayers];
@@ -85,6 +95,7 @@ constexpr const char* kNames[kPlayers] = {
 };
 
 void SDLCALL update(void* userdata);
+bool SDLCALL rumble(void* userdata, Uint16 low, Uint16 high);
 
 void open_player(size_t index) {
   Player& player = g_players[index];
@@ -101,6 +112,7 @@ void open_player(size_t index) {
   desc.name = kNames[index];
   desc.userdata = &player;
   desc.Update = update;
+  desc.Rumble = rumble;
   player.joystickId = SDL_AttachVirtualJoystick(&desc);
   if (player.joystickId == 0) {
     return;
@@ -125,61 +137,122 @@ void close_player(size_t index) {
   }
 }
 
-// Tilt steering for player 1: the roll of the console (handheld) or controller, read from its
-// accelerometer as the direction of gravity, replaces the left stick's X axis. Same response
-// curve as the Android app (MotionSteering.kt): a small dead zone, then linear to full lock.
-std::atomic<bool> g_motionEnabled{false};
+// Tilt steering, for each player who has it on: the roll of the console (handheld) or controller,
+// read from its accelerometer as the direction of gravity, replaces the left stick's X axis. Same
+// response curve as the Android app (MotionSteering.kt): a small dead zone, then linear to full
+// lock. Players 2-4 were added 2026-10-27 (each controller's own sensor).
+std::atomic<unsigned> g_motionPlayers{0};  // bit n = player n+1
 std::atomic<bool> g_motionInverted{false};
 std::atomic<float> g_motionSensitivity{1.0f};
-std::atomic<bool> g_motionRecenter{true};
-std::atomic<bool> g_motionSeen{false};
-HidSixAxisSensorHandle g_motionHandles[4]{};  // handheld, full controller, Joy-Con pair (left, right)
-bool g_motionStarted = false;
-float g_motionCenter = 0.0f;
+std::atomic<unsigned> g_motionRecenter{0xFu};  // players whose "straight ahead" is taken next
+// Set by the runtime each frame: tilt only steers while the player drives a race. In menus a
+// controller held slightly tilted moved the cursor by itself.
+std::atomic<bool> g_motionDriving{false};
+// The settings menu is open: the game is not listening, and tilt read as a held stick direction
+// there, which the menu's navigation put before D-pad presses (they seemed to lag or get lost).
+std::atomic<bool> g_motionMenuOpen{false};
+std::atomic<unsigned> g_motionSeen{0};       // players whose sensor has answered
+std::atomic<float> g_motionValue[kPlayers]{}; // last reading, for the settings menu's tilt bar
 
-void start_motion_sensors() {
-  if (g_motionStarted) {
+struct MotionSensors {
+  HidSixAxisSensorHandle handles[4]{};  // handheld (player 1 only), full controller, Joy-Con pair (left, right)
+  bool started = false;
+  u64 styles = 0;  // the controller styles when the sensors were last started
+  float center = 0.0f;
+  u32 loggedStyle = 0xFFFFFFFFu;
+};
+MotionSensors g_motion[kPlayers];
+
+constexpr HidNpadIdType kSlotIds[kPlayers] = {HidNpadIdType_No1, HidNpadIdType_No2, HidNpadIdType_No3,
+                                              HidNpadIdType_No4};
+
+// Started again whenever the player's controller changes: a sensor started before its
+// controller was connected stays silent, so a Pro Controller picked up mid-game had no tilt or
+// shake until the app restarted (2026-10-24).
+void start_motion_sensors(size_t index) {
+  MotionSensors& motion = g_motion[index];
+  const HidNpadIdType id = kSlotIds[index];
+  const u64 handheld = index == 0 ? hidGetNpadStyleSet(HidNpadIdType_Handheld) : 0;
+  const u64 styles = (handheld << 32) | hidGetNpadStyleSet(id);
+  if (motion.started && styles == motion.styles) {
     return;
   }
-  g_motionStarted = true;
-  hidGetSixAxisSensorHandles(&g_motionHandles[0], 1, HidNpadIdType_Handheld, HidNpadStyleTag_NpadHandheld);
-  hidGetSixAxisSensorHandles(&g_motionHandles[1], 1, HidNpadIdType_No1, HidNpadStyleTag_NpadFullKey);
-  hidGetSixAxisSensorHandles(&g_motionHandles[2], 2, HidNpadIdType_No1, HidNpadStyleTag_NpadJoyDual);
-  for (const HidSixAxisSensorHandle& handle : g_motionHandles) {
-    hidStartSixAxisSensor(handle);
+  if (motion.started) {
+    for (const HidSixAxisSensorHandle& handle : motion.handles) {
+      hidStopSixAxisSensor(handle);
+    }
+  }
+  motion.started = true;
+  motion.styles = styles;
+  std::printf("[switch-pad] player %zu motion sensors (re)started: handheld styles %#x, slot styles %#x\n",
+              index + 1, static_cast<unsigned>(styles >> 32), static_cast<unsigned>(styles));
+  if (index == 0) {
+    hidGetSixAxisSensorHandles(&motion.handles[0], 1, HidNpadIdType_Handheld, HidNpadStyleTag_NpadHandheld);
+  }
+  hidGetSixAxisSensorHandles(&motion.handles[1], 1, id, HidNpadStyleTag_NpadFullKey);
+  hidGetSixAxisSensorHandles(&motion.handles[2], 2, id, HidNpadStyleTag_NpadJoyDual);
+  for (size_t i = index == 0 ? 0 : 1; i < std::size(motion.handles); ++i) {
+    hidStartSixAxisSensor(motion.handles[i]);
   }
 }
 
-// Steering from -1 (full left) to 1, or false when no sensor answers.
-bool motion_steering(const PadState& pad, float& out) {
-  start_motion_sensors();
+// The accelerometer (in g) of the console or controller a player is using, or false.
+bool read_acceleration(size_t index, const PadState& pad, HidVector& out) {
+  start_motion_sensors(index);
+  MotionSensors& motion = g_motion[index];
   const u32 style = padGetStyleSet(&pad);
-  int which = -1;
-  if ((style & HidNpadStyleTag_NpadHandheld) != 0) {
-    which = 0;
+  // A Joy-Con pair is read from the right Joy-Con, or the left one if the right gives nothing.
+  int which[2] = {-1, -1};
+  if (index == 0 && (style & HidNpadStyleTag_NpadHandheld) != 0) {
+    which[0] = 0;
   } else if ((style & HidNpadStyleTag_NpadFullKey) != 0) {
-    which = 1;
+    which[0] = 1;
   } else if ((style & HidNpadStyleTag_NpadJoyDual) != 0) {
-    which = 3;  // the right Joy-Con of the pair
+    which[0] = 3;
+    which[1] = 2;
   }
+  int used = -1;
   HidSixAxisSensorState state{};
-  if (which < 0 || hidGetSixAxisSensorStates(g_motionHandles[which], &state, 1) == 0) {
+  for (const int candidate : which) {
+    if (candidate >= 0 && hidGetSixAxisSensorStates(motion.handles[candidate], &state, 1) != 0) {
+      used = candidate;
+      break;
+    }
+  }
+  if (style != motion.loggedStyle) {
+    motion.loggedStyle = style;
+    std::printf("[switch-pad] player %zu motion: style %#x, sensor %d %s\n", index + 1, style, used,
+                used >= 0 ? "answers" : "gives nothing");
+  }
+  if (used < 0) {
     return false;
   }
-  const float x = state.acceleration.x;
-  const float rest = std::hypot(state.acceleration.y, state.acceleration.z);
+  out = state.acceleration;
+  return true;
+}
+
+// Steering from -1 (full left) to 1, or false when no sensor answers. "Straight ahead" is only
+// taken while driving, so turning tilt on in the menu does not centre on how the menu was held.
+bool motion_steering(size_t index, const PadState& pad, bool driving, float& out) {
+  HidVector acceleration{};
+  if (!read_acceleration(index, pad, acceleration)) {
+    return false;
+  }
+  const float x = acceleration.x;
+  const float rest = std::hypot(acceleration.y, acceleration.z);
   if (std::hypot(x, rest) < 0.08f) {
     return false;  // free fall or a glitch: no usable direction
   }
-  g_motionSeen.store(true, std::memory_order_relaxed);
+  g_motionSeen.fetch_or(1u << index, std::memory_order_relaxed);
   // Roll: how far gravity leans to the device's left or right, whatever its pitch.
   const float angle = std::atan2(x, rest);
-  if (g_motionRecenter.exchange(false, std::memory_order_relaxed)) {
-    g_motionCenter = angle;
+  MotionSensors& motion = g_motion[index];
+  if (driving && (g_motionRecenter.fetch_and(~(1u << index), std::memory_order_relaxed) & (1u << index)) != 0) {
+    motion.center = angle;
   }
   constexpr float kDeadZone = 0.045f;
   const float sensitivity = std::fmin(2.0f, std::fmax(0.5f, g_motionSensitivity.load(std::memory_order_relaxed)));
-  const float delta = angle - g_motionCenter;
+  const float delta = angle - motion.center;
   const float magnitude = std::fabs(delta);
   if (magnitude <= kDeadZone) {
     out = 0.0f;
@@ -190,6 +263,171 @@ bool motion_steering(const PadState& pad, float& out) {
   value = delta < 0.0f ? -value : value;
   out = g_motionInverted.load(std::memory_order_relaxed) ? -value : value;
   return true;
+}
+
+// Shake to trick, for each player who has it on: a shake while driving presses the D-pad (the
+// game's trick button) for a moment, in the direction of the shake, so up, down, left and right
+// give the same tricks (and wheelies) as the D-pad. It used to hand player 1 to an emulated Wii
+// Wheel, but the game keeps the controller type it started with: switching it on or off mid-game
+// left the game waiting for the other controller (2026-10-27). In menus nothing is pressed.
+std::atomic<unsigned> g_shakePlayers{0};  // bit n = player n+1
+
+struct ShakeState {
+  float magnitude = 1.0f;         // smoothed strength of the acceleration (1 g at rest)
+  HidVector gravity{0.0f, 0.0f, 0.0f};  // smoothed acceleration: the direction of gravity
+  bool primed = false;
+  std::chrono::steady_clock::time_point last{};
+  std::chrono::steady_clock::time_point pulseUntil{};
+  std::chrono::steady_clock::time_point upUntil{};  // the Up that follows a sideways or down press
+  std::chrono::steady_clock::time_point quietUntil{};
+  SDL_GamepadButton pulse = SDL_GAMEPAD_BUTTON_INVALID;
+};
+ShakeState g_shake[kPlayers];
+
+// Thresholds from the Wii Wheel version: 0.5 g of change in strength is a shake (a brisk wrist
+// turn while tilt steering adds up to ~0.3 g); one press per shake.
+constexpr float kShakeThresholdG = 0.55f;
+constexpr auto kShakePress = std::chrono::milliseconds(120);
+// A sideways or down shake presses its direction this long, then Up for kShakePress. In the air
+// the game takes the first direction for the trick and ignores the rest; on the ground the other
+// directions do nothing and the Up is a wheelie, so any shake on the ground wheelies ("you have
+// to shake the controller UP to do a wheelie which is harder", 2026-10-27).
+constexpr auto kShakeDirectionPress = std::chrono::milliseconds(80);
+constexpr auto kShakeQuiet = std::chrono::milliseconds(400);
+
+// The D-pad button a shake is pressing right now for this player, or INVALID.
+SDL_GamepadButton update_shake(size_t index, const PadState& pad, bool driving) {
+  ShakeState& shake = g_shake[index];
+  const auto now = std::chrono::steady_clock::now();
+  HidVector a{};
+  if (!driving || !read_acceleration(index, pad, a)) {
+    shake.primed = false;
+    shake.pulse = SDL_GAMEPAD_BUTTON_INVALID;
+    shake.upUntil = {};
+    return SDL_GAMEPAD_BUTTON_INVALID;
+  }
+  constexpr float kGravitySmoothingSeconds = 0.25f;
+  const float dt = std::chrono::duration<float>(now - shake.last).count();
+  shake.last = now;
+  const float magnitude = std::sqrt(a.x * a.x + a.y * a.y + a.z * a.z);
+  if (!shake.primed || dt <= 0.0f || dt > 0.5f) {
+    shake.primed = true;
+    shake.magnitude = magnitude;
+    shake.gravity = a;
+    return SDL_GAMEPAD_BUTTON_INVALID;
+  }
+  // Only the strength of the acceleration decides whether it is a shake: tilting to steer turns
+  // gravity across the axes (a quick 30-degree tilt of a Joy-Con read as a 0.5 g "shake" and did
+  // wheelies) but leaves it at 1 g; a shake pushes the controller and changes the strength.
+  const float change = std::fabs(magnitude - shake.magnitude);
+  if (now >= shake.quietUntil && change > kShakeThresholdG) {
+    // Direction: the push away from gravity. Along gravity is up or down, whichever way the
+    // sensor counts (lifting adds to the reading along its own rest direction either way);
+    // across it, the controller's own left-right axis.
+    const HidVector d{a.x - shake.gravity.x, a.y - shake.gravity.y, a.z - shake.gravity.z};
+    const float gLength = std::sqrt(shake.gravity.x * shake.gravity.x + shake.gravity.y * shake.gravity.y +
+                                    shake.gravity.z * shake.gravity.z);
+    float vertical = 0.0f;
+    float sideways = d.x;
+    if (gLength > 0.3f) {
+      const HidVector up{shake.gravity.x / gLength, shake.gravity.y / gLength, shake.gravity.z / gLength};
+      vertical = d.x * up.x + d.y * up.y + d.z * up.z;
+      sideways = d.x - vertical * up.x;
+    }
+    // Up unless the shake was clearly sideways or downwards: up is the usual flick and the wheelie.
+    if (std::fabs(sideways) > std::fabs(vertical) * 1.3f) {
+      shake.pulse = sideways > 0.0f ? SDL_GAMEPAD_BUTTON_DPAD_RIGHT : SDL_GAMEPAD_BUTTON_DPAD_LEFT;
+    } else if (vertical < -0.35f) {
+      shake.pulse = SDL_GAMEPAD_BUTTON_DPAD_DOWN;
+    } else {
+      shake.pulse = SDL_GAMEPAD_BUTTON_DPAD_UP;
+    }
+    if (shake.pulse == SDL_GAMEPAD_BUTTON_DPAD_UP) {
+      shake.pulseUntil = now + kShakePress;
+      shake.upUntil = shake.pulseUntil;
+    } else {
+      shake.pulseUntil = now + kShakeDirectionPress;
+      shake.upUntil = shake.pulseUntil + kShakePress;
+    }
+    shake.quietUntil = std::max(now + kShakeQuiet, shake.upUntil);
+    std::printf("[switch-pad] player %zu shake -> %s (up %.2f, side %.2f, change %.2f g)\n", index + 1,
+                shake.pulse == SDL_GAMEPAD_BUTTON_DPAD_UP     ? "up"
+                : shake.pulse == SDL_GAMEPAD_BUTTON_DPAD_DOWN ? "down"
+                : shake.pulse == SDL_GAMEPAD_BUTTON_DPAD_LEFT ? "left"
+                                                              : "right",
+                vertical, sideways, change);
+  }
+  // The smoothing only follows calm readings, so a shake does not drag "gravity" with it.
+  if (now >= shake.quietUntil || change < kShakeThresholdG * 0.5f) {
+    const float alpha = dt / (kGravitySmoothingSeconds + dt);
+    shake.magnitude += alpha * (magnitude - shake.magnitude);
+    shake.gravity.x += alpha * (a.x - shake.gravity.x);
+    shake.gravity.y += alpha * (a.y - shake.gravity.y);
+    shake.gravity.z += alpha * (a.z - shake.gravity.z);
+  }
+  if (now < shake.pulseUntil) {
+    return shake.pulse;
+  }
+  shake.pulse = SDL_GAMEPAD_BUTTON_INVALID;
+  return now < shake.upUntil ? SDL_GAMEPAD_BUTTON_DPAD_UP : SDL_GAMEPAD_BUTTON_INVALID;
+}
+
+// Rumble: the game's motor on/off (PADControlMotor -> SDL_RumbleGamepad) drives the vibration of
+// the controller the player is holding, or of both Joy-Cons in handheld. Same signal SDL sends the
+// same controllers on PC (SDL_hidapi_switch.c): BOTH bands at about 150 Hz (codes 0x74 / 0x3D),
+// which is what gives it its depth; a 320 Hz high band felt thin.
+bool SDLCALL rumble(void* userdata, Uint16 low, Uint16 high) {
+  Player& player = *static_cast<Player*>(userdata);
+  static constexpr HidNpadIdType kIds[kPlayers] = {HidNpadIdType_No1, HidNpadIdType_No2, HidNpadIdType_No3,
+                                                   HidNpadIdType_No4};
+  const size_t index = static_cast<size_t>(&player - g_players);
+  HidNpadIdType id = kIds[index];
+  u32 styleSet = hidGetNpadStyleSet(id);
+  if (index == 0 && (padGetStyleSet(&player.pad) & HidNpadStyleTag_NpadHandheld) != 0) {
+    id = HidNpadIdType_Handheld;
+    styleSet = hidGetNpadStyleSet(id);
+  }
+  // One style, with the number of vibration motors it has.
+  static constexpr struct {
+    u32 style;
+    s32 count;
+  } kStyles[] = {
+      {HidNpadStyleTag_NpadFullKey, 2}, {HidNpadStyleTag_NpadHandheld, 2}, {HidNpadStyleTag_NpadJoyDual, 2},
+      {HidNpadStyleTag_NpadJoyLeft, 1}, {HidNpadStyleTag_NpadJoyRight, 1},
+  };
+  u32 style = 0;
+  s32 count = 0;
+  for (const auto& candidate : kStyles) {
+    if ((styleSet & candidate.style) != 0) {
+      style = candidate.style;
+      count = candidate.count;
+      break;
+    }
+  }
+  if (style == 0) {
+    return false;
+  }
+  if (player.vibrationCount == 0 || player.vibrationId != id || player.vibrationStyle != style) {
+    const Result result =
+        hidInitializeVibrationDevices(player.vibration, count, id, static_cast<HidNpadStyleTag>(style));
+    std::printf("[switch-pad] player %zu rumble -> slot %d, style %#x, %d motors: %s\n", index + 1,
+                static_cast<int>(id), style, count, R_SUCCEEDED(result) ? "ok" : "failed");
+    if (R_FAILED(result)) {
+      player.vibrationCount = 0;
+      return false;
+    }
+    player.vibrationId = id;
+    player.vibrationStyle = style;
+    player.vibrationCount = count;
+  }
+  HidVibrationValue values[2];
+  for (HidVibrationValue& value : values) {
+    value.amp_low = static_cast<float>(low) / 65535.0f;
+    value.freq_low = 150.0f;
+    value.amp_high = static_cast<float>(high) / 65535.0f;
+    value.freq_high = 150.0f;
+  }
+  return R_SUCCEEDED(hidSendVibrationValues(player.vibration, values, player.vibrationCount));
 }
 
 void set_axis(Player& player, size_t slot, SDL_GamepadAxis axis, Sint16 value) {
@@ -206,8 +444,16 @@ void SDLCALL update(void* userdata) {
   }
   padUpdate(&player.pad);
   const u64 held = padGetButtons(&player.pad);
+  player.pressing.store(held != 0, std::memory_order_relaxed);
+  const size_t index = static_cast<size_t>(&player - g_players);
+  const bool driving = g_motionDriving.load(std::memory_order_relaxed);
+  const bool menuOpen = g_motionMenuOpen.load(std::memory_order_relaxed);
+  SDL_GamepadButton shakePress = SDL_GAMEPAD_BUTTON_INVALID;
+  if ((g_shakePlayers.load(std::memory_order_relaxed) & (1u << index)) != 0) {
+    shakePress = update_shake(index, player.pad, driving && !menuOpen);
+  }
   for (size_t i = 0; i < std::size(kButtons); ++i) {
-    const bool down = (held & kButtons[i].hid) != 0;
+    const bool down = (held & kButtons[i].hid) != 0 || kButtons[i].sdl == shakePress;
     if (!player.sentAny || player.sentButtons[i] != down) {
       player.sentButtons[i] = down;
       SDL_SetJoystickVirtualButton(player.joystick, kButtons[i].sdl, down);
@@ -217,12 +463,15 @@ void SDLCALL update(void* userdata) {
   const HidAnalogStickState right = padGetStickPos(&player.pad, 1);
   // libnx sticks are +Y up; SDL gamepad axes are +Y down.
   s32 steerX = left.x;
-  // Tilt steers player 1 unless the stick itself is pushed sideways (menus stay usable).
-  if (&player == &g_players[0] && g_motionEnabled.load(std::memory_order_relaxed) &&
-      std::abs(left.x) < SDL_JOYSTICK_AXIS_MAX / 3) {
+  // Tilt steers a player who has it on, unless the stick itself is pushed sideways (menus stay
+  // usable). It is also read in the settings menu, for its tilt bar.
+  if ((g_motionPlayers.load(std::memory_order_relaxed) & (1u << index)) != 0) {
     float tilt = 0.0f;
-    if (motion_steering(player.pad, tilt)) {
-      steerX = static_cast<s32>(tilt * static_cast<float>(SDL_JOYSTICK_AXIS_MAX));
+    if ((driving || menuOpen) && motion_steering(index, player.pad, driving && !menuOpen, tilt)) {
+      g_motionValue[index].store(tilt, std::memory_order_relaxed);
+      if (driving && !menuOpen && std::abs(left.x) < SDL_JOYSTICK_AXIS_MAX / 3) {
+        steerX = static_cast<s32>(tilt * static_cast<float>(SDL_JOYSTICK_AXIS_MAX));
+      }
     }
   }
   set_axis(player, 0, SDL_GAMEPAD_AXIS_LEFTX, clamp_axis(steerX));
@@ -285,19 +534,118 @@ void detach() noexcept {
 // Called from the settings menu (runtime/src/settings_overlay.cpp).
 extern "C" void AuroraSwitchSetMotionSteering(int enabled, float sensitivity, int inverted) {
   using namespace aurora::input::switch_pad;
-  const bool wasEnabled = g_motionEnabled.exchange(enabled != 0, std::memory_order_relaxed);
+  // enabled: bit n = player n+1 (a saved "1" from before players 2-4 is player 1 alone).
+  const unsigned players = static_cast<unsigned>(enabled) & 0xFu;
+  const unsigned was = g_motionPlayers.exchange(players, std::memory_order_relaxed);
   g_motionSensitivity.store(sensitivity, std::memory_order_relaxed);
   g_motionInverted.store(inverted != 0, std::memory_order_relaxed);
-  if (enabled != 0 && !wasEnabled) {
-    g_motionRecenter.store(true, std::memory_order_relaxed);  // straight ahead = how it is held now
-  }
+  // Straight ahead = how a newly enabled player holds it when they next drive.
+  g_motionRecenter.fetch_or(players & ~was, std::memory_order_relaxed);
+}
+
+// Called by the settings menu: which players shake to trick (bit n = player n+1).
+extern "C" void AuroraSwitchSetShakePlayers(int players) {
+  aurora::input::switch_pad::g_shakePlayers.store(static_cast<unsigned>(players) & 0xFu, std::memory_order_relaxed);
+}
+
+// Called by the runtime every pad read (runtime/src/hle/input/pad.cpp): a race is under way and not
+// paused.
+extern "C" void AuroraSwitchSetDriving(int driving) {
+  aurora::input::switch_pad::g_motionDriving.store(driving != 0, std::memory_order_relaxed);
+}
+
+// Called by the settings menu when it opens or closes (runtime/src/settings_overlay.cpp).
+extern "C" void AuroraSwitchSetMenuOpen(int open) {
+  aurora::input::switch_pad::g_motionMenuOpen.store(open != 0, std::memory_order_relaxed);
 }
 
 extern "C" void AuroraSwitchRecenterMotionSteering() {
-  aurora::input::switch_pad::g_motionRecenter.store(true, std::memory_order_relaxed);
+  aurora::input::switch_pad::g_motionRecenter.store(0xFu, std::memory_order_relaxed);
 }
 
-// True once the tilt sensor has delivered a reading.
+// Bit n set once player n+1's tilt sensor has delivered a reading.
 extern "C" int AuroraSwitchMotionSteeringSeen() {
-  return aurora::input::switch_pad::g_motionSeen.load(std::memory_order_relaxed) ? 1 : 0;
+  return static_cast<int>(aurora::input::switch_pad::g_motionSeen.load(std::memory_order_relaxed));
+}
+
+// Player 1-4's (0-3) last tilt, -1 (full left) to 1, for the settings menu.
+extern "C" float AuroraSwitchMotionValue(int player) {
+  if (player < 0 || player >= static_cast<int>(aurora::input::switch_pad::kPlayers)) {
+    return 0.0f;
+  }
+  return aurora::input::switch_pad::g_motionValue[player].load(std::memory_order_relaxed);
+}
+
+// The settings menu's player list (runtime/src/settings_overlay.cpp, Controls page on Switch).
+// Players are the console's own player numbers, the same as the lights on each controller.
+
+// What player 1-4 (0-3) is holding, or nullptr when nobody is.
+extern "C" const char* AuroraSwitchPlayerController(int player) {
+  static constexpr HidNpadIdType kIds[] = {HidNpadIdType_No1, HidNpadIdType_No2, HidNpadIdType_No3,
+                                           HidNpadIdType_No4};
+  if (player < 0 || player >= 4) {
+    return nullptr;
+  }
+  u32 style = hidGetNpadStyleSet(kIds[player]);
+  if (style == 0 && player == 0) {
+    style = hidGetNpadStyleSet(HidNpadIdType_Handheld);  // player 1 also plays in handheld
+  }
+  if (style == 0) {
+    return nullptr;
+  }
+  if ((style & HidNpadStyleTag_NpadFullKey) != 0) {
+    return "Pro Controller";
+  }
+  if ((style & HidNpadStyleTag_NpadHandheld) != 0) {
+    return "Joy-Cons on the console";
+  }
+  if ((style & HidNpadStyleTag_NpadJoyDual) != 0) {
+    return "Two Joy-Cons";
+  }
+  if ((style & HidNpadStyleTag_NpadJoyLeft) != 0) {
+    return "Left Joy-Con";
+  }
+  if ((style & HidNpadStyleTag_NpadJoyRight) != 0) {
+    return "Right Joy-Con";
+  }
+  if ((style & HidNpadStyleTag_NpadGc) != 0) {
+    return "GameCube controller";
+  }
+  return "Controller";
+}
+
+// True while player 1-4 (0-3) holds any button: "press a button to see which player you are".
+extern "C" int AuroraSwitchPlayerPressing(int player) {
+  using namespace aurora::input::switch_pad;
+  if (player < 0 || player >= static_cast<int>(kPlayers) || g_players[player].joystick == nullptr) {
+    return 0;
+  }
+  return g_players[player].pressing.load(std::memory_order_relaxed) ? 1 : 0;
+}
+
+// Player colours, shared by the console's controller screen (its player box outlines) and the
+// settings menu's player list, so each person finds the same colour in both.
+extern "C" const unsigned char kAuroraSwitchPlayerColors[4][3] = {
+    {230, 52, 52}, {45, 125, 240}, {240, 195, 30}, {60, 185, 75}};
+
+// The console's own controller screen, the one games show before multiplayer ("press L and R"):
+// players join, swap or leave there, and each controller's lights show its player number.
+// Blocks until it closes. Handheld is not allowed with more than one player, as in games.
+extern "C" int AuroraSwitchShowControllerApplet() {
+  HidLaControllerSupportArg arg;
+  hidLaCreateControllerSupportArg(&arg);
+  arg.hdr.player_count_min = 1;
+  arg.hdr.player_count_max = 4;
+  arg.hdr.enable_identification_color = 1;
+  for (int i = 0; i < 4; ++i) {
+    arg.identification_color[i] = {kAuroraSwitchPlayerColors[i][0], kAuroraSwitchPlayerColors[i][1],
+                                   kAuroraSwitchPlayerColors[i][2], 255};
+  }
+  // The version HOME's "Change Grip/Order" uses. The game version (hidLaShowControllerSupport)
+  // opened and shut at once with LibAppletBadExit (0x5d59) every time on the console (2026-10-27).
+  HidLaControllerSupportResultInfo info{};
+  const Result rc = hidLaShowControllerSupportForSystem(&info, &arg, false);
+  std::printf("[switch-pad] controller screen: rc %#x, %d player(s)\n", static_cast<unsigned>(rc),
+              static_cast<int>(info.player_count));
+  return R_SUCCEEDED(rc) ? 1 : 0;
 }

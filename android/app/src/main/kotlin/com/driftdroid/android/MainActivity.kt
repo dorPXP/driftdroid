@@ -1,8 +1,5 @@
 package com.driftdroid.android
 
-import android.app.AlarmManager
-import android.app.AlertDialog
-import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
 import android.content.SharedPreferences
@@ -12,16 +9,16 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Process
 import android.view.KeyEvent
+import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
 import android.widget.Button
-import android.widget.LinearLayout
 import android.widget.RelativeLayout
-import android.widget.ScrollView
-import android.widget.TextView
 import com.driftdroid.android.rom.RomImportOverlay
 import com.driftdroid.android.touch.EditGestureHelper
 import com.driftdroid.android.touch.TouchControlsOverlay
+import com.driftdroid.android.ui.DriftSheet
+import com.driftdroid.android.ui.DriftUi
 import java.io.File
 import org.libsdl.app.SDLActivity
 
@@ -50,6 +47,7 @@ class MainActivity : SDLActivity() {
     private external fun nativeSetDetectedWidescreen(widescreen: Boolean)
     private external fun nativeSetActiveProduct(retroRewind: Boolean)
     private external fun nativeToggleSettingsOverlay()
+    private external fun nativeSetDeviceCanVibrate(canVibrate: Boolean)
 
     /** The gear can be hidden (GitHub issue #5); Back then opens the settings sidebar instead. */
     private var settingsButton: Button? = null
@@ -73,6 +71,43 @@ class MainActivity : SDLActivity() {
         }
         return super.dispatchKeyEvent(event)
     }
+
+    // Pull down from the top strip to open the quick settings panel. A swipe that starts exactly at the
+    // screen edge is taken by Android's own bar reveal in full-screen mode, so the gesture starts a little
+    // below it. Not while the touch layout is being edited, and it only takes the swipe when the panel
+    // really opened (a scroll inside the open settings menu is left alone).
+    private var pullStartY = -1f
+    private var pullStartX = 0f
+    private var layoutEditing = false
+
+    override fun dispatchTouchEvent(ev: MotionEvent): Boolean {
+        val density = resources.displayMetrics.density
+        when (ev.actionMasked) {
+            MotionEvent.ACTION_DOWN -> {
+                val zone = minOf(resources.displayMetrics.heightPixels * 0.16f, 110f * density)
+                pullStartY = if (!layoutEditing && ev.y < zone) ev.y else -1f
+                pullStartX = ev.x
+            }
+            MotionEvent.ACTION_MOVE -> if (pullStartY >= 0f && ev.pointerCount == 1) {
+                val dy = ev.y - pullStartY
+                val dx = kotlin.math.abs(ev.x - pullStartX)
+                if (dy > 56f * density && dy > dx * 1.5f) {
+                    pullStartY = -1f
+                    if (nativeOpenQuickPanel()) {
+                        val cancel = MotionEvent.obtain(ev)
+                        cancel.action = MotionEvent.ACTION_CANCEL
+                        super.dispatchTouchEvent(cancel)
+                        cancel.recycle()
+                        return true
+                    }
+                }
+            }
+            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL, MotionEvent.ACTION_POINTER_DOWN -> pullStartY = -1f
+        }
+        return super.dispatchTouchEvent(ev)
+    }
+    private external fun nativeOpenQuickPanel(): Boolean
+    private external fun nativeSetSystemLanguage(code: String)
     private external fun nativeSetTouchControlsVisibleCache(visible: Boolean)
     private external fun nativeSetDoubleTapAutoHoldCache(enabled: Boolean)
     private external fun nativeReportExternalMediaPlaying(playing: Boolean)
@@ -83,6 +118,10 @@ class MainActivity : SDLActivity() {
     private var multicastLock: WifiManager.MulticastLock? = null
     private var resolvedProduct: String = PRODUCT_BASE
     private var motionSteering: MotionSteering? = null
+    private var gamepadConnected = false
+    private var wiiWheel: WiiWheelMode? = null
+    // What this game session started with; the runtime only reads wii_wheel.cfg at start-up.
+    private var wiiWheelActiveThisSession = false
     // Never requests audio focus: any focus request pauses the player's own music app.
     private val externalMediaDetector by lazy { ExternalMediaDetector(this) { nativeReportExternalMediaPlaying(it) } }
     private val thermalMonitor by lazy { ThermalMonitor(this) { nativeReportThermalHeadroom(it) } }
@@ -127,6 +166,17 @@ class MainActivity : SDLActivity() {
             return
         }
         sLoadedProduct = resolvedProduct
+        // Vertical mode: upright screen, read by aurora's window setup (SDL_HINT_ORIENTATIONS) from
+        // this variable, so it has to be set before the native side starts.
+        val vertical = VerticalMode.isEnabled(this)
+        android.system.Os.setenv("DRIFTDROID_VERTICAL", if (vertical) "1" else "0", true)
+        requestedOrientation =
+            if (vertical) {
+                android.content.pm.ActivityInfo.SCREEN_ORIENTATION_SENSOR_PORTRAIT
+            } else {
+                android.content.pm.ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+            }
+        TouchControlsOverlay.portraitMode = vertical
         // Must run before any System.loadLibrary() call below - network_deferred.cpp reads this
         // env var once, at process/native-library load time.
         PrivateServerSettings.configureLaunch(this)
@@ -149,6 +199,10 @@ class MainActivity : SDLActivity() {
         // between the two beyond that path string.
         val dvdRoot = File(filesDir, "WiiCompiled/DiscData")
         nativeSetInstallPaths(filesDir.absolutePath, dvdRoot.absolutePath)
+        I18n.init(this)
+        nativeSetSystemLanguage(I18n.systemLanguage(this))  // what "Automatic" means for the game's menus
+        DeviceRumble.attach(this)
+        nativeSetDeviceCanVibrate(DeviceRumble.canVibrate)
         if (resolvedProduct == PRODUCT_RETRO_REWIND) {
             nativeSetRetroRewindRoot(File(filesDir, RETRO_REWIND_STAGING_SUBDIR).absolutePath)
         }
@@ -205,12 +259,36 @@ class MainActivity : SDLActivity() {
         // See getLibraries() above.
         System.loadLibrary("wii")
         System.loadLibrary("png16")
-        if (product == PRODUCT_BASE) {
-            System.loadLibrary("WiiCompiled")
+        loadGameLibrary(product)
+    }
+
+    /** The game code: from the imported game pack (GamePack.kt). Only a development build, which
+     * carries no toolkit id and has the libraries inside the APK, falls back to those. */
+    private fun gameLibraryFile(product: String): java.io.File? {
+        val name = if (product == PRODUCT_BASE) "libWiiCompiled.so" else "libGameCombined.so"
+        val file = GamePack.library(this, name)
+        return if (GamePack.state(this) == GamePack.State.Ready) file else null
+    }
+
+    private fun loadGameLibrary(product: String) {
+        val file = gameLibraryFile(product)
+        if (file != null) {
+            System.load(file.absolutePath)
         } else {
-            System.loadLibrary("GameCombined")
+            System.loadLibrary(if (product == PRODUCT_BASE) "WiiCompiled" else "GameCombined")
         }
     }
+
+    // SDL loads getLibraries() by name from the APK; the game library comes from the game pack.
+    override fun loadLibraries() {
+        for (lib in getLibraries().dropLast(1)) {
+            System.loadLibrary(lib)
+        }
+        loadGameLibrary(resolvedProduct)
+    }
+
+    override fun getMainSharedObject(): String =
+        gameLibraryFile(resolvedProduct)?.absolutePath ?: super.getMainSharedObject()
 
     /** Picks the display mode that matches what the game actually produces - Android does not do
      * this by default, even on a 90/120Hz-capable screen. Deliberately not the fastest mode: the
@@ -261,18 +339,16 @@ class MainActivity : SDLActivity() {
     /** Kills this process and relaunches straight back into MainActivity with the new product -
      * the standard Android trick for "this process cannot be reused, start clean." */
     private fun restartIntoProduct(product: String) {
-        val relaunch = Intent(this, MainActivity::class.java)
-        relaunch.putExtra(EXTRA_PRODUCT, product)
-        relaunch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK)
-        val pending =
-            PendingIntent.getActivity(
-                this,
-                0,
-                relaunch,
-                PendingIntent.FLAG_ONE_SHOT or PendingIntent.FLAG_IMMUTABLE,
-            )
-        val alarmManager = getSystemService(Context.ALARM_SERVICE) as AlarmManager
-        alarmManager.set(AlarmManager.RTC, System.currentTimeMillis() + 100, pending)
+        // RestartActivity (its own process) starts the game again once this process is gone. An
+        // alarm set here and fired after the kill is a background activity start, which Android
+        // 10+ and Huawei block, so the game just closed.
+        val restart = Intent(this, RestartActivity::class.java)
+        restart.putExtra(EXTRA_PRODUCT, product)
+        restart.putExtra(RestartActivity.EXTRA_OLD_PID, Process.myPid())
+        // startActivity hands the request to the system before it returns, so killing straight
+        // away is safe (and needed: the onCreate path returns without super.onCreate()).
+        startActivity(restart)
+        overridePendingTransition(0, 0)
         Process.killProcess(Process.myPid())
     }
 
@@ -311,12 +387,23 @@ class MainActivity : SDLActivity() {
         touchControls = TouchControlsOverlay.attach(this, mLayout)
         nativeSetTouchControlsVisibleCache(touchControls?.isUserVisible() ?: true)
         nativeSetDoubleTapAutoHoldCache(touchControls?.isDoubleTapAutoHoldEnabled() ?: false)
-        touchControls?.onEditModeChanged = { editing -> gearButton.alpha = if (editing) 1f else 0.55f }
+        touchControls?.onEditModeChanged = { editing ->
+            layoutEditing = editing
+            gearButton.alpha = if (editing) 1f else 0.55f
+        }
         // No floating button (pulled per direct request: "remove steering with motion the button
         // pls for now") - Motion Steering now lives in the settings sidebar's Controller page
         // instead, matching KartPad's own menu placement and dialog exactly.
         motionSteering = MotionSteering(this)
-        if (motionSteering?.enabled == true) {
+        // A controller can connect before the game screen is up.
+        motionSteering?.controllerConnected = gamepadConnected
+        touchControls?.setControllerConnected(gamepadConnected)
+        wiiWheel = WiiWheelMode(this)
+        wiiWheelActiveThisSession = wiiWheel?.let { it.sessionMode != WiiWheelMode.MODE_OFF && it.sensorAvailable } ?: false
+        if (wiiWheelActiveThisSession) {
+            // The game's own Wii Wheel code steers; tilt steering on the touch stick would fight it.
+            wiiWheel?.start()
+        } else if (motionSteering?.enabled == true) {
             touchControls?.setMotionSteeringActive(true)
             motionSteering?.start()
         }
@@ -325,15 +412,22 @@ class MainActivity : SDLActivity() {
     override fun onPause() {
         super.onPause()
         if (motionSteering?.enabled == true) motionSteering?.stop()
+        wiiWheel?.stop()
         externalMediaDetector.stop()
         thermalMonitor.stop()
+        DeviceRumble.setPaused(true)
     }
 
     override fun onResume() {
         super.onResume()
-        if (motionSteering?.enabled == true) motionSteering?.start()
+        if (wiiWheelActiveThisSession) {
+            wiiWheel?.start()
+        } else if (motionSteering?.enabled == true) {
+            motionSteering?.start()
+        }
         externalMediaDetector.start()
         thermalMonitor.start()
+        DeviceRumble.setPaused(false)
     }
 
     /** Called from native (settings_overlay.cpp's "Motion Steering" sidebar button, via
@@ -343,101 +437,139 @@ class MainActivity : SDLActivity() {
     }
 
     /**
-     * Action-list dialog matching KartPad's own Motion Steering menu exactly (dev.kartpad.android's
-     * KartPadActivity.showMotionSteering): a "Turn On & Recenter"/"Turn Off" action, "Recenter Now"
-     * (only while on), an invert toggle, and a sensitivity CYCLE (0.5x -> 1x -> 2x -> 0.5x) rather
-     * than a slider, plus "Continue Playing" to dismiss. Every action except "Continue Playing"
-     * reopens the dialog afterward so the updated state is immediately visible, same as KartPad.
+     * The motion controls menu, in the settings drawer's look. One "Steer with" choice (stick,
+     * plain tilt, or the game's own Wii Wheel) and a "Shake for tricks" switch, so it's clear which
+     * tilt is in use: two tilt sections with one greyed out read as broken. Plain tilt applies at
+     * once; anything that changes the Wii Wheel mode needs a restart (the game picks its
+     * controller at start-up and the runtime reads the mode once per process), so that waits for
+     * a "Restart" press.
      */
     private fun showMotionSteeringOptionsDialog() {
         val steering = motionSteering ?: return
-        val available = steering.sensorAvailable
-        val state =
+        val wheel = wiiWheel
+        val wheelAvailable = wheel != null && wheel.sensorAvailable
+        val sessionWheelMode = if (wiiWheelActiveThisSession) wheel?.sessionMode ?: WiiWheelMode.MODE_OFF else WiiWheelMode.MODE_OFF
+        val steerStick = 0
+        val steerTilt = 1
+        val steerWheel = 2
+        var steerPick =
             when {
-                !available -> "Unavailable on this device"
-                steering.enabled -> "On"
-                else -> "Off"
+                sessionWheelMode == WiiWheelMode.MODE_TILT -> steerWheel
+                steering.enabled && sessionWheelMode == WiiWheelMode.MODE_OFF -> steerTilt
+                else -> steerStick
             }
-        val actions =
-            if (!available) {
-                arrayOf("Continue Playing")
-            } else if (steering.enabled) {
-                arrayOf(
-                    "Turn Off",
-                    "Recenter Now",
-                    if (steering.inverted) "Use Standard Direction" else "Invert Direction",
-                    "Cycle Sensitivity",
-                    "Continue Playing",
-                )
-            } else {
-                arrayOf(
-                    "Turn On & Recenter",
-                    if (steering.inverted) "Use Standard Direction" else "Invert Direction",
-                    "Cycle Sensitivity",
-                    "Continue Playing",
-                )
+        var shakePick = sessionWheelMode != WiiWheelMode.MODE_OFF
+        val sheet = DriftSheet(this, T("Motion controls"), T("Steer and trick by moving the phone"))
+
+        fun wantedWheelMode(): Int =
+            when {
+                steerPick == steerWheel -> WiiWheelMode.MODE_TILT
+                shakePick -> WiiWheelMode.MODE_SHAKE_ONLY
+                else -> WiiWheelMode.MODE_OFF
             }
 
-        val content = LinearLayout(this)
-        content.orientation = LinearLayout.VERTICAL
-        val pad = (24 * resources.displayMetrics.density).toInt()
-        content.setPadding(pad, (4 * resources.displayMetrics.density).toInt(), pad, (8 * resources.displayMetrics.density).toInt())
-
-        val label = TextView(this)
-        label.text =
-            if (available) {
-                "Tilt the device like a steering wheel. Current state: $state. " +
-                    "Sensitivity: ${steering.sensitivity}x. Physical controllers take priority."
-            } else {
-                "Motion data is unavailable on this device or emulator. Touch and " +
-                    "physical-controller steering remain available."
-            }
-        content.addView(label)
-
-        val dialog =
-            AlertDialog.Builder(this)
-                .setTitle("Motion Steering")
-                .setView(ScrollView(this).apply { addView(content) })
-                .create()
-
-        fun applyEnabled(value: Boolean) {
+        fun applyTilt(value: Boolean) {
+            if (steering.enabled == value) return
             steering.enabled = value
             touchControls?.setMotionSteeringActive(value)
-            if (value) steering.start() else steering.stop()
+            if (value) {
+                steering.start()
+                steering.recenter()
+            } else {
+                steering.stop()
+            }
         }
 
-        actions.forEach { action ->
-            content.addView(
-                Button(this).apply {
-                    text = action
-                    contentDescription = action
-                    setOnClickListener {
-                        dialog.dismiss()
-                        when (action) {
-                            "Turn Off" -> applyEnabled(false)
-                            "Recenter Now" -> steering.recenter()
-                            "Invert Direction" -> steering.inverted = true
-                            "Use Standard Direction" -> steering.inverted = false
-                            "Cycle Sensitivity" ->
-                                steering.sensitivity =
-                                    when (steering.sensitivity) {
-                                        0.5f -> 1f
-                                        1f -> 2f
-                                        else -> 0.5f
-                                    }
-                            "Turn On & Recenter" -> {
-                                applyEnabled(true)
-                                steering.recenter()
-                            }
-                        }
-                        if (action != "Continue Playing") {
-                            mLayout.post { showMotionSteeringOptionsDialog() }
-                        }
-                    }
+        fun render() {
+            sheet.clear()
+            if (!steering.sensorAvailable) {
+                sheet.note(
+                    "This phone doesn't report its motion, so tilt steering and shaking can't work here. " +
+                        "Touch and controller steering still work.",
+                )
+                sheet.button("Done", DriftUi.Style.PRIMARY) { sheet.dismiss() }
+                return
+            }
+            val needsRestart = wantedWheelMode() != sessionWheelMode
+
+            sheet.section("Steering")
+            val options = if (wheelAvailable) listOf("Stick", "Tilt", "Wii Wheel") else listOf("Stick", "Tilt")
+            sheet.choice(
+                "Steer with",
+                when (steerPick) {
+                    steerTilt -> "Tilt the phone like a wheel. Push the stick to take over."
+                    steerWheel -> "The game's own Wii Wheel: hold the phone like one. Shaking does tricks. Push the stick to take over."
+                    else -> "The stick or a controller."
                 },
-            )
+                options,
+                steerPick,
+            ) {
+                steerPick = it
+                if (steerPick == steerWheel) shakePick = true
+                if (steerPick == steerTilt) shakePick = false
+                // Plain tilt can switch on and off right away, unless the Wii Wheel has to change too.
+                if (wantedWheelMode() == sessionWheelMode) applyTilt(steerPick == steerTilt)
+                render()
+            }
+            val tiltLive = steerPick == steerTilt && !needsRestart
+            if (steerPick == steerTilt) {
+                val sensitivities = listOf(0.5f, 1f, 2f)
+                sheet.choice(
+                    "Sensitivity",
+                    "How far you tilt for a full turn",
+                    listOf("Low", "Normal", "High"),
+                    sensitivities.indexOf(steering.sensitivity).takeIf { it >= 0 } ?: 1,
+                ) { steering.sensitivity = sensitivities[it] }
+                sheet.toggle("Flip direction", "For when tilting left turns right", steering.inverted) { steering.inverted = it }
+                val straighten = sheet.action("Set straight ahead", "Uses how you hold the phone right now") { steering.recenter() }
+                DriftUi.setUsable(straighten, tiltLive)
+            } else if (steerPick == steerWheel) {
+                val straighten = sheet.action("Set straight ahead", "Uses how you hold the phone right now") { wheel?.recenter() }
+                DriftUi.setUsable(straighten, !needsRestart)
+            }
+
+            if (wheelAvailable) {
+                sheet.section("Tricks")
+                val shakeRow =
+                    sheet.toggle(
+                        "Shake for tricks",
+                        when (steerPick) {
+                            steerWheel -> "Always on with the Wii Wheel"
+                            steerTilt -> "Not together with Tilt yet: use the Wii Wheel for both"
+                            else -> "Flick the phone in the air for a trick, or on a bike for a wheelie"
+                        },
+                        shakePick,
+                    ) {
+                        shakePick = it
+                        render()
+                    }
+                DriftUi.setUsable(shakeRow, steerPick == steerStick)
+            }
+
+            if (needsRestart) {
+                sheet.note("This change restarts the game. A race in progress is not saved.")
+                sheet.button("Cancel") {
+                    steerPick =
+                        when {
+                            sessionWheelMode == WiiWheelMode.MODE_TILT -> steerWheel
+                            steering.enabled && sessionWheelMode == WiiWheelMode.MODE_OFF -> steerTilt
+                            else -> steerStick
+                        }
+                    shakePick = sessionWheelMode != WiiWheelMode.MODE_OFF
+                    render()
+                }
+                sheet.button("Restart", DriftUi.Style.PRIMARY) {
+                    steering.enabled = steerPick == steerTilt
+                    wiiWheel?.mode = wantedWheelMode()
+                    sheet.dismiss()
+                    restartIntoProduct(resolvedProduct)
+                }
+            } else {
+                sheet.button("Done", DriftUi.Style.PRIMARY) { sheet.dismiss() }
+            }
         }
-        dialog.show()
+        render()
+        sheet.show()
     }
 
     /** Called from native (android_jni_bridge.cpp's AndroidNotifyGamepadConnectionChanged), which
@@ -445,7 +577,18 @@ class MainActivity : SDLActivity() {
      * overlay's own virtual gamepad is filtered out there already. May arrive on the SDL_main
      * thread, not the UI thread. */
     fun onNativeGamepadConnectionChanged(connected: Boolean) {
-        runOnUiThread { touchControls?.setControllerConnected(connected) }
+        runOnUiThread {
+            gamepadConnected = connected
+            touchControls?.setControllerConnected(connected)
+            motionSteering?.controllerConnected = connected
+        }
+    }
+
+    /** Called from native (aurora pad.cpp's PADControlMotor, via android_jni_bridge.cpp's
+     * AndroidDeviceRumble) when the phone should vibrate in place of player one's motorless
+     * controller: the strength in percent, or 0 to stop. May arrive off the UI thread. */
+    fun onNativeDeviceRumble(strengthPercent: Int) {
+        DeviceRumble.setStrength(strengthPercent)
     }
 
     /** Called from native (the in-game settings menu's "Touch controls" checkbox,

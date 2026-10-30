@@ -75,6 +75,19 @@ The runtime's Riivolution patch handling is a port of Dolphin's
 (both marked `SPDX-License-Identifier: GPL-2.0-or-later`).
 Source: <https://github.com/dolphin-emu/dolphin>
 
+### App icon artwork - CC BY
+
+The app icon (`android/app/src/main/res/mipmap-*/ic_launcher*.png`, the Switch and Builder icons made
+from it) is a 3D render made for this project. It contains:
+
+- **"Kart"** by **absence_art**, <https://sketchfab.com/3d-models/kart-1eef98f88e804e3481d8b1bfb311ee06>,
+  licensed under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/). Changes: the textures were
+  repainted (red, blue and yellow with yellow and black rims), and the model was posed, lit and rendered
+  together with the other elements.
+- **The Android robot** is reproduced or modified from work created and shared by **Google** and used
+  according to terms described in the
+  [Creative Commons 3.0 Attribution License](https://creativecommons.org/licenses/by/3.0/).
+
 ### pugixml - MIT
 
 Copyright (c) 2006-2025 Arseny Kapoulkine.

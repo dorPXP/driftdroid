@@ -1,10 +1,10 @@
 package com.driftdroid.android
 
 import android.app.Activity
-import android.app.AlertDialog
 import android.content.Context
 import android.system.Os
-import android.widget.EditText
+import com.driftdroid.android.ui.DriftSheet
+import com.driftdroid.android.ui.DriftUi
 
 /**
  * Experimental: redirects Wii game-service DNS lookups (retail *.nintendowifi.net and Retro
@@ -48,39 +48,28 @@ internal object PrivateServerSettings {
 
     fun show(activity: Activity) {
         val prefs = preferences(activity)
-        val field = EditText(activity)
-        field.isSingleLine = true
-        field.hint = "Hostname or IPv4 address"
-        field.inputType =
-            android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_VARIATION_URI
-        field.setText(prefs.getString(KEY_HOST, ""))
-
-        val dialog =
-            AlertDialog.Builder(activity)
-                .setTitle("Experimental Server Settings")
-                .setMessage(
-                    "Redirects online play to a self-hosted, compatible Wii game service instead " +
-                        "of the real WFC/Retro WFC servers. Requires an already-running compatible " +
-                        "service - not another player's app or a generic web server. This does not " +
-                        "restore original Nintendo WFC or provide native rooms. Fully close the app " +
-                        "from Recents and reopen it for a change here to take effect.",
-                )
-                .setView(field)
-                .setNegativeButton("Cancel", null)
-                .setNeutralButton("Use Default") { _, _ -> prefs.edit().remove(KEY_HOST).apply() }
-                .setPositiveButton("Save for Next Launch", null)
-                .create()
-        dialog.setOnShowListener {
-            dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
-                val host = field.text.toString().trim()
-                if (host.isNotEmpty() && !validHost(host)) {
-                    field.error = "Enter a hostname or IPv4 address, without a scheme, port or path."
-                } else {
-                    prefs.edit().putString(KEY_HOST, host).apply()
-                    dialog.dismiss()
-                }
+        val sheet = DriftSheet(activity, T("Experimental server"), T("For people who run their own server"), compact = true)
+        sheet.note(
+            "Sends online play to a self-hosted, compatible Wii game service instead of the real " +
+                "WFC / Retro WFC servers. It needs a service that is already running: not another " +
+                "player's app or an ordinary web server. It does not bring back Nintendo WFC. Close the " +
+                "app fully (from Recents) and open it again for a change to apply.",
+        )
+        val field = sheet.textField("Hostname or IPv4 address", prefs.getString(KEY_HOST, "").orEmpty())
+        field.inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_VARIATION_URI
+        sheet.button("Use default") {
+            prefs.edit().remove(KEY_HOST).apply()
+            sheet.dismiss()
+        }
+        sheet.button("Save", DriftUi.Style.PRIMARY) {
+            val host = field.text.toString().trim()
+            if (host.isNotEmpty() && !validHost(host)) {
+                field.error = T("Enter a hostname or IPv4 address, without a scheme, port or path.")
+            } else {
+                prefs.edit().putString(KEY_HOST, host).apply()
+                sheet.dismiss()
             }
         }
-        dialog.show()
+        sheet.show()
     }
 }

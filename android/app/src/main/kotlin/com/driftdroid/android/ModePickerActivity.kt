@@ -1,7 +1,6 @@
 package com.driftdroid.android
 
 import android.app.Activity
-import android.app.AlertDialog
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
@@ -30,6 +29,8 @@ import android.widget.LinearLayout
 import android.widget.ProgressBar
 import android.widget.TextView
 import androidx.documentfile.provider.DocumentFile
+import com.driftdroid.android.ui.DriftSheet
+import com.driftdroid.android.ui.DriftUi
 import java.io.File
 import java.io.RandomAccessFile
 import java.text.SimpleDateFormat
@@ -65,18 +66,15 @@ class ModePickerActivity : Activity() {
     private lateinit var diagnosticsButton: Button
     private lateinit var graphicsButton: Button
     private lateinit var iconButton: Button
+    private lateinit var languageButton: Button
     private lateinit var serverSettingsButton: Button
     private lateinit var modsButton: Button
     private lateinit var miiDataButton: Button
-    private lateinit var updateButton: Button
-    private var updateAfterSettings: AppUpdate.Update? = null
-    private var updateReceiver: BroadcastReceiver? = null
-    @Volatile private var updateCancelled = false
-    private var updateInstalling = false
     private val mainHandler = Handler(Looper.getMainLooper())
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        I18n.init(this)
         buildUi()
     }
 
@@ -91,12 +89,6 @@ class ModePickerActivity : Activity() {
             beginImportUi(RetroRewindInstallStatus.label)
             startStatusPolling()
         }
-        checkForUpdate()
-        // Back from Android's "Install unknown apps" page: continue the update if it was allowed.
-        updateAfterSettings?.let { update ->
-            updateAfterSettings = null
-            if (packageManager.canRequestPackageInstalls()) downloadUpdate(update)
-        }
     }
 
     override fun onPause() {
@@ -104,191 +96,7 @@ class ModePickerActivity : Activity() {
         stopStatusPolling()
     }
 
-    override fun onDestroy() {
-        updateCancelled = true
-        updateReceiver?.let { runCatching { unregisterReceiver(it) } }
-        updateReceiver = null
-        super.onDestroy()
-    }
-
     private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
-
-    // --- DriftDroid updating itself (see AppUpdate; the flow is KartPad's) ---
-
-    /** Looks for a newer release in the background and shows the button when there is one.
-     * [force] skips the once-an-hour limit - used when something just said an update is needed. */
-    private fun checkForUpdate(force: Boolean = false) {
-        val context = applicationContext
-        Thread {
-            AppUpdate.refresh(context, force)
-            val update = AppUpdate.known(context)
-            if (update == null) AppUpdate.clear(context)
-            mainHandler.post {
-                if (!isFinishing && !isDestroyed) {
-                    updateButton.text = if (update != null) "Update available: ${update.version}" else "Update available"
-                    updateButton.visibility = if (update != null) View.VISIBLE else View.GONE
-                }
-            }
-        }.apply { isDaemon = true; name = "DriftDroidUpdateCheck" }.start()
-    }
-
-    private fun showUpdate() {
-        val update = AppUpdate.known(this) ?: return
-        val dialog =
-            AlertDialog.Builder(this)
-                .setTitle("DriftDroid ${update.version} is out")
-                .setMessage(
-                    "You have ${AppUpdate.installedVersionName(this)}. DriftDroid can download the update and " +
-                        "install it over this one. Your saves, game data and Retro Rewind stay.",
-                )
-                .setNeutralButton("Release Notes") { _, _ -> openWeb(update.pageUrl) }
-                .setNegativeButton("Later", null)
-        if (update.apkUrl != null) dialog.setPositiveButton("Update Now") { _, _ -> startUpdate(update) }
-        dialog.show()
-    }
-
-    private fun openWeb(url: String) {
-        runCatching { startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url))) }
-    }
-
-    /** Android asks once before an app may install its own updates. */
-    private fun startUpdate(update: AppUpdate.Update) {
-        if (packageManager.canRequestPackageInstalls()) {
-            downloadUpdate(update)
-            return
-        }
-        AlertDialog.Builder(this)
-            .setTitle("Allow DriftDroid to Install Updates")
-            .setMessage(
-                "Android asks once before an app can install its own updates. On the next screen, turn on " +
-                    "Allow from this source, then come back to DriftDroid.",
-            )
-            .setPositiveButton("Continue") { _, _ ->
-                updateAfterSettings = update
-                try {
-                    startActivity(Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:$packageName")))
-                } catch (_: Exception) {
-                    updateAfterSettings = null
-                    showUpdateFailed(update, "Android's settings couldn't be opened.")
-                }
-            }
-            .setNegativeButton("Cancel", null)
-            .show()
-    }
-
-    private fun downloadUpdate(update: AppUpdate.Update) {
-        val label = TextView(this)
-        label.text = "Connecting to GitHub..."
-        label.setPadding(0, 0, 0, dp(12))
-        val bar = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal)
-        bar.max = 1000
-        bar.isIndeterminate = true
-        val content = LinearLayout(this)
-        content.orientation = LinearLayout.VERTICAL
-        content.setPadding(dp(24), dp(8), dp(24), 0)
-        content.addView(label)
-        content.addView(bar)
-        updateCancelled = false
-        val dialog =
-            AlertDialog.Builder(this)
-                .setTitle("Updating to DriftDroid ${update.version}")
-                .setView(content)
-                .setNegativeButton("Cancel") { _, _ -> updateCancelled = true }
-                .setCancelable(false)
-                .show()
-        listenForInstall(update, dialog)
-        val context = applicationContext
-        Thread {
-            val result =
-                runCatching {
-                    val apk =
-                        AppUpdate.download(context, update, { done, total ->
-                            mainHandler.post {
-                                if (total > 0) {
-                                    bar.isIndeterminate = false
-                                    bar.progress = (done * 1000 / total).toInt()
-                                    label.text = "Downloading: ${done / 1_048_576} of ${total / 1_048_576} MB"
-                                } else {
-                                    label.text = "Downloading: ${done / 1_048_576} MB"
-                                }
-                            }
-                        }) { updateCancelled }
-                    mainHandler.post {
-                        label.text =
-                            "Download checked. Android will ask you to confirm the update. DriftDroid closes " +
-                                "when it's done; open it again."
-                        bar.isIndeterminate = true
-                        dialog.getButton(AlertDialog.BUTTON_NEGATIVE)?.isEnabled = false
-                    }
-                    updateInstalling = true
-                    AppUpdate.install(context, apk)
-                }
-            result.onFailure { error ->
-                updateInstalling = false
-                mainHandler.post {
-                    if (isFinishing || isDestroyed) return@post
-                    dialog.dismiss()
-                    if (error !is AppUpdate.Cancelled) showUpdateFailed(update, error.message)
-                }
-            }
-        }.apply { isDaemon = true; name = "DriftDroidUpdateDownload" }.start()
-    }
-
-    /** Android's installer reports here: ask the player to confirm, then it replaces DriftDroid. */
-    private fun listenForInstall(update: AppUpdate.Update, dialog: AlertDialog) {
-        updateReceiver?.let { runCatching { unregisterReceiver(it) } }
-        val receiver =
-            object : BroadcastReceiver() {
-                override fun onReceive(context: Context, intent: Intent) {
-                    if (!updateInstalling) return
-                    when (intent.getIntExtra(PackageInstaller.EXTRA_STATUS, PackageInstaller.STATUS_FAILURE)) {
-                        PackageInstaller.STATUS_PENDING_USER_ACTION -> {
-                            val confirm =
-                                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                                    intent.getParcelableExtra(Intent.EXTRA_INTENT, Intent::class.java)
-                                } else {
-                                    @Suppress("DEPRECATION")
-                                    intent.getParcelableExtra(Intent.EXTRA_INTENT)
-                                }
-                            // Only Android's own confirmation screen, never one of DriftDroid's.
-                            if (confirm != null && confirm.component?.packageName != packageName) {
-                                runCatching { startActivity(confirm) }
-                            }
-                        }
-                        PackageInstaller.STATUS_SUCCESS, PackageInstaller.STATUS_FAILURE_ABORTED -> {
-                            updateInstalling = false
-                            dialog.dismiss()
-                        }
-                        else -> {
-                            updateInstalling = false
-                            dialog.dismiss()
-                            showUpdateFailed(update, intent.getStringExtra(PackageInstaller.EXTRA_STATUS_MESSAGE))
-                        }
-                    }
-                }
-            }
-        updateReceiver = receiver
-        val filter = IntentFilter(AppUpdate.ACTION_INSTALL_STATUS)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            registerReceiver(receiver, filter, RECEIVER_NOT_EXPORTED)
-        } else {
-            registerReceiver(receiver, filter)
-        }
-    }
-
-    private fun showUpdateFailed(update: AppUpdate.Update, reason: String?) {
-        val dialog =
-            AlertDialog.Builder(this)
-                .setTitle("The Update Didn't Finish")
-                .setMessage(
-                    (reason?.takeIf { it.isNotBlank() } ?: "Something went wrong.") +
-                        "\n\nYou can also download the APK in your browser and install it over DriftDroid.",
-                )
-                .setNegativeButton("Close", null)
-        update.apkUrl?.let { url -> dialog.setPositiveButton("Download in Browser") { _, _ -> openWeb(url) } }
-        dialog.show()
-    }
-
 
     /** A rounded "channel" tile background, Wii Menu channel style. */
     private fun channelDrawable(topColor: Int, bottomColor: Int, radius: Float): GradientDrawable =
@@ -403,7 +211,7 @@ class ModePickerActivity : Activity() {
         title.setPadding(0, dp(8), 0, 0)
 
         val subtitle = TextView(this)
-        subtitle.text = "Kart Channel"
+        subtitle.text = T("Kart Channel")
         subtitle.setTextColor(Color.argb(230, 0xDD, 0xDD, 0xDD))
         subtitle.textSize = 14f
         subtitle.gravity = Gravity.CENTER
@@ -414,7 +222,14 @@ class ModePickerActivity : Activity() {
 
         retroButton = Button(this)
         retroButton.setOnClickListener {
-            if (isRetroRewindInstalled()) {
+            if (packWithoutRetroRewind()) {
+                DriftSheet.message(
+                    this,
+                    "Retro Rewind isn't in your game pack",
+                    "Your game pack was made without Retro Rewind. To play it, run DriftDroid Builder again " +
+                        "with \"Retro Rewind\" ticked and import the new game pack.",
+                )
+            } else if (isRetroRewindInstalled()) {
                 launchRetroRewindOrUpdate()
             } else {
                 showInstallRetroRewindDialog()
@@ -455,18 +270,9 @@ class ModePickerActivity : Activity() {
         statusText.gravity = Gravity.CENTER
         statusText.setPadding(0, dp(16), 0, 0)
 
-        // Shown only once a newer DriftDroid release has been seen (see checkForUpdate).
-        updateButton = Button(this)
-        updateButton.text = "Update available"
-        updateButton.textSize = 13f
-        updateButton.setOnClickListener { showUpdate() }
-        val updateButtonParams = LinearLayout.LayoutParams(dp(260), dp(44))
-        updateButtonParams.topMargin = dp(12)
-        styleChannelButton(updateButton, Color.rgb(0x3F, 0xA9, 0x5A), Color.rgb(0x22, 0x7A, 0x3C), dp(12).toFloat())
-        updateButton.visibility = if (AppUpdate.known(this) != null) View.VISIBLE else View.GONE
 
         diagnosticsButton = Button(this)
-        diagnosticsButton.text = "Export Diagnostics"
+        diagnosticsButton.text = T("Export Diagnostics")
         diagnosticsButton.textSize = 11f
         diagnosticsButton.setOnClickListener { launchDiagnosticsExportPicker() }
         val diagnosticsButtonParams =
@@ -482,7 +288,7 @@ class ModePickerActivity : Activity() {
         diagnosticsButton.setShadowLayer(0f, 0f, 0f, 0)
 
         serverSettingsButton = Button(this)
-        serverSettingsButton.text = "Experimental Server Settings..."
+        serverSettingsButton.text = T("Experimental Server Settings...")
         serverSettingsButton.textSize = 11f
         serverSettingsButton.setOnClickListener { PrivateServerSettings.show(this) }
         val serverSettingsButtonParams =
@@ -500,7 +306,7 @@ class ModePickerActivity : Activity() {
         // Renderer choice lives here because a device with no working Vulkan driver crashes before
         // the in-game settings exist (GitHub issue #3).
         graphicsButton = Button(this)
-        graphicsButton.text = "Graphics..."
+        graphicsButton.text = T("Graphics...")
         graphicsButton.textSize = 11f
         graphicsButton.setOnClickListener { GraphicsSettings.show(this) }
         val graphicsButtonParams =
@@ -519,7 +325,7 @@ class ModePickerActivity : Activity() {
         // it opens the gallery picker, which must not run over a live game surface (see the
         // Mods... button below for the crash that caused).
         iconButton = Button(this)
-        iconButton.text = "App icon..."
+        iconButton.text = T("App icon...")
         iconButton.textSize = 11f
         iconButton.setOnClickListener { IconSettings.show(this) }
         val iconButtonParams =
@@ -534,13 +340,28 @@ class ModePickerActivity : Activity() {
         iconButton.setTextColor(Color.rgb(0xDD, 0xDD, 0xDD))
         iconButton.setShadowLayer(0f, 0f, 0f, 0)
 
+        languageButton = Button(this)
+        languageButton.text = T("Language...")
+        languageButton.textSize = 11f
+        languageButton.setOnClickListener { LanguageSettings.show(this) }
+        val languageButtonParams = LinearLayout.LayoutParams(dp(260), dp(40))
+        languageButtonParams.topMargin = dp(8)
+        styleChannelButton(
+            languageButton,
+            Color.rgb(0x5A, 0x5A, 0x5A),
+            Color.rgb(0x3A, 0x3A, 0x3A),
+            dp(12).toFloat(),
+        )
+        languageButton.setTextColor(Color.rgb(0xDD, 0xDD, 0xDD))
+        languageButton.setShadowLayer(0f, 0f, 0f, 0)
+
         // Import/manage from here, not from the in-game settings sidebar - launching Android's
         // file picker while a live game session's GPU surface is running lost the WebGPU/Vulkan
         // surface on-device ("QueuePresent failed with VK_ERROR_SURFACE_LOST_KHR") and crashed
         // the game. No such surface exists yet on this screen, so it's safe here - same reasoning
         // as why Retro Rewind's own install flow only ever runs from this Activity.
         modsButton = Button(this)
-        modsButton.text = "Mods..."
+        modsButton.text = T("Mods...")
         modsButton.textSize = 11f
         modsButton.setOnClickListener { ModManager.showManagerDialog(this) }
         val modsButtonParams =
@@ -554,6 +375,37 @@ class ModePickerActivity : Activity() {
         )
         modsButton.setTextColor(Color.rgb(0xDD, 0xDD, 0xDD))
         modsButton.setShadowLayer(0f, 0f, 0f, 0)
+
+        val gamePackButton = Button(this)
+        gamePackButton.text = T("Import Game Pack...")
+        gamePackButton.textSize = 11f
+        gamePackButton.setOnClickListener { launchGamePackPicker() }
+        val gamePackButtonParams = LinearLayout.LayoutParams(dp(260), dp(40))
+        gamePackButtonParams.topMargin = dp(8)
+        styleChannelButton(
+            gamePackButton,
+            Color.rgb(0x5A, 0x5A, 0x5A),
+            Color.rgb(0x3A, 0x3A, 0x3A),
+            dp(12).toFloat(),
+        )
+        gamePackButton.setTextColor(Color.rgb(0xDD, 0xDD, 0xDD))
+        gamePackButton.setShadowLayer(0f, 0f, 0f, 0)
+
+        // GitHub issue #14: bring a save over from a Wii NAND backup or Dolphin, or copy it out.
+        val saveDataButton = Button(this)
+        saveDataButton.text = T("Save Data...")
+        saveDataButton.textSize = 11f
+        saveDataButton.setOnClickListener { SaveData.showDialog(this) }
+        val saveDataButtonParams = LinearLayout.LayoutParams(dp(260), dp(40))
+        saveDataButtonParams.topMargin = dp(8)
+        styleChannelButton(
+            saveDataButton,
+            Color.rgb(0x5A, 0x5A, 0x5A),
+            Color.rgb(0x3A, 0x3A, 0x3A),
+            dp(12).toFloat(),
+        )
+        saveDataButton.setTextColor(Color.rgb(0xDD, 0xDD, 0xDD))
+        saveDataButton.setShadowLayer(0f, 0f, 0f, 0)
 
         // A square channel-style tile, same idea as baseButton/retroButton but square (96dp,
         // matching the eventual custom Mii icon art) rather than a wide banner - Mii Data isn't a
@@ -578,12 +430,14 @@ class ModePickerActivity : Activity() {
         root.addView(miiDataButton, miiDataButtonParams)
         root.addView(progressBar, progressParams)
         root.addView(statusText)
-        root.addView(updateButton, updateButtonParams)
         root.addView(diagnosticsButton, diagnosticsButtonParams)
         root.addView(graphicsButton, graphicsButtonParams)
         root.addView(iconButton, iconButtonParams)
+        root.addView(languageButton, languageButtonParams)
         root.addView(serverSettingsButton, serverSettingsButtonParams)
         root.addView(modsButton, modsButtonParams)
+        root.addView(saveDataButton, saveDataButtonParams)
+        root.addView(gamePackButton, gamePackButtonParams)
 
         // The picker has grown past what fits on-screen in landscape on some phones - confirmed
         // directly on-device: the two lowest buttons (server settings, Mii data) were laid out
@@ -606,39 +460,55 @@ class ModePickerActivity : Activity() {
         styleImageButton(baseButton, R.drawable.channel_mkwii, locked = !romInstalled, lockedLabel = "Install with ISO/WBFS")
 
         val retroInstalled = isRetroRewindInstalled()
-        styleImageButton(retroButton, R.drawable.channel_retro_rewind, locked = !retroInstalled, lockedLabel = "INSTALL")
+        val notInPack = packWithoutRetroRewind()
+        styleImageButton(
+            retroButton,
+            R.drawable.channel_retro_rewind,
+            locked = !retroInstalled || notInPack,
+            lockedLabel = if (notInPack) T("NOT IN GAME PACK") else "INSTALL",
+        )
         // Nothing to update or delete until a copy is actually installed.
         retroMenuButton.visibility = if (retroInstalled) View.VISIBLE else View.GONE
     }
+
+    /** A game pack is in and it was built without Retro Rewind. */
+    private fun packWithoutRetroRewind(): Boolean =
+        GamePack.state(this) == GamePack.State.Ready && !GamePack.hasRetroRewind(this)
 
     private fun isRomImported(): Boolean =
         com.driftdroid.android.rom.RomImportOverlay.isRomAlreadyImported(File(filesDir, "WiiCompiled/DiscData"))
 
     private fun showRetroRewindMenuDialog() {
-        AlertDialog.Builder(this)
-            .setTitle("Retro Rewind")
-            .setItems(arrayOf("Check for updates", "Reinstall", "Delete")) { _, which ->
-                when (which) {
-                    0 -> startDeltaUpdate()
-                    1 -> showInstallRetroRewindDialog()
-                    2 -> showDeleteRetroRewindDialog()
-                }
-            }
-            .show()
+        val sheet = DriftSheet(this, "Retro Rewind", RetroRewindCatalog.installedVersion(retroRewindRoot())?.let { T("Installed: %s").format(it) })
+        sheet.action("Check for updates", "Downloads only what changed") {
+            sheet.dismiss()
+            startDeltaUpdate()
+        }
+        sheet.action("Reinstall", "Download it again, or pick a copy you have") {
+            sheet.dismiss()
+            showInstallRetroRewindDialog()
+        }
+        sheet.action("Delete", "Frees about 2 GB") {
+            sheet.dismiss()
+            showDeleteRetroRewindDialog()
+        }
+        sheet.show()
     }
 
     private fun showDeleteRetroRewindDialog() {
-        AlertDialog.Builder(this)
-            .setTitle("Delete Retro Rewind")
-            .setMessage("This removes the installed Retro Rewind files from the app. You'll need to import them again to play.")
-            .setPositiveButton("Delete") { _, _ ->
-                retroRewindRoot().deleteRecursively()
-                refreshChannelButtons()
-                statusText.setTextColor(Color.rgb(0xDD, 0xDD, 0xDD))
-                statusText.text = "Retro Rewind deleted."
-            }
-            .setNegativeButton("Cancel", null)
-            .show()
+        DriftSheet.confirm(
+            this,
+            "Delete Retro Rewind?",
+            "This removes the installed Retro Rewind files from the app. You'll need to download or import " +
+                "them again to play. Your saves are kept.",
+            "Delete",
+            danger = true,
+        ) {
+            retroRewindRoot().deleteRecursively()
+            refreshChannelButtons()
+            statusText.setTextColor(Color.rgb(0xDD, 0xDD, 0xDD))
+            statusText.text = T("Retro Rewind deleted.")
+        }
     }
 
     private fun isRetroRewindInstalled(): Boolean =
@@ -666,7 +536,7 @@ class ModePickerActivity : Activity() {
                 } else {
                     val installed = RetroRewindCatalog.installedVersion(root)
                     beginImportUi(
-                        "Retro Rewind ${installed ?: ""} needs updating for this version of DriftDroid - updating it now...",
+                        T("Retro Rewind %s needs updating for this version of DriftDroid - updating it now...").format(installed ?: ""),
                     )
                     RetroRewindInstallService.startDeltaUpdate(this)
                     startStatusPolling()
@@ -676,73 +546,42 @@ class ModePickerActivity : Activity() {
     }
 
     private fun launchProduct(product: String) {
+        // The game code is not in the APK: it is made on a PC from the player's disc (GamePack.kt).
+        // A development build (no toolkit id) still carries it.
+        if (GamePack.expectedToolkitId(this) != null && GamePack.state(this) != GamePack.State.Ready) {
+            showGamePackNeededDialog(GamePack.state(this) == GamePack.State.WrongVersion)
+            return
+        }
         val intent = Intent(this, MainActivity::class.java)
         intent.putExtra(MainActivity.EXTRA_PRODUCT, product)
         startActivity(intent)
     }
 
-    /**
-     * A custom setView() layout, not AlertDialog's setItems() - setMessage() and setItems() are
-     * mutually exclusive on AlertDialog.Builder (the message view wins and the items list is
-     * simply never inflated when both are set), which is exactly why this used to look like "a
-     * message pops up and then nothing happens": the three install options were never actually
-     * on screen to tap, confirmed directly on-device via a UI dump showing only the message and
-     * Cancel button present.
-     */
+    /** Three ways in: download the newest release this build can run, or a copy the player has. */
     private fun showInstallRetroRewindDialog() {
-        val container = LinearLayout(this)
-        container.orientation = LinearLayout.VERTICAL
-        val pad = dp(20)
-        container.setPadding(pad, dp(4), pad, 0)
-
-        val message = TextView(this)
-        message.text =
-            "Retro Rewind is a separate, optional community mod. The download option below " +
-                "checks update.rwfc.net for the newest release this build of DriftDroid can " +
-                "actually run and fetches it straight from there (verified by hash before " +
-                "install) - or hand over a copy you already have (search \"Retro Rewind " +
-                "Mario Kart Wii\" or use the Wheel Wizard tool)."
-        message.setTextColor(Color.argb(220, 255, 255, 255))
-        message.textSize = 14f
-        message.setPadding(0, 0, 0, dp(16))
-        container.addView(message)
-
-        // The dialog itself doesn't scroll a custom setView() by default - with the message plus
-        // three option buttons this reliably overflowed the dialog's max height on-device (the
-        // "Select folder" option was entirely unreachable, "Select .zip" half-hidden under
-        // Cancel). Wrapping in a ScrollView, same fix as the main picker screen's overflow.
-        val scroll = android.widget.ScrollView(this)
-        scroll.addView(container, ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
-
-        val dialog =
-            AlertDialog.Builder(this)
-                .setTitle("Install Retro Rewind")
-                .setView(scroll)
-                .setNegativeButton("Cancel", null)
-                .create()
-
-        fun optionButton(label: String, onClick: () -> Unit): Button {
-            val button = Button(this)
-            button.text = label
-            button.setOnClickListener {
-                dialog.dismiss()
-                onClick()
-            }
-            val params = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
-            params.bottomMargin = dp(8)
-            container.addView(button, params)
-            return button
+        val sheet = DriftSheet(this, T("Install Retro Rewind"), T("A free community mod with 300+ tracks"))
+        sheet.note(
+            "The download takes the newest Retro Rewind release this DriftDroid can run, straight from " +
+                "Retro Rewind's own server, and checks it before installing. Or pick a copy you already " +
+                "have (from the Wheel Wizard tool, for example).",
+        )
+        sheet.action("Download it", "About 1.9 GB. Wi-Fi recommended") {
+            sheet.dismiss()
+            startLatestInstall()
         }
-
-        optionButton("Download newest supported release (~1.9GB)") { startLatestInstall() }
-        optionButton("Select .zip file I already have") { launchRetroRewindZipPicker() }
-        optionButton("Select an already-extracted folder") { launchRetroRewindFolderPicker() }
-
-        dialog.show()
+        sheet.action("Pick a .zip I have", "The file exactly as downloaded") {
+            sheet.dismiss()
+            launchRetroRewindZipPicker()
+        }
+        sheet.action("Pick an unzipped folder", "A folder with RetroRewind6 inside") {
+            sheet.dismiss()
+            launchRetroRewindFolderPicker()
+        }
+        sheet.show()
     }
 
     private fun startDownloadInstall() {
-        beginImportUi("Downloading Retro Rewind ${RetroRewindRelease.VERSION}...")
+        beginImportUi(T("Downloading Retro Rewind %s...").format(RetroRewindRelease.VERSION))
         RetroRewindInstallService.startDownloadInstall(this)
         startStatusPolling()
     }
@@ -750,7 +589,7 @@ class ModePickerActivity : Activity() {
     /** Installs whatever the live release catalog says is newest AND runnable on this build,
      * rather than only ever the release that was current when the app was compiled. */
     private fun startLatestInstall() {
-        beginImportUi("Checking for the newest Retro Rewind...")
+        beginImportUi(T("Checking for the newest Retro Rewind..."))
         RetroRewindInstallService.startLatestInstall(this)
         startStatusPolling()
     }
@@ -758,7 +597,7 @@ class ModePickerActivity : Activity() {
     /** Applies the mod's own small per-version update archives to the existing install - a few MB
      * rather than another ~1.9GB. */
     private fun startDeltaUpdate() {
-        beginImportUi("Checking for Retro Rewind updates...")
+        beginImportUi(T("Checking for Retro Rewind updates..."))
         RetroRewindInstallService.startDeltaUpdate(this)
         startStatusPolling()
     }
@@ -796,6 +635,9 @@ class ModePickerActivity : Activity() {
             REQUEST_CODE_IMPORT_MII_DATA -> handleMiiImportSourcePicked(data?.data)
             REQUEST_CODE_IMPORT_SINGLE_MII -> handleSingleMiiSourcePicked(data?.data)
             ModManager.REQUEST_CODE_PICK_ZIP -> ModManager.onZipPicked(this, data?.data)
+            REQUEST_CODE_IMPORT_GAME_PACK -> handleGamePackPicked(data?.data)
+            SaveData.REQUEST_CODE_EXPORT -> SaveData.onExportDestinationPicked(this, data?.data)
+            SaveData.REQUEST_CODE_IMPORT -> SaveData.onImportSourcePicked(this, data?.data)
             GpuDriverSettings.REQUEST_CODE_PICK_ZIP -> GpuDriverSettings.onZipPicked(this, data?.data)
             IconSettings.REQUEST_CODE_PICK_IMAGE -> IconSettings.onImagePicked(this, data?.data)
         }
@@ -813,53 +655,22 @@ class ModePickerActivity : Activity() {
     private fun miiDatabaseFile(): File =
         File(filesDir, "WiiCompiled/NAND/shared2/menu/FaceLib/RFL_DB.dat")
 
-    /** Custom setView(), not setItems() - see showInstallRetroRewindDialog's doc comment for why
-     * AlertDialog.Builder can't combine setMessage() with setItems() (confirmed directly
-     * on-device a second time here: the three Mii options never rendered, same root cause as the
-     * earlier Install Retro Rewind bug, just missed in this second dialog). */
     private fun showMiiDataMenuDialog() {
-        val container = LinearLayout(this)
-        container.orientation = LinearLayout.VERTICAL
-        val pad = dp(20)
-        container.setPadding(pad, dp(4), pad, 0)
-
-        val message = TextView(this)
-        message.text =
-            "Export or replace the Mii Channel's saved Miis (RFL_DB.dat), or add a single " +
-                "custom Mii (.rcd) into a free slot. Start Mario Kart Wii at least once before " +
-                "this file exists."
-        message.setTextColor(Color.argb(220, 255, 255, 255))
-        message.textSize = 14f
-        message.setPadding(0, 0, 0, dp(16))
-        container.addView(message)
-
-        val scroll = android.widget.ScrollView(this)
-        scroll.addView(container, ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
-
-        val dialog =
-            AlertDialog.Builder(this)
-                .setTitle("Mii Data")
-                .setView(scroll)
-                .setNegativeButton("Cancel", null)
-                .create()
-
-        fun optionButton(label: String, onClick: () -> Unit) {
-            val button = Button(this)
-            button.text = label
-            button.setOnClickListener {
-                dialog.dismiss()
-                onClick()
-            }
-            val params = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
-            params.bottomMargin = dp(8)
-            container.addView(button, params)
+        val sheet = DriftSheet(this, "Mii data", T("The Miis in the Mii Channel"))
+        sheet.note("Start Mario Kart Wii at least once first: that makes the Mii file.")
+        sheet.action("Export all Miis", "Saves RFL_DB.dat where you choose") {
+            sheet.dismiss()
+            launchMiiExportPicker()
         }
-
-        optionButton("Export whole database...") { launchMiiExportPicker() }
-        optionButton("Replace whole database...") { launchMiiImportPicker() }
-        optionButton("Import single Mii (.rcd)...") { launchSingleMiiImportPicker() }
-
-        dialog.show()
+        sheet.action("Replace all Miis", "From an RFL_DB.dat file. The current one is backed up") {
+            sheet.dismiss()
+            launchMiiImportPicker()
+        }
+        sheet.action("Add one Mii", "From a .rcd file, into a free slot") {
+            sheet.dismiss()
+            launchSingleMiiImportPicker()
+        }
+        sheet.show()
     }
 
     private fun launchSingleMiiImportPicker() {
@@ -904,19 +715,19 @@ class ModePickerActivity : Activity() {
                     dbFile.copyTo(backup, overwrite = true)
                     dbFile.writeBytes(result.database)
                     statusText.setTextColor(Color.rgb(20, 140, 60))
-                    statusText.text = "Mii added to slot ${result.slotIndex + 1} of 100."
+                    statusText.text = T("Mii added to slot %s of 100.").format(result.slotIndex + 1)
                 }
             }
         } catch (e: Exception) {
             statusText.setTextColor(Color.rgb(190, 30, 30))
-            statusText.text = "Mii import failed: ${e.message ?: "unknown error"}"
+            statusText.text = T("Mii import failed: %s").format(e.message ?: "unknown error")
         }
     }
 
     private fun launchMiiExportPicker() {
         if (!miiDatabaseFile().isFile) {
             statusText.setTextColor(Color.rgb(190, 30, 30))
-            statusText.text = "No Mii database yet - start Mario Kart Wii once first."
+            statusText.text = T("No Mii database yet - start Mario Kart Wii once first.")
             return
         }
         val stamp = SimpleDateFormat("yyyy-MM-dd_HHmmss", Locale.US).format(Date())
@@ -934,10 +745,10 @@ class ModePickerActivity : Activity() {
                 miiDatabaseFile().inputStream().use { input -> input.copyTo(output) }
             } ?: throw IllegalStateException("couldn't open the chosen destination")
             statusText.setTextColor(Color.rgb(20, 140, 60))
-            statusText.text = "Mii data exported."
+            statusText.text = T("Mii data exported.")
         } catch (e: Exception) {
             statusText.setTextColor(Color.rgb(190, 30, 30))
-            statusText.text = "Mii export failed: ${e.message ?: "unknown error"}"
+            statusText.text = T("Mii export failed: %s").format(e.message ?: "unknown error")
         }
     }
 
@@ -950,15 +761,14 @@ class ModePickerActivity : Activity() {
 
     private fun handleMiiImportSourcePicked(source: Uri?) {
         if (source == null) return
-        AlertDialog.Builder(this)
-            .setTitle("Replace Mii Data")
-            .setMessage(
-                "This replaces every Mii in the Mii Channel with the picked file's Miis. The " +
-                    "current database is backed up first (RFL_DB.dat.bak) in case this goes wrong.",
-            )
-            .setPositiveButton("Replace") { _, _ -> importMiiDatabase(source) }
-            .setNegativeButton("Cancel", null)
-            .show()
+        DriftSheet.confirm(
+            this,
+            "Replace all Miis?",
+            "Every Mii in the Mii Channel is replaced with the picked file's Miis. The current ones are " +
+                "backed up first (RFL_DB.dat.bak) in case this goes wrong.",
+            "Replace",
+            danger = true,
+        ) { importMiiDatabase(source) }
     }
 
     private fun importMiiDatabase(source: Uri): Unit =
@@ -979,12 +789,60 @@ class ModePickerActivity : Activity() {
             dest.copyTo(backup, overwrite = true)
             dest.writeBytes(picked)
             statusText.setTextColor(Color.rgb(20, 140, 60))
-            statusText.text = "Mii data replaced (previous copy saved as RFL_DB.dat.bak)."
+            statusText.text = T("Mii data replaced (previous copy saved as RFL_DB.dat.bak).")
             Unit
         } catch (e: Exception) {
             statusText.setTextColor(Color.rgb(190, 30, 30))
-            statusText.text = "Mii import failed: ${e.message ?: "unknown error"}"
+            statusText.text = T("Mii import failed: %s").format(e.message ?: "unknown error")
         }
+
+    private fun showGamePackNeededDialog(wrongVersion: Boolean) {
+        val message =
+            if (wrongVersion) {
+                T("Your game pack was made for a different version of DriftDroid. Get the DriftDroid Builder for this version, make a new game pack with it and import that.")
+            } else {
+                T("DriftDroid doesn't include any of Mario Kart Wii's code. You make it once on a Windows PC from your own disc:\n\n1. Download DriftDroid Builder from the DriftDroid GitHub page.\n2. Run it with your Mario Kart Wii disc image (PAL, .iso or .wbfs).\n3. Copy the game pack .zip it makes to this phone and tap Import Game Pack.")
+            }
+        val sheet = DriftSheet(this, T("Game pack needed"), compact = true)
+        sheet.note(message)
+        sheet.button("Get the builder") {
+            sheet.dismiss()
+            runCatching { startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(GamePack.BUILDER_URL))) }
+        }
+        sheet.button("Import game pack", DriftUi.Style.PRIMARY) {
+            sheet.dismiss()
+            launchGamePackPicker()
+        }
+        sheet.show()
+    }
+
+    private fun launchGamePackPicker() {
+        val intent = Intent(Intent.ACTION_OPEN_DOCUMENT)
+        intent.addCategory(Intent.CATEGORY_OPENABLE)
+        intent.type = "*/*"
+        startActivityForResult(intent, REQUEST_CODE_IMPORT_GAME_PACK)
+    }
+
+    private fun handleGamePackPicked(source: Uri?) {
+        if (source == null) return
+        statusText.setTextColor(Color.rgb(0xDD, 0xDD, 0xDD))
+        statusText.text = T("Importing the game pack...")
+        Thread {
+            val error =
+                GamePack.import(this, source) { bytes ->
+                    mainHandler.post { statusText.text = T("Importing the game pack... %s MB").format(bytes / (1 shl 20)) }
+                }
+            mainHandler.post {
+                if (error == null) {
+                    statusText.setTextColor(Color.rgb(20, 140, 60))
+                    statusText.text = T("Game pack imported. You can play now.")
+                } else {
+                    statusText.setTextColor(Color.rgb(190, 30, 30))
+                    statusText.text = T("Game pack import failed: %s").format(error)
+                }
+            }
+        }.start()
+    }
 
     /**
      * Bundles the runtime's own log files (see android_jni_bridge.cpp's freopen() of
@@ -1006,17 +864,17 @@ class ModePickerActivity : Activity() {
     private fun handleDiagnosticsDestinationPicked(destination: Uri?) {
         if (destination == null) return
         statusText.setTextColor(Color.rgb(0xDD, 0xDD, 0xDD))
-        statusText.text = "Exporting diagnostics..."
+        statusText.text = T("Exporting diagnostics...")
         val thread =
             Thread {
                 val error = writeDiagnosticsZip(destination)
                 mainHandler.post {
                     if (error == null) {
                         statusText.setTextColor(Color.rgb(20, 140, 60))
-                        statusText.text = "Diagnostics exported."
+                        statusText.text = T("Diagnostics exported.")
                     } else {
                         statusText.setTextColor(Color.rgb(190, 30, 30))
-                        statusText.text = "Diagnostics export failed: $error"
+                        statusText.text = T("Diagnostics export failed: %s").format(error)
                     }
                 }
             }
@@ -1047,10 +905,25 @@ class ModePickerActivity : Activity() {
                             appendLine("DriftDroid runtime diagnostics - review before sharing.")
                             appendLine("Device: ${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL}")
                             appendLine("API level: ${android.os.Build.VERSION.SDK_INT}")
+                            appendLine("App version: ${appVersionName()}")
+                            appendLine("Memory: ${totalMemoryMiB()} MiB")
                             appendLine("Each log is truncated to its last $MAX_LOG_FILE_BYTES bytes.")
                             appendLine("Files included: ${files.size}")
                         }.toByteArray(),
                     )
+                    zip.closeEntry()
+
+                    // A run that ends with no crash log could be an Android low-memory kill, a
+                    // Java exception or a crash our handlers do not catch; only Android knows
+                    // which (GitHub issues #11, #12).
+                    zip.putNextEntry(ZipEntry("exit_reasons.txt"))
+                    zip.write(describeRecentExits().toByteArray())
+                    zip.closeEntry()
+
+                    // A controller the game never lists is usually one Android does not report as
+                    // a gamepad (GitHub issue #13).
+                    zip.putNextEntry(ZipEntry("input_devices.txt"))
+                    zip.write(describeInputDevices().toByteArray())
                     zip.closeEntry()
 
                     val buffer = ByteArray(32 * 1024)
@@ -1080,6 +953,88 @@ class ModePickerActivity : Activity() {
         }
     }
 
+    private fun appVersionName(): String =
+        try {
+            packageManager.getPackageInfo(packageName, 0).versionName ?: "unknown"
+        } catch (_: Exception) {
+            "unknown"
+        }
+
+    private fun totalMemoryMiB(): Long {
+        val activityManager = getSystemService(Context.ACTIVITY_SERVICE) as android.app.ActivityManager
+        val info = android.app.ActivityManager.MemoryInfo()
+        activityManager.getMemoryInfo(info)
+        return info.totalMem / (1024 * 1024)
+    }
+
+    private fun describeRecentExits(): String {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
+            return "Not available before Android 11.\n"
+        }
+        val activityManager = getSystemService(Context.ACTIVITY_SERVICE) as android.app.ActivityManager
+        val exits =
+            try {
+                activityManager.getHistoricalProcessExitReasons(null, 0, MAX_EXIT_REASONS)
+            } catch (e: Exception) {
+                return "Could not read exit reasons: ${e.message}\n"
+            }
+        val stamp = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US)
+        return buildString {
+            appendLine("Most recent first. Times are the phone's local time.")
+            for (exit in exits) {
+                appendLine("---")
+                appendLine("time: ${stamp.format(Date(exit.timestamp))}")
+                appendLine("reason: ${exitReasonName(exit.reason)} (${exit.reason})")
+                appendLine("status: ${exit.status}")
+                appendLine("importance: ${exit.importance}")
+                appendLine("pss: ${exit.pss / 1024} MiB, rss: ${exit.rss / 1024} MiB")
+                exit.description?.let { appendLine("description: $it") }
+            }
+            if (exits.isEmpty()) appendLine("(none recorded)")
+        }
+    }
+
+    private fun exitReasonName(reason: Int): String =
+        when (reason) {
+            android.app.ApplicationExitInfo.REASON_ANR -> "ANR (app not responding)"
+            android.app.ApplicationExitInfo.REASON_CRASH -> "Java crash"
+            android.app.ApplicationExitInfo.REASON_CRASH_NATIVE -> "native crash"
+            android.app.ApplicationExitInfo.REASON_DEPENDENCY_DIED -> "dependency died"
+            android.app.ApplicationExitInfo.REASON_EXCESSIVE_RESOURCE_USAGE -> "excessive resource usage"
+            android.app.ApplicationExitInfo.REASON_EXIT_SELF -> "exited itself"
+            android.app.ApplicationExitInfo.REASON_INITIALIZATION_FAILURE -> "initialization failure"
+            android.app.ApplicationExitInfo.REASON_LOW_MEMORY -> "low memory kill"
+            android.app.ApplicationExitInfo.REASON_OTHER -> "other"
+            android.app.ApplicationExitInfo.REASON_PERMISSION_CHANGE -> "permission change"
+            android.app.ApplicationExitInfo.REASON_SIGNALED -> "killed by signal"
+            android.app.ApplicationExitInfo.REASON_USER_REQUESTED -> "user requested"
+            android.app.ApplicationExitInfo.REASON_USER_STOPPED -> "user stopped"
+            else -> "unknown"
+        }
+
+    private fun describeInputDevices(): String =
+        buildString {
+            for (id in android.view.InputDevice.getDeviceIds()) {
+                val device = android.view.InputDevice.getDevice(id) ?: continue
+                val sources = device.sources
+                val kinds =
+                    listOf(
+                        android.view.InputDevice.SOURCE_GAMEPAD to "gamepad",
+                        android.view.InputDevice.SOURCE_JOYSTICK to "joystick",
+                        android.view.InputDevice.SOURCE_DPAD to "dpad",
+                        android.view.InputDevice.SOURCE_KEYBOARD to "keyboard",
+                        android.view.InputDevice.SOURCE_MOUSE to "mouse",
+                        android.view.InputDevice.SOURCE_TOUCHSCREEN to "touchscreen",
+                    ).filter { (bit, _) -> sources and bit == bit }.joinToString(",") { it.second }
+                appendLine(
+                    "id=$id name='${device.name}' vendor=0x${Integer.toHexString(device.vendorId)} " +
+                        "product=0x${Integer.toHexString(device.productId)} virtual=${device.isVirtual} " +
+                        "external=${device.isExternal} " +
+                        "sources=0x${Integer.toHexString(sources)} [$kinds]",
+                )
+            }
+        }
+
     private fun handleFolderPicked(treeUri: Uri?) {
         if (treeUri == null) return
         // Best-effort: the transient grant this Activity already holds is enough to run the copy
@@ -1091,13 +1046,13 @@ class ModePickerActivity : Activity() {
         }
         val picked = DocumentFile.fromTreeUri(this, treeUri)
         if (picked == null) {
-            showImportError("Couldn't open that folder - try picking it again.")
+            showImportError(T("Couldn't open that folder - try picking it again."))
             return
         }
         // Walking a SAF tree means a content-provider round trip per entry, which on a big folder
         // on slow storage is far too slow for the main thread (an ANR reads to the player exactly
         // like the crash above). Resolve off-thread, then come back to the UI.
-        beginImportUi("Checking the selected folder...")
+        beginImportUi(T("Checking the selected folder..."))
         Thread {
             val resolved =
                 try {
@@ -1110,12 +1065,11 @@ class ModePickerActivity : Activity() {
                 if (resolved == null) {
                     endImportUi()
                     showImportError(
-                        "That folder doesn't contain RetroRewind6/Binaries/Code.pul - pick the " +
-                            "folder you extracted Retro Rewind into (or the RetroRewind6 folder itself).",
+                        T("That folder doesn't contain RetroRewind6/Binaries/Code.pul - pick the folder you extracted Retro Rewind into (or the RetroRewind6 folder itself)."),
                     )
                     return@post
                 }
-                statusText.text = "Copying Retro Rewind files - this can take a while for ~2GB..."
+                statusText.text = T("Copying Retro Rewind files - this can take a while for ~2GB...")
                 RetroRewindInstallService.startFolderInstall(this, resolved.uri)
                 startStatusPolling()
             }
@@ -1135,7 +1089,7 @@ class ModePickerActivity : Activity() {
             statusText.text = "\"$name\" isn't a .zip file - pick the Retro Rewind archive you downloaded."
             return
         }
-        beginImportUi("Extracting \"$name\" - this can take a while for ~2GB...")
+        beginImportUi(T("Extracting \"%s\" - this can take a while for ~2GB...").format(name))
         RetroRewindInstallService.startZipInstall(this, uri, name)
         startStatusPolling()
     }
@@ -1193,7 +1147,7 @@ class ModePickerActivity : Activity() {
         if (error == null) {
             statusText.setTextColor(Color.rgb(20, 140, 60))
             statusText.text =
-                RetroRewindInstallStatus.successMessage ?: "Retro Rewind installed ($filesCount files)."
+                RetroRewindInstallStatus.successMessage ?: T("Retro Rewind installed (%s files).").format(filesCount)
             refreshChannelButtons()
         } else {
             // Leave no half-copied install behind - isRetroRewindInstalled() only checks for
@@ -1206,10 +1160,7 @@ class ModePickerActivity : Activity() {
             }
             refreshChannelButtons()
             statusText.setTextColor(Color.rgb(190, 30, 30))
-            statusText.text = "Install failed: $error"
-            // If the reason was a Retro Rewind release this build can't run, the fix is a newer
-            // DriftDroid: look for one now instead of at the next hourly check.
-            checkForUpdate(force = true)
+            statusText.text = T("Install failed: %s").format(error)
         }
     }
 
@@ -1271,6 +1222,8 @@ class ModePickerActivity : Activity() {
         private const val REQUEST_CODE_EXPORT_DIAGNOSTICS = 0x52520002
         private const val MAX_LOG_FILES = 12
         private const val MAX_LOG_FILE_BYTES = 4L * 1024 * 1024
+        private const val MAX_EXIT_REASONS = 10
+        private const val REQUEST_CODE_IMPORT_GAME_PACK = 0x47500000 // "GP"
         private const val REQUEST_CODE_EXPORT_MII_DATA = 0x52520003
         private const val REQUEST_CODE_IMPORT_MII_DATA = 0x52520004
         private const val REQUEST_CODE_IMPORT_SINGLE_MII = 0x52520005

@@ -5,6 +5,7 @@
 // now extends SDLActivity) - not called directly from here.
 #if defined(__ANDROID__)
 
+#include <atomic>
 #include <jni.h>
 #include <cstdio>
 #include <filesystem>
@@ -14,7 +15,9 @@
 #include <vector>
 
 #include <SDL3/SDL_system.h>
+#include <dolphin/pad.h>
 
+#include "i18n.h"
 #include "android_jni_dispatch.h"
 #include "android_touch_overlay_bridge.h"
 #include "hle/storage/wii_disc_extractor.h"
@@ -66,6 +69,28 @@ void CallVoidMethodOnActivity(const char* methodName) {
     });
 }
 
+void CallIntMethodOnActivity(const char* methodName, int value) {
+    AndroidJniDispatch::Post([methodName, value] {
+        JNIEnv* env = static_cast<JNIEnv*>(SDL_GetAndroidJNIEnv());
+        jobject activity = static_cast<jobject>(SDL_GetAndroidActivity());
+        if (env == nullptr || activity == nullptr) {
+            return;
+        }
+        jclass activityClass = env->GetObjectClass(activity);
+        jmethodID method = env->GetMethodID(activityClass, methodName, "(I)V");
+        if (method != nullptr) {
+            env->CallVoidMethod(activity, method, static_cast<jint>(value));
+        }
+        env->DeleteLocalRef(activityClass);
+    });
+}
+
+// PADControlMotor (aurora pad.cpp) calls this from the game thread when player one's device should
+// start (strength in percent) or stop (0) vibrating in place of a controller without a motor.
+void AndroidDeviceRumble(u32 strengthPercent) {
+    CallIntMethodOnActivity("onNativeDeviceRumble", static_cast<int>(strengthPercent));
+}
+
 }  // namespace
 
 // settings_overlay.cpp's "Hide the settings button" checkbox.
@@ -76,8 +101,18 @@ extern "C" void AndroidSetSettingsButtonHidden(bool hidden) {
 // Called from aurora-main/lib/window.cpp's SDL_EVENT_GAMEPAD_ADDED/REMOVED handling - the touch
 // overlay auto-hides while a real controller is connected (TouchControlsOverlay.kt combines this
 // with the user's own manual on/off preference).
+namespace {
+std::atomic<bool> g_realControllerConnected{false};
+}
+
 extern "C" void AndroidNotifyGamepadConnectionChanged(bool connected) {
+    g_realControllerConnected.store(connected, std::memory_order_relaxed);
     CallVoidMethodOnActivity("onNativeGamepadConnectionChanged", connected);
+}
+
+// A real (not the touch overlay's) controller is connected. Read by wii_remote_input.cpp.
+extern "C" bool AndroidRealControllerConnected() {
+    return g_realControllerConnected.load(std::memory_order_relaxed);
 }
 
 // Called from the ImGui "Touch controls" settings checkbox (settings_overlay.cpp).
@@ -148,9 +183,29 @@ extern "C" int MkwHostCpuBaselineInit();
 int RuntimeMain(int argc, char** argv);  // NOT extern "C" - matches its real declaration in main.cpp
 
 // Touch equivalent of the desktop F10 settings-overlay hotkey - see MainActivity.kt's gear button.
+// Called once from MainActivity.onCreate: only a device with a vibrator stands in for a
+// controller's missing motor.
+extern "C" JNIEXPORT void JNICALL
+Java_com_driftdroid_android_MainActivity_nativeSetDeviceCanVibrate(JNIEnv*, jobject /* this */,
+                                                                    jboolean canVibrate) {
+    PADSetDeviceRumbleCallback(canVibrate == JNI_TRUE ? AndroidDeviceRumble : nullptr);
+}
+
 extern "C" JNIEXPORT void JNICALL
 Java_com_driftdroid_android_MainActivity_nativeToggleSettingsOverlay(JNIEnv*, jobject /* this */) {
     settings_overlay::ToggleTopBar();
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_driftdroid_android_MainActivity_nativeSetSystemLanguage(JNIEnv* env, jobject /* this */, jstring code) {
+    const char* chars = env->GetStringUTFChars(code, nullptr);
+    i18n::SetDetectedLanguage(chars);
+    env->ReleaseStringUTFChars(code, chars);
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_driftdroid_android_MainActivity_nativeOpenQuickPanel(JNIEnv*, jobject /* this */) {
+    return settings_overlay::OpenQuickPanel() ? JNI_TRUE : JNI_FALSE;
 }
 
 extern "C" JNIEXPORT jstring JNICALL

@@ -56,6 +56,10 @@ extern TextureWithSampler g_frameBuffer;
 extern TextureWithSampler g_frameBufferResolved;
 extern TextureWithSampler g_depthBuffer;
 extern wgpu::RenderPipeline g_CopyPipeline;
+// The copy pipeline for the final picture on screen: g_CopyPipeline, or one with the player's
+// brightness/contrast/saturation baked in. Call from the presenting thread.
+wgpu::RenderPipeline present_pipeline();
+void set_picture_adjust(float brightness, float contrast, float saturation) noexcept;
 extern wgpu::BindGroup g_CopyBindGroup;
 extern wgpu::Instance g_instance;
 extern bool g_bcTexturesSupported;
@@ -79,6 +83,10 @@ void shutdown();
 // Device-loss callbacks may run on a Dawn-managed thread and only publish loss state; frame
 // threads call this at ordered boundaries to turn it into the one user-visible fatal error.
 void fail_if_device_lost() noexcept;
+// Called when a second thread (frame worker, presenter, GX worker) or cached GPU work (pipeline
+// prewarm) starts using the device. After that, recreating the device is not safe, so a lost
+// device is reported as a fatal error instead of being recovered.
+void mark_device_shared() noexcept;
 void release_surface() noexcept;
 bool refresh_surface(bool recreate = true);
 void resize_swapchain(uint32_t width, uint32_t height, uint32_t native_width, uint32_t native_height,

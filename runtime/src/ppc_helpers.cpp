@@ -13,6 +13,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
+#include <ctime>
 #include <stdexcept>
 #include <limits>
 
@@ -45,6 +46,43 @@ uint32_t g_reservationAddr = 0;
 bool g_hasReservation = false;
 const auto g_timeBaseStart = std::chrono::steady_clock::now();
 
+// Days from 1970-01-01 to the given civil date (Howard Hinnant's algorithm).
+constexpr int64_t DaysFromCivil(int64_t y, unsigned m, unsigned d)
+{
+    y -= m <= 2;
+    const int64_t era = (y >= 0 ? y : y - 399) / 400;
+    const unsigned yoe = static_cast<unsigned>(y - era * 400);
+    const unsigned doy = (153 * (m > 2 ? m - 3 : m + 9) + 2) / 5 + d - 1;
+    const unsigned doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    return era * 146097 + static_cast<int64_t>(doe) - 719468;
+}
+
+// The Wii RTC holds local time; the OS counts ticks from 2000-01-01.
+uint64_t InitialTimeBase()
+{
+    const std::time_t now = std::time(nullptr);
+    std::tm local{};
+#if defined(_WIN32)
+    if (localtime_s(&local, &now) != 0) {
+        return 0;
+    }
+#else
+    if (localtime_r(&now, &local) == nullptr) {
+        return 0;
+    }
+#endif
+    const int64_t days = DaysFromCivil(local.tm_year + 1900, static_cast<unsigned>(local.tm_mon + 1),
+                                       static_cast<unsigned>(local.tm_mday)) -
+                         DaysFromCivil(2000, 1, 1);
+    const int64_t seconds = days * 86400 + local.tm_hour * 3600 + local.tm_min * 60 + local.tm_sec;
+    if (seconds <= 0) {
+        return 0;
+    }
+    return static_cast<uint64_t>(seconds) * TimeBaseContract::kTicksPerSecond;
+}
+
+const uint64_t g_timeBaseOrigin = InitialTimeBase();
+
 // Real Wii hardware's timebase register never jumps: it ticks at a fixed rate no matter what the
 // game does. This host, however, can stall for seconds at a time on things the guest has no
 // concept of - most notably a one-time Vulkan/Dawn shader pipeline compile burst on first launch
@@ -73,7 +111,7 @@ uint64_t GetTimeBase() {
     }
     const uint64_t virtualNanoseconds = g_virtualTimeBaseNs.fetch_add(delta, std::memory_order_relaxed) + delta;
 
-    return TimeBaseContract::NanosecondsToTicks(virtualNanoseconds);
+    return g_timeBaseOrigin + TimeBaseContract::NanosecondsToTicks(virtualNanoseconds);
 }
 
 constexpr uint32_t kFpscrFx = 1u << 31;

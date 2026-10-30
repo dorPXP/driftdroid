@@ -70,6 +70,13 @@ void initialize() noexcept {
   ZoneScoped;
   SDL_Renderer* renderer = window::get_sdl_renderer();
   ImGui_ImplSDL3_InitForSDLRenderer(window::get_sdl_window(), renderer);
+#if defined(__SWITCH__)
+  // The runtime feeds the controllers to ImGui from their events, all players merged
+  // (settings_overlay.cpp ForwardGamepadToImGui). The backend also polled the first controller
+  // every frame: with two connected the two sources disagreed each frame, ImGui stopped reading
+  // its input queue at every disagreement, and the settings menu fell seconds behind (2026-10-27).
+  ImGui_ImplSDL3_SetGamepadMode(ImGui_ImplSDL3_GamepadMode_Manual, nullptr, 0);
+#endif
   g_useSdlRenderer = renderer != nullptr;
   if (g_useSdlRenderer) {
     ImGui_ImplSDLRenderer3_Init(renderer);
@@ -86,18 +93,30 @@ void initialize() noexcept {
 
 void shutdown() noexcept {
   ZoneScoped;
-  if (g_useSdlRenderer) {
-    ImGui_ImplSDLRenderer3_Shutdown();
-  } else {
-    ImGui_ImplWGPU_Shutdown();
+  // Startup can fail before either backend initializes. A context alone does
+  // not mean its renderer/platform backend owns resources to release.
+  if (ImGui::GetCurrentContext() != nullptr) {
+    ImGuiIO& io = ImGui::GetIO();
+    if (io.BackendRendererUserData != nullptr) {
+      if (g_useSdlRenderer) {
+        ImGui_ImplSDLRenderer3_Shutdown();
+      } else {
+        ImGui_ImplWGPU_Shutdown();
+      }
+    }
+    if (io.BackendPlatformUserData != nullptr) {
+      ImGui_ImplSDL3_Shutdown();
+    }
+    ImGui::DestroyContext();
   }
-  ImGui_ImplSDL3_Shutdown();
-  ImGui::DestroyContext();
   for (const auto& texture : g_sdlTextures) {
     SDL_DestroyTexture(texture);
   }
   g_sdlTextures.clear();
   g_wgpuTextures.clear();
+  g_useSdlRenderer = false;
+  g_scale = 0.f;
+  g_frameDataBuilt = false;
 }
 
 void process_event(const SDL_Event& event) noexcept {
@@ -177,6 +196,9 @@ void new_frame(const AuroraWindowSize& size) noexcept {
   ImGui_ImplSDL3_NewFrame();
 
   ImGuiIO& io = ImGui::GetIO();
+#if defined(__SWITCH__)
+  io.BackendFlags |= ImGuiBackendFlags_HasGamepad;  // the backend clears it with no gamepads of its own
+#endif
   io.DisplayFramebufferScale = framebufferScale;
   ImGui::GetIO().DisplaySize = displaySize;
   ImGui::NewFrame();

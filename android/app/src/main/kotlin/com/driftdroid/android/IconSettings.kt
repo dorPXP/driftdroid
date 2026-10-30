@@ -1,7 +1,6 @@
 package com.driftdroid.android
 
 import android.app.Activity
-import android.app.AlertDialog
 import android.content.Intent
 import android.content.pm.ShortcutInfo
 import android.content.pm.ShortcutManager
@@ -14,6 +13,8 @@ import android.graphics.Rect
 import android.graphics.drawable.Icon
 import android.net.Uri
 import android.widget.Toast
+import com.driftdroid.android.ui.DriftSheet
+import com.driftdroid.android.ui.DriftUi
 
 /**
  * Custom home-screen icon, from a picture in the user's gallery.
@@ -43,23 +44,23 @@ object IconSettings {
         val pinned = isPinned(activity)
         val message =
             if (pinned) {
-                "Your custom shortcut is on the home screen. Change its picture, or switch it back " +
-                    "to the normal icon."
+                T("Your custom shortcut is on the home screen. Change its picture, or switch it back to the normal icon.")
             } else {
-                "Pick a picture from your gallery and DriftDroid will add a home-screen shortcut " +
-                    "with it. Android doesn't let apps replace their own icon, so the normal icon " +
-                    "stays in the app drawer."
+                T("Pick a picture from your gallery and DriftDroid will add a home-screen shortcut with it. Android doesn't let apps replace their own icon, so the normal icon stays in the app drawer.")
             }
-        val builder =
-            AlertDialog.Builder(activity)
-                .setTitle("App icon")
-                .setMessage(message)
-                .setPositiveButton("Pick a picture") { _, _ -> pickImage(activity) }
-                .setNegativeButton("Cancel", null)
+        val sheet = DriftSheet(activity, T("App icon"), compact = true)
+        sheet.note(message)
         if (pinned) {
-            builder.setNeutralButton("Use normal icon") { _, _ -> useNormalIcon(activity) }
+            sheet.button("Normal icon") {
+                sheet.dismiss()
+                useNormalIcon(activity)
+            }
         }
-        builder.show()
+        sheet.button("Pick a picture", DriftUi.Style.PRIMARY) {
+            sheet.dismiss()
+            pickImage(activity)
+        }
+        sheet.show()
     }
 
     private fun pickImage(activity: Activity) {
@@ -81,7 +82,7 @@ object IconSettings {
                 activity.contentResolver.openInputStream(uri)?.use { decodeScaled(it.readBytes()) }
             }.getOrNull()
         if (bitmap == null) {
-            Toast.makeText(activity, "Couldn't read that picture.", Toast.LENGTH_LONG).show()
+            Toast.makeText(activity, T("Couldn't read that picture."), Toast.LENGTH_LONG).show()
             return
         }
         // The launcher stores the shortcut's bitmap itself, so nothing needs keeping on our side.
@@ -104,11 +105,11 @@ object IconSettings {
         if (isPinned(activity)) {
             // Already on the home screen: swap its picture in place rather than adding another.
             manager.updateShortcuts(listOf(shortcut))
-            Toast.makeText(activity, "Shortcut icon updated.", Toast.LENGTH_SHORT).show()
+            Toast.makeText(activity, T("Shortcut icon updated."), Toast.LENGTH_SHORT).show()
             return
         }
         if (!manager.isRequestPinShortcutSupported) {
-            Toast.makeText(activity, "Your home screen doesn't support adding shortcuts.", Toast.LENGTH_LONG).show()
+            Toast.makeText(activity, T("Your home screen doesn't support adding shortcuts."), Toast.LENGTH_LONG).show()
             return
         }
         // Android shows its own "Add to home screen?" confirmation for this.

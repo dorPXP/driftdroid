@@ -14,6 +14,7 @@
 #include "ppc_runtime.h"
 #include "runtime_log.h"
 #include "os_internal.h"
+#include "sound_core.h"
 
 extern "C" uint32_t SetInterruptMask_801a66e0(uint32_t mask, uint32_t enable);
 
@@ -21,6 +22,11 @@ namespace OsHleInternal {
 std::atomic<bool> g_interrupts_enabled{true};
 std::atomic<uint32_t> g_interrupt_mask{0};
 } // namespace OsHleInternal
+
+namespace SoundCore {
+// Declared here rather than in sound_core.h, which every translated shard includes.
+extern std::atomic<const void*> g_mainSectionSite;
+}
 
 namespace {
 std::once_flag interrupt_init_log_once;
@@ -54,38 +60,71 @@ inline void UpdateCurrentContextInterruptFlag(bool enabled)
 // a relaxed load plus a release store gives readers the same guarantees as the old seq_cst
 // exchange, which on the Switch's ARMv8.0 cores is an exclusive-monitor retry loop. nw4r::snd calls
 // these pairs thousands of times a second.
-static inline bool SwapInterruptsEnabled(bool enabled) noexcept
+// `site`: the caller's return address, kept for the sound core's long-wait reports.
+static inline bool SwapInterruptsEnabled(bool enabled, const void* site) noexcept
 {
     const bool previous = g_interrupts_enabled.load(std::memory_order_relaxed);
     if (previous != enabled) {
         g_interrupts_enabled.store(enabled, std::memory_order_release);
+        if (!enabled && SoundCore::Enabled()) {
+            SoundCore::g_mainSectionSite.store(site, std::memory_order_relaxed);
+            SoundCore::MainThreadInterruptsDisabled();
+        }
     }
     return previous;
 }
 
 extern "C" int32_t OS__DisableInterrupts_801a65ac()
 {
-    const bool previous = SwapInterruptsEnabled(false);
+    if (SoundCore::Enabled() && SoundCore::OnSoundThread()) {
+        return SoundCore::SoundThreadSetInterrupts(false);
+    }
+    const bool previous = SwapInterruptsEnabled(false, __builtin_return_address(0));
     UpdateCurrentContextInterruptFlag(false);
     return previous ? 1 : 0;
 }
 
 extern "C" int32_t OS__RestoreInterrupts_801a65d4(int32_t level)
 {
-    const bool prev = SwapInterruptsEnabled(level != 0);
+    if (SoundCore::Enabled() && SoundCore::OnSoundThread()) {
+        return SoundCore::SoundThreadSetInterrupts(level != 0);
+    }
+    const bool prev = SwapInterruptsEnabled(level != 0, __builtin_return_address(0));
     UpdateCurrentContextInterruptFlag(level != 0);
     return prev ? 1 : 0;
 }
 
 extern "C" int32_t OS__EnableInterrupts_801a65c0()
 {
+    if (SoundCore::Enabled() && SoundCore::OnSoundThread()) {
+        return SoundCore::SoundThreadSetInterrupts(true);
+    }
     const bool prev = g_interrupts_enabled.exchange(true);
     UpdateCurrentContextInterruptFlag(true);
     return prev ? 1 : 0;
 }
 
+extern "C" int32_t OS__RestoreInterrupts_FromGuest(int32_t level)
+{
+    const int32_t previous = OS__RestoreInterrupts_801a65d4(level);
+    if (level != 0) {
+        SoundCore::MainThreadSafePoint();
+    }
+    return previous;
+}
+
+extern "C" int32_t OS__EnableInterrupts_FromGuest()
+{
+    const int32_t previous = OS__EnableInterrupts_801a65c0();
+    SoundCore::MainThreadSafePoint();
+    return previous;
+}
+
 bool OS_HLE_InterruptsEnabled() noexcept
 {
+    if (SoundCore::Enabled() && SoundCore::OnSoundThread()) {
+        return SoundCore::SoundThreadInterruptsEnabled();
+    }
     return g_interrupts_enabled.load(std::memory_order_acquire);
 }
 

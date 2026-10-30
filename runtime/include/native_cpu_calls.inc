@@ -47,6 +47,10 @@ extern "C" void GX__SetCurrentMtx_80173214(uint32_t id);
 extern "C" int32_t OS__DisableInterrupts_801a65ac();
 extern "C" int32_t OS__EnableInterrupts_801a65c0();
 extern "C" int32_t OS__RestoreInterrupts_801a65d4(int32_t level);
+// The same two as called by translated code: a guest-level return to "interrupts on" is also where
+// the emulation thread stops for the sound host thread when that one asks (sound_core.h).
+extern "C" int32_t OS__EnableInterrupts_FromGuest();
+extern "C" int32_t OS__RestoreInterrupts_FromGuest(int32_t level);
 extern "C" void GX__LoadNrmMtxImm_80173188(uint32_t ma, uint32_t id);
 extern "C" void GX__LoadTexMtxImm_80173234(uint32_t ma, uint32_t id, uint32_t t);
 extern "C" void GX__LoadPosMtxIndx_8017315c(uint32_t mi, uint32_t id);
@@ -157,8 +161,8 @@ MKW_KNOWN_LEAF_NATIVE(0x8017310Cu, GX__LoadPosMtxImm_8017310c, cpu->gpr[3], cpu-
 MKW_KNOWN_LEAF_NATIVE(0x80173214u, GX__SetCurrentMtx_80173214, cpu->gpr[3]);
 
 MKW_KNOWN_LEAF_NATIVE_RET(0x801A65ACu, OS__DisableInterrupts_801a65ac);
-MKW_KNOWN_LEAF_NATIVE_RET(0x801A65C0u, OS__EnableInterrupts_801a65c0);
-MKW_KNOWN_LEAF_NATIVE_RET(0x801A65D4u, OS__RestoreInterrupts_801a65d4, static_cast<int32_t>(cpu->gpr[3]));
+MKW_KNOWN_LEAF_NATIVE_RET(0x801A65C0u, OS__EnableInterrupts_FromGuest);
+MKW_KNOWN_LEAF_NATIVE_RET(0x801A65D4u, OS__RestoreInterrupts_FromGuest, static_cast<int32_t>(cpu->gpr[3]));
 MKW_KNOWN_LEAF_NATIVE(0x80173188u, GX__LoadNrmMtxImm_80173188, cpu->gpr[3], cpu->gpr[4]);
 MKW_KNOWN_LEAF_NATIVE(0x80173234u, GX__LoadTexMtxImm_80173234, cpu->gpr[3], cpu->gpr[4], cpu->gpr[5]);
 MKW_KNOWN_LEAF_NATIVE(0x8017315Cu, GX__LoadPosMtxIndx_8017315c, cpu->gpr[3], cpu->gpr[4]);

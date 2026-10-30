@@ -371,6 +371,23 @@ ShaderInfo build_shader_info(const ShaderConfig& config) noexcept {
     }
   }
 
+  // Texgens can consume a color channel even when TEV never reads it directly. Include these
+  // channels before calculating lighting and uniform requirements (aurora 2bf0825).
+  for (int i = 0; i < info.sampledTexCoords.size(); ++i) {
+    if (!info.sampledTexCoords.test(i)) {
+      continue;
+    }
+    const auto& tcg = config.tcgs[i];
+    if (tcg.type >= GX_TG_BUMP0 && tcg.type <= GX_TG_BUMP7) {
+      continue;
+    }
+    if (tcg.src == GX_TG_COLOR0) {
+      info.sampledColorChannels.set(0);
+    } else if (tcg.src == GX_TG_COLOR1) {
+      info.sampledColorChannels.set(1);
+    }
+  }
+
   const auto loadsTevRegs = info.loadsTevRegRgb | info.loadsTevRegAlpha;
   info.uniformSize += loadsTevRegs.count() * sizeof(Vec4<float>);
   for (int i = 0; i < info.sampledColorChannels.size(); ++i) {

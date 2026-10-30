@@ -1,11 +1,12 @@
 package com.driftdroid.android
 
 import android.app.Activity
-import android.app.AlertDialog
 import android.content.Intent
 import android.net.Uri
 import android.os.Build
 import android.widget.Toast
+import com.driftdroid.android.ui.DriftSheet
+import com.driftdroid.android.ui.DriftUi
 import java.io.File
 import java.util.zip.ZipFile
 import java.util.zip.ZipInputStream
@@ -117,31 +118,31 @@ object GpuDriverSettings {
         }
     }
 
+    /** Pick a driver (saved on tap) or install one from a .zip. */
     fun show(activity: Activity) {
         val drivers = installed(activity)
         val currentDir = readKey(activity, KEY_DIR)?.trimEnd('/')
-        var selected = drivers.indexOfFirst { it.dir.absolutePath == currentDir } + 1
-        val labels =
-            (listOf("System driver (default)\nThe driver that came with the phone.") +
-                    drivers.map { if (it.details.isBlank()) it.name else "${it.name}\n${it.details}" })
-                .toTypedArray()
-
-        AlertDialog.Builder(activity)
-            .setTitle("GPU driver (Snapdragon only)")
-            .setSingleChoiceItems(labels, selected) { _, which -> selected = which }
-            .setNegativeButton("Cancel", null)
-            .setNeutralButton("Install .zip...") { _, _ -> pickZip(activity) }
-            .setPositiveButton("Save") { _, _ ->
-                val ok = select(activity, drivers.getOrNull(selected - 1))
-                val message =
-                    when {
-                        !ok -> "Could not save the driver choice."
-                        selected == 0 -> "Using the system driver."
-                        else -> "Driver selected. It is used with the Vulkan renderer the next time a game starts."
-                    }
-                Toast.makeText(activity, message, Toast.LENGTH_LONG).show()
+        val current = drivers.indexOfFirst { it.dir.absolutePath == currentDir } + 1
+        val sheet = DriftSheet(activity, "GPU driver", T("Snapdragon phones only. Used with Vulkan"))
+        val rows = ArrayList<android.widget.LinearLayout>()
+        fun pick(index: Int) {
+            if (select(activity, drivers.getOrNull(index - 1))) {
+                rows.forEachIndexed { i, row -> sheet.setPicked(row, i == index) }
+            } else {
+                Toast.makeText(activity, T("Could not save the driver choice."), Toast.LENGTH_LONG).show()
             }
-            .show()
+        }
+        rows += sheet.radio("System driver", "The driver that came with the phone", current == 0) { pick(0) }
+        drivers.forEachIndexed { i, driver ->
+            rows += sheet.radio(driver.name, driver.details.ifBlank { null }, current == i + 1) { pick(i + 1) }
+        }
+        sheet.note("A new choice is used the next time the game starts.")
+        sheet.button("Install .zip") {
+            sheet.dismiss()
+            pickZip(activity)
+        }
+        sheet.button("Done", DriftUi.Style.PRIMARY) { sheet.dismiss() }
+        sheet.show()
     }
 
     private fun pickZip(activity: Activity) {
@@ -159,11 +160,7 @@ object GpuDriverSettings {
             val error = runCatching { install(activity, uri) }.exceptionOrNull()?.let { it.message ?: it.toString() }
             activity.runOnUiThread {
                 if (error != null) {
-                    AlertDialog.Builder(activity)
-                        .setTitle("Driver not installed")
-                        .setMessage(error)
-                        .setPositiveButton("OK", null)
-                        .show()
+                    DriftSheet.message(activity, "Driver not installed", error)
                 } else {
                     show(activity)
                 }
@@ -176,7 +173,7 @@ object GpuDriverSettings {
         staging.deleteRecursively()
         staging.mkdirs()
         try {
-            val input = activity.contentResolver.openInputStream(uri) ?: error("Could not open that file.")
+            val input = activity.contentResolver.openInputStream(uri) ?: error(T("Could not open that file."))
             input.use { stream ->
                 ZipInputStream(stream).use { zip ->
                     var total = 0L
@@ -191,7 +188,7 @@ object GpuDriverSettings {
                                 val read = zip.read(buffer)
                                 if (read < 0) break
                                 total += read
-                                if (total > 512L * 1024 * 1024) error("That file is too large to be a driver package.")
+                                if (total > 512L * 1024 * 1024) error(T("That file is too large to be a driver package."))
                                 output.write(buffer, 0, read)
                             }
                         }
@@ -199,21 +196,21 @@ object GpuDriverSettings {
                 }
             }
             val metaFile = File(staging, "meta.json")
-            if (!metaFile.isFile) error("That is not a driver package (no meta.json inside the zip).")
+            if (!metaFile.isFile) error(T("That is not a driver package (no meta.json inside the zip)."))
             val meta = JSONObject(metaFile.readText())
             val library = meta.optString("libraryName")
             if (library.isBlank() || !File(staging, library).isFile) {
-                error("The driver package is incomplete (its driver file is missing).")
+                error(T("The driver package is incomplete (its driver file is missing)."))
             }
             val minApi = meta.optInt("minApi", 0)
             if (minApi > Build.VERSION.SDK_INT) {
-                error("This driver needs a newer Android version than this device has.")
+                error(T("This driver needs a newer Android version than this device has."))
             }
             val name = meta.optString("name").ifBlank { "driver" }
             val folder = name.replace(Regex("[^A-Za-z0-9._-]+"), "_").trim('_', '.').ifBlank { "driver" }
             val target = File(driversDir(activity), folder)
             target.deleteRecursively()
-            if (!staging.renameTo(target)) error("Could not store the driver.")
+            if (!staging.renameTo(target)) error(T("Could not store the driver."))
         } finally {
             staging.deleteRecursively()
         }

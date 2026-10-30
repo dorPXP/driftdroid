@@ -1,8 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!-- Adaptive icon: the launcher applies its own mask (circle, squircle, teardrop), so the icon is
      never a bare square. minSdk is 29, so every supported device uses this; the ic_launcher PNGs
-     are only a fallback. The artwork sits inside the 72dp safe zone of the 108dp canvas, on a
-     background matching its own, so no mask shape crops the title or the kart. -->
+     are only a fallback. The 3D icon (kart and robot) sits in the middle of the 108dp canvas over a blurred copy of itself, so no
+     mask shape crops the kart or shows an edge. -->
 <adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
     <background android:drawable="@mipmap/ic_launcher_background" />
     <foreground android:drawable="@mipmap/ic_launcher_foreground" />

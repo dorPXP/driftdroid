@@ -43,7 +43,7 @@ class RetroRewindInstallService : Service() {
         }
 
         ensureNotificationChannel()
-        startForegroundCompat(buildNotification("Preparing Retro Rewind install..."))
+        startForegroundCompat(buildNotification(T("Preparing Retro Rewind install...")))
 
         val thread =
             Thread {
@@ -97,7 +97,7 @@ class RetroRewindInstallService : Service() {
         // RetroRewind6 folder is still what gets copied - now as a real directory.
         val source = DocumentFile.fromTreeUri(this, sourceUri) ?: return "couldn't open the selected folder"
         if (!source.isDirectory) return "the selected item isn't a folder"
-        RetroRewindInstallStatus.start("Copying Retro Rewind files")
+        RetroRewindInstallStatus.start(T("Copying Retro Rewind files"))
 
         // Checked before copying ~2GB, not after: source is already the resolved RetroRewind6
         // folder (ModePickerActivity.resolveRetroRewind6 picked it), so Binaries/Code.pul is
@@ -126,7 +126,7 @@ class RetroRewindInstallService : Service() {
     private fun runZipInstall(intent: Intent): String? {
         val zipUri = intent.getParcelableUriExtra(EXTRA_SOURCE_URI) ?: return "missing source"
         val name = intent.getStringExtra(EXTRA_ZIP_NAME) ?: "the archive"
-        RetroRewindInstallStatus.start("Extracting \"$name\"")
+        RetroRewindInstallStatus.start(T("Extracting \"%s\"").format(name))
 
         val zipSize = queryFileSize(zipUri)
         if (zipSize > 0) {
@@ -148,7 +148,7 @@ class RetroRewindInstallService : Service() {
      * download fails closed rather than silently installing something unexpected.
      */
     private fun runDownloadInstall(): String? {
-        RetroRewindInstallStatus.start("Downloading Retro Rewind ${RetroRewindRelease.VERSION}")
+        RetroRewindInstallStatus.start(T("Downloading Retro Rewind %s").format(RetroRewindRelease.VERSION))
         // Enough room for the downloaded archive AND its extracted contents to coexist, plus the
         // same scratch/rename headroom the SAF zip path budgets for.
         checkAvailableSpace(
@@ -160,25 +160,28 @@ class RetroRewindInstallService : Service() {
             RetroRewindRelease.ARCHIVE_URL,
             downloadFile,
             RetroRewindRelease.ARCHIVE_BYTES,
-            "Downloading Retro Rewind ${RetroRewindRelease.VERSION}",
+            T("Downloading Retro Rewind %s").format(RetroRewindRelease.VERSION),
         )?.let { return it }
         // Hashed after the fact rather than while streaming, because a resumed download only ever
         // sees the tail of the file - the whole thing has to be read back to verify it.
-        RetroRewindInstallStatus.start("Verifying Retro Rewind ${RetroRewindRelease.VERSION}")
+        RetroRewindInstallStatus.start(T("Verifying Retro Rewind %s").format(RetroRewindRelease.VERSION))
         val actualHash = sha256OfFile(downloadFile)
         if (actualHash == null || !actualHash.equals(RetroRewindRelease.ARCHIVE_SHA256, ignoreCase = true)) {
             downloadFile.delete()
             return "downloaded file failed verification (hash mismatch) - try again"
         }
 
-        RetroRewindInstallStatus.start("Extracting Retro Rewind ${RetroRewindRelease.VERSION}")
+        RetroRewindInstallStatus.start(T("Extracting Retro Rewind %s").format(RetroRewindRelease.VERSION))
         val scratchDir = File(filesDir, "WiiCompiled/.retro_rewind_zip_tmp")
         val filesExtracted = intArrayOf(0)
         val error = extractZipAndInstall({ downloadFile.inputStream() }, scratchDir, filesExtracted)
         scratchDir.deleteRecursively()
         downloadFile.delete()
         if (error == null) {
-            RetroRewindInstallStatus.successMessage = "Retro Rewind ${RetroRewindRelease.VERSION} installed."
+            // The archive's own version.txt can lag (6.13.3's says "6.13.2"), which would make the
+            // next update check re-apply an update that is already in.
+            writeInstalledVersion(RetroRewindRelease.VERSION)
+            RetroRewindInstallStatus.successMessage = T("Retro Rewind %s installed.").format(RetroRewindRelease.VERSION)
         }
         return error
     }
@@ -193,7 +196,7 @@ class RetroRewindInstallService : Service() {
      * it falls back to the pinned, hash-verified release rather than failing outright.
      */
     private fun runLatestInstall(): String? {
-        RetroRewindInstallStatus.start("Checking for the newest Retro Rewind")
+        RetroRewindInstallStatus.start(T("Checking for the newest Retro Rewind"))
         val releases =
             RetroRewindCatalog.fetchReleases().getOrElse {
                 // Offline or the service is down - the pinned build is still a perfectly good
@@ -238,27 +241,26 @@ class RetroRewindInstallService : Service() {
                 // install - say what happened and leave the rest to "Check for updates".
                 val reached = RetroRewindCatalog.installedVersion(retroRewindRoot()) ?: base.version
                 RetroRewindInstallStatus.successMessage =
-                    "Retro Rewind $reached installed. Updating it to ${target.version} didn't finish " +
-                        "($updateError) - use \"Check for updates\" to try again."
+                    T("Retro Rewind %s installed. Updating it to %s didn't finish (%s) - use \"Check for updates\" to try again.").format(reached, target.version, updateError)
                 return null
             }
         }
-        RetroRewindInstallStatus.successMessage = "Retro Rewind ${target.version} installed."
+        RetroRewindInstallStatus.successMessage = T("Retro Rewind %s installed.").format(target.version)
         return null
     }
 
     private fun installFullArchive(release: RetroRewindCatalog.Release, expectedBytes: Long): String? {
-        RetroRewindInstallStatus.start("Downloading Retro Rewind ${release.version}")
+        RetroRewindInstallStatus.start(T("Downloading Retro Rewind %s").format(release.version))
         checkAvailableSpace(expectedBytes + (expectedBytes.toDouble() * DOWNLOAD_EXTRACT_SPACE_FACTOR).toLong())?.let { return it }
 
         val downloadFile = File(cacheDir, "RetroRewind-${release.version}.zip")
         // Note: a failed download deliberately leaves its partial file in place - downloadToFile
         // resumes from it next time, which is the difference between "eventually finishes on a
         // flaky connection" and "never finishes".
-        downloadToFile(release.fullArchiveUrl, downloadFile, expectedBytes, "Downloading Retro Rewind ${release.version}")
+        downloadToFile(release.fullArchiveUrl, downloadFile, expectedBytes, T("Downloading Retro Rewind %s").format(release.version))
             ?.let { return it }
 
-        RetroRewindInstallStatus.start("Extracting Retro Rewind ${release.version}")
+        RetroRewindInstallStatus.start(T("Extracting Retro Rewind %s").format(release.version))
         val scratchDir = File(filesDir, "WiiCompiled/.retro_rewind_zip_tmp")
         val filesExtracted = intArrayOf(0)
         // extractZipAndInstall re-checks Code.pul against the supported set before it replaces
@@ -278,9 +280,9 @@ class RetroRewindInstallService : Service() {
     private fun runDeltaUpdate(): String? {
         val destRoot = retroRewindRoot()
         if (!File(destRoot, "Binaries/Code.pul").isFile) {
-            return "Retro Rewind isn't installed yet - install it first"
+            return T("Retro Rewind isn't installed yet - install it first")
         }
-        RetroRewindInstallStatus.start("Checking for Retro Rewind updates")
+        RetroRewindInstallStatus.start(T("Checking for Retro Rewind updates"))
         val installed =
             RetroRewindCatalog.installedVersion(destRoot)
                 ?: return "couldn't tell which Retro Rewind version is installed (no readable version.txt) - " +
@@ -294,22 +296,21 @@ class RetroRewindInstallService : Service() {
         if (RetroRewindCatalog.compareVersions(target.version, installed) <= 0) {
             RetroRewindInstallStatus.successMessage =
                 if (newest != null && RetroRewindCatalog.compareVersions(newest.version, installed) > 0) {
-                    "Retro Rewind $installed is up to date for this build. (${newest.version} exists but " +
-                        "changes game code DriftDroid hasn't been compiled for yet.)"
+                    T("Retro Rewind %s is up to date for this build. (%s exists but changes game code DriftDroid hasn't been compiled for yet.)").format(installed, newest.version)
                 } else {
-                    "Retro Rewind $installed is already up to date."
+                    T("Retro Rewind %s is already up to date.").format(installed)
                 }
             return null
         }
 
         val chain = RetroRewindCatalog.deltaChain(releases, installed, target.version)
         if (chain.isEmpty()) {
-            RetroRewindInstallStatus.successMessage = "Retro Rewind $installed is already up to date."
+            RetroRewindInstallStatus.successMessage = T("Retro Rewind %s is already up to date.").format(installed)
             return null
         }
 
         applyDeltaChain(chain)?.let { return it }
-        RetroRewindInstallStatus.successMessage = "Retro Rewind updated to ${target.version}."
+        RetroRewindInstallStatus.successMessage = T("Retro Rewind updated to %s.").format(target.version)
         return null
     }
 
@@ -326,17 +327,17 @@ class RetroRewindInstallService : Service() {
             // Most of these are a few MB, but one that swaps a lot of tracks can be several
             // hundred (6.13.0's is 614MB) - so it gets the same resumable, progress-reporting
             // download as a full install, and a free-space check before it starts.
-            RetroRewindInstallStatus.start("Downloading the ${release.version} update$step")
+            RetroRewindInstallStatus.start(T("Downloading the %s update%s").format(release.version, step))
             val deltaBytes = contentLengthOf(release.deltaUrl)
             val downloadError =
                 (if (deltaBytes > 0) checkAvailableSpace(deltaBytes * 2) else null)
-                    ?: downloadToFile(release.deltaUrl, deltaFile, deltaBytes, "Downloading the ${release.version} update")
+                    ?: downloadToFile(release.deltaUrl, deltaFile, deltaBytes, T("Downloading the %s update").format(release.version))
             if (downloadError != null) {
                 // Nothing of this release has been applied, and its partial download is kept so
                 // the next attempt resumes instead of starting over.
                 return downloadError
             }
-            RetroRewindInstallStatus.start("Updating to ${release.version}$step")
+            RetroRewindInstallStatus.start(T("Updating to %s%s").format(release.version, step))
             RetroRewindInstallStatus.filesDone = applied[0]
             val error =
                 when (val verdict = RetroRewindCatalog.inspectDeltaFile(deltaFile)) {
@@ -398,7 +399,7 @@ class RetroRewindInstallService : Service() {
                                 outFile.outputStream().use { output -> zip.copyTo(output) }
                                 filesApplied[0]++
                                 RetroRewindInstallStatus.filesDone = filesApplied[0]
-                                updateNotificationThrottled("Updating... ${filesApplied[0]} files applied")
+                                updateNotificationThrottled(T("Updating... %s files applied").format(filesApplied[0]))
                             }
                         }
                         zip.closeEntry()
@@ -422,9 +423,7 @@ class RetroRewindInstallService : Service() {
     }
 
     private fun unsupportedReleaseMessage(version: String?): String =
-        "Retro Rewind ${version ?: "(newest)"} changes game code this build of DriftDroid hasn't been " +
-            "compiled for yet, so it hasn't been installed. Your current install is untouched. If an " +
-            "\"Update available\" button appears below, tap it to update DriftDroid, then try again."
+        T("Retro Rewind %s changes game code this build of DriftDroid hasn't been compiled for yet, so it hasn't been installed. Your current install is untouched. Run DriftDroid Builder on your PC again: it takes the newest Retro Rewind by itself and makes a new game pack for this phone.").format(version ?: "(newest)")
 
     /** HEAD probe for a download's size, used for the free-space check and the progress bar
      * before a big download starts. Returns -1 when the server doesn't say. */
@@ -544,7 +543,7 @@ class RetroRewindInstallService : Service() {
         if (available < needed) {
             val availableMb = available / (1024 * 1024)
             val neededMb = needed / (1024 * 1024)
-            return "Not enough free storage: ${availableMb}MB available, need about ${neededMb}MB. Free up space and try again."
+            return T("Not enough free storage: %sMB available, need about %sMB. Free up space and try again.").format(availableMb, neededMb)
         }
         return null
     }
@@ -572,7 +571,7 @@ class RetroRewindInstallService : Service() {
                     } ?: return "couldn't open $name"
                     filesCopied[0]++
                     RetroRewindInstallStatus.filesDone = filesCopied[0]
-                    updateNotificationThrottled("Copying Retro Rewind files... ${filesCopied[0]} files done")
+                    updateNotificationThrottled(T("Copying Retro Rewind files... %s files done").format(filesCopied[0]))
                 }
             }
             null
@@ -617,7 +616,7 @@ class RetroRewindInstallService : Service() {
                             outFile.outputStream().use { output -> zip.copyTo(output) }
                             filesExtracted[0]++
                             RetroRewindInstallStatus.filesDone = filesExtracted[0]
-                            updateNotificationThrottled("Extracting... ${filesExtracted[0]} files done")
+                            updateNotificationThrottled(T("Extracting... %s files done").format(filesExtracted[0]))
                         }
                         zip.closeEntry()
                         entry = zip.nextEntry
@@ -730,7 +729,7 @@ class RetroRewindInstallService : Service() {
 
     private fun buildNotification(text: String): Notification =
         NotificationCompat.Builder(this, NOTIFICATION_CHANNEL_ID)
-            .setContentTitle("Installing Retro Rewind")
+            .setContentTitle(T("Installing Retro Rewind"))
             .setContentText(text)
             .setSmallIcon(R.mipmap.ic_launcher)
             .setOngoing(true)
@@ -744,7 +743,7 @@ class RetroRewindInstallService : Service() {
         val channel =
             NotificationChannel(
                 NOTIFICATION_CHANNEL_ID,
-                "Retro Rewind install",
+                T("Retro Rewind install"),
                 NotificationManager.IMPORTANCE_LOW,
             )
         manager.createNotificationChannel(channel)

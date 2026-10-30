@@ -3,6 +3,8 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cmath>
+#include <cstring>
 #include "aurora_events.h"
 #include "hle/gx/gx_dynamic_aspect.h"
 
@@ -224,3 +226,100 @@ void ConfigureMkwDynamicAspect(bool widescreen, uint32_t surfaceWidth, uint32_t 
     VILockAspectRatio(4, 3);
     ApplyEggScreenRecords(surfaceWidth, surfaceHeight);
 }
+
+namespace {
+
+// A .brctr in memory: 'bctr', then at +0x10 the string table's offset and at +0x12 the layout
+// name's offset in it. A variant record sits inside its file, so the nearest header before it is
+// the one it came from (the files are a few hundred bytes).
+bool VariantUsesFullScreenLayout(uint32_t variant) {
+    constexpr uint32_t kBctrMagic = 0x62637472u; // "bctr"
+    constexpr uint32_t kMaxSearch = 0x2000u;
+    uint32_t header = 0;
+    for (uint32_t back = 0; back <= kMaxSearch && back <= variant; back += 4) {
+        uint32_t word = 0;
+        if (!Memory::TryRead32((variant & ~3u) - back, word)) {
+            return false;
+        }
+        if (word == kBctrMagic) {
+            header = (variant & ~3u) - back;
+            break;
+        }
+    }
+    if (header == 0) {
+        return false;
+    }
+    const uint32_t name = header + Memory::Read16(header + 0x10) + Memory::Read16(header + 0x12);
+    // Black screens drawn as one picture the size of the 16:9 canvas: the fall-out wipe, the
+    // pause and message backdrops, and the loading backdrop.
+    constexpr const char* kFullScreenLayouts[] = {"wipe", "black_down", "black_down_race",
+                                                  "common_w074_loading_back"};
+    char buffer[32] = {};
+    for (uint32_t i = 0; i + 1 < sizeof(buffer); ++i) {
+        if (!Memory::Contains(name + i)) {
+            return false;
+        }
+        buffer[i] = static_cast<char>(Memory::Read8(name + i));
+        if (buffer[i] == '\0') {
+            break;
+        }
+    }
+    for (const char* layout : kFullScreenLayouts) {
+        if (std::strcmp(buffer, layout) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+} // namespace
+
+// ControlLoader::LoadVariant (0x805C33A8), reimplemented so the race HUD can follow a portrait
+// screen (Android vertical mode). A UI control's position comes from its .brctr variant: the 4:3
+// record at +0x0C or the 16:9 one at +0x20 (x, y, z, scale x, scale y), picked by
+// SystemManager's aspect flag. On a screen taller than 16:9 the 2D canvas keeps its height of 456
+// units, centred, so the HUD would sit in a band across the middle of the picture. During a race,
+// controls on the sides of the screen (timer, lap, position, item box, map) are moved out by the
+// extra height so they end up in the corners, keeping their distance from the edge; centred ones
+// (countdown, banners, pause menu) stay where they are. Full-screen black layouts (fall-out wipe,
+// backdrops) are stretched to the whole height in every scene.
+extern "C" void ControlLoader_LoadVariant_HLE_805c33a8(CpuContext* ctx)
+{
+    const uint32_t loader = ctx->gpr[3];
+    const uint32_t variant = ctx->gpr[4];
+    const uint32_t control = Memory::Read32(loader);
+
+    const uint32_t systemManager = Memory::Read32(kSystemManagerInstance);
+    const bool widescreen =
+        systemManager != 0 && Memory::Read32(systemManager + kSystemManagerAspectRatioOffset) == 1;
+    const uint32_t source = variant + (widescreen ? 0x20u : 0x0Cu);
+    float position[5];
+    for (uint32_t i = 0; i < 5; ++i) {
+        position[i] = Memory::ReadFloat32(source + i * 4);
+    }
+
+    constexpr uint32_t kRaceManagerInstance = 0x809BD730u;
+    constexpr float kSideX = 100.0f;
+    constexpr float kOffCentreY = 40.0f;
+    const float expansion = Memory::ReadFloat32(kEggScreenProjScaleY);
+    if (expansion > 1.05f && VariantUsesFullScreenLayout(variant)) {
+        // Split-screen variants sit off centre; their offset stretches with them.
+        position[1] *= expansion;
+        position[4] *= expansion;
+    } else if (expansion > 1.05f && Memory::Read32(kRaceManagerInstance) != 0 &&
+        std::fabs(position[0]) >= kSideX && std::fabs(position[1]) >= kOffCentreY) {
+        const float extra = 0.5f * static_cast<float>(MkwDynamicAspect::kEggScreenHeight) * (expansion - 1.0f);
+        position[1] += position[1] > 0.0f ? extra : -extra;
+    }
+
+    for (uint32_t i = 0; i < 5; ++i) {
+        Memory::WriteFloat32(control + 4 + i * 4, position[i]);
+    }
+    Memory::Write8(control + 24, static_cast<uint8_t>(Memory::Read16(variant + 2)));
+    Memory::Write8(control + 136, Memory::Read16(variant + 4) != 0 ? 1 : 0);
+    Memory::WriteFloat32(control + 140, Memory::ReadFloat32(variant + 8));
+
+    ctx->gpr[3] = control;
+    InvokeIndirectCpu(0x8063D3CCu, ctx);
+}
+PPC_NATIVE_OVERRIDE_VOID(805C33A8, ControlLoader_LoadVariant_HLE_805c33a8, (CpuContext* ctx), (ctx));

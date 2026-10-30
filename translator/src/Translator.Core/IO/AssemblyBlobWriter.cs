@@ -25,9 +25,9 @@ internal static class AssemblyBlobWriter
         // PE/COFF (Windows) and ELF (Linux) spell a read-only data section differently in GNU-as
         // syntax - COFF section flags ("dr" = data, read-only) versus an ELF section needing an
         // allocatable-only flag plus an explicit @progbits type. The build always targets
-        // whichever platform the translator itself runs on (there is no cross-compilation
-        // support), so that's what this picks the section syntax from.
-        assembly.AppendLine(OperatingSystem.IsWindows()
+        // whichever platform the translator itself runs on, except when DriftDroid Builder runs it
+        // on Windows to make Android/Switch code (MKW_TRANSLATOR_ELF=1), so the syntax follows that.
+        assembly.AppendLine(!TargetsElf
             ? ".section .rdata,\"dr\""
             : ".section .rodata,\"a\",@progbits");
         assembly.AppendLine();
@@ -51,7 +51,7 @@ internal static class AssemblyBlobWriter
         {
             if (!expectedFiles.Contains(Path.GetFullPath(stalePath))) File.Delete(stalePath);
         }
-        if (!OperatingSystem.IsWindows())
+        if (TargetsElf)
         {
             // Absence of a .note.GNU-stack section makes the linker assume the oldest, most
             // conservative default for this object (an executable stack) and warn about it; this
@@ -63,6 +63,9 @@ internal static class AssemblyBlobWriter
         }
         FileOutput.WriteTextIfChanged(assemblyPath, assembly.ToString());
     }
+
+    private static bool TargetsElf =>
+        !OperatingSystem.IsWindows() || Environment.GetEnvironmentVariable("MKW_TRANSLATOR_ELF") == "1";
 
     private static string SanitizeAssemblyPath(string path) => Path.GetFullPath(path).Replace('\\', '/');
 }

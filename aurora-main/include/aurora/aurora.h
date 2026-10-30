@@ -161,6 +161,8 @@ void aurora_set_log_level(AuroraLogLevel level);
 void aurora_set_pause_on_focus_lost(bool value);
 void aurora_set_background_input(bool value);
 void aurora_set_display_mode(AuroraDisplayMode mode);
+// Brightness, contrast and saturation of the picture on screen; 1.0 each leaves it unchanged.
+void aurora_set_picture_adjust(float brightness, float contrast, float saturation);
 AuroraDisplayMode aurora_get_display_mode();
 
 AuroraBackend aurora_get_backend();

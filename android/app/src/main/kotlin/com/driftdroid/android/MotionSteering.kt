@@ -38,6 +38,16 @@ internal class MotionSteering(context: Context) : SensorEventListener {
     private var calibrated = false
     private var lastAngle = Double.NaN
     private var centerAngle = 0.0
+    private var steering = false
+
+    /** A real controller is connected: the phone stays still in a stand or a clip, so its tilt
+     * must not steer ("the motion steering stays assigned to the phone even if a controller is
+     * connected"). The controller's own motion sensor can't be read over Bluetooth on Android. */
+    var controllerConnected = false
+        set(value) {
+            field = value
+            publishCurrentAngle()
+        }
 
     val sensorAvailable: Boolean get() = sensor != null
 
@@ -64,7 +74,7 @@ internal class MotionSteering(context: Context) : SensorEventListener {
     fun start() {
         if (registered || sensor == null) return
         calibrated = false
-        TouchInputBridge.nativeSetTouchAxis(TouchInputBridge.AXIS_LEFT_X, 0f)
+        publish(false, 0f)
         registered = sensorManager?.registerListener(this, sensor, SensorManager.SENSOR_DELAY_GAME) ?: false
     }
 
@@ -73,7 +83,7 @@ internal class MotionSteering(context: Context) : SensorEventListener {
         sensorManager?.unregisterListener(this)
         registered = false
         calibrated = false
-        TouchInputBridge.nativeSetTouchAxis(TouchInputBridge.AXIS_LEFT_X, 0f)
+        publish(false, 0f)
     }
 
     /** Re-centers on however the phone is currently held, without needing to toggle steering off
@@ -102,12 +112,28 @@ internal class MotionSteering(context: Context) : SensorEventListener {
     override fun onAccuracyChanged(sensor: Sensor, accuracy: Int) {}
 
     private fun publishCurrentAngle() {
-        if (!enabled || !calibrated || !lastAngle.isFinite()) {
-            TouchInputBridge.nativeSetTouchAxis(TouchInputBridge.AXIS_LEFT_X, 0f)
+        if (!enabled || !calibrated || !lastAngle.isFinite() || controllerConnected) {
+            publish(false, 0f)
             return
         }
-        val value = steeringValue(lastAngle, centerAngle, sensitivity, inverted)
+        // Only while driving: in menus a phone held slightly tilted moved the cursor. Let go of the
+        // axis once there, so the touch stick works in menus.
+        if (!TouchInputBridge.nativeIsDriving()) {
+            if (steering) {
+                steering = false
+                publish(false, 0f)
+            }
+            return
+        }
+        steering = true
+        publish(true, steeringValue(lastAngle, centerAngle, sensitivity, inverted))
+    }
+
+    /** The touch stick's axis, and the same value for a real controller that is player 1 (a Pro
+     * Controller with the phone in a clip): that one never reads the touch axis. */
+    private fun publish(steeringNow: Boolean, value: Float) {
         TouchInputBridge.nativeSetTouchAxis(TouchInputBridge.AXIS_LEFT_X, value)
+        TouchInputBridge.nativeSetMotionSteer(steeringNow, value)
     }
 
     companion object {

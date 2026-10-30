@@ -32,35 +32,60 @@ namespace fs = std::filesystem;
 namespace RetroRewindDownload {
 namespace {
 
-// Retro Rewind 6.13.0 as published on the project's own update server. The same archive, size and
-// Code.pul the Android app pins in RetroRewindRelease.kt. It is the newest full archive there is:
-// 6.13.1 exists only as a small update on top of it (175 character sound files and two tracks, no
-// game code); kUpdate below is unpacked over it.
+// Retro Rewind 6.13.4 as published on the project's own update server: the full archive, for a
+// fresh install. The same Code.pul the Android app pins in RetroRewindRelease.kt.
 constexpr Release kRelease{
-    .version = "6.13.0",
+    .version = "6.13.4",
     .host = "cdn.update.rwfc.net",
-    .path = "/RetroRewind/zip/6.13.0-full.zip",
-    .archiveBytes = 1938862721ull,
-    .tableOffset = 1938354676ull,
-    .tableBytes = 508045u,
-    .tableSha256 = "3e66ed61cf76d2af4bf40cc9313e31a8b31c6665e76205c53ee12dce0cd32b4a",
-    .codePulSha256 = "7471e1d2f61c11ab0de6544728406ee1359a4eab736b2dc6a73b741f69e7b4a3",
+    .path = "/RetroRewind/zip/6.13.4-full.zip",
+    .archiveBytes = 1939356115ull,
+    .tableOffset = 1938850140ull,
+    .tableBytes = 505953u,
+    .tableSha256 = "75ecd8e0c502203f36c5ed627d22ad42669caef2659080f8433ffdd40df17858",
+    .codePulSha256 = "11f70007b093d5490ad6ad85868eff4d62b6d80f6ff321cd0c9dec2c59e1b640",
     .unpackedBytes = 2205000000ull,
 };
 
-// The 6.13.1 update archive: same layout, a few files that are added to or replace the ones from
-// the full archive, among them version.txt.
-constexpr Release kUpdate{
-    .version = "6.13.1",
-    .host = "cdn.update.rwfc.net",
-    .path = "/RetroRewind/zip/6.13.1.zip",
-    .archiveBytes = 29403976ull,
-    .tableOffset = 29379179ull,
-    .tableBytes = 24797u,
-    .tableSha256 = "17eb709bdca8d0ffb134ad33e8955e404c7d65cca1b262b394958e2bc7787f25",
-    .codePulSha256 = "7471e1d2f61c11ab0de6544728406ee1359a4eab736b2dc6a73b741f69e7b4a3",
-    .unpackedBytes = 36000000ull,
+// The update archives, oldest first, each holding what changed since the release before it (the
+// catalog has no 6.13.2). An installed pack gets the ones after its own game code, unpacked over
+// it, instead of the whole 1.9 GB again. codePulSha256 is the game code once that update is in.
+constexpr Release kUpdates[] = {
+    {
+        // Everything since 6.13.1, game code included.
+        .version = "6.13.3",
+        .host = "cdn.update.rwfc.net",
+        .path = "/RetroRewind/zip/6.13.3.zip",
+        .archiveBytes = 41254934ull,
+        .tableOffset = 41189940ull,
+        .tableBytes = 64972u,
+        .tableSha256 = "6b337d83ac8b0cbff6a581257e8e18670fef0b452c24ffe9d91c653cd0fd1745",
+        .codePulSha256 = "58f4ac46afdeda4d57aacab361b381ccd95f08c3dbb2779e6e5760b48b1df036",
+        .unpackedBytes = 50000000ull,
+    },
+    {
+        // Code.pul and version.txt only.
+        .version = "6.13.4",
+        .host = "cdn.update.rwfc.net",
+        .path = "/RetroRewind/zip/6.13.4.zip",
+        .archiveBytes = 776946ull,
+        .tableOffset = 776507ull,
+        .tableBytes = 417u,
+        .tableSha256 = "5858ac4c164c71a42b161deb6ed8302f5ad1e2076a7c4a3eefb1bc824b09e6f4",
+        .codePulSha256 = "11f70007b093d5490ad6ad85868eff4d62b6d80f6ff321cd0c9dec2c59e1b640",
+        .unpackedBytes = 5000000ull,
+    },
 };
+constexpr size_t kUpdateCount = sizeof(kUpdates) / sizeof(kUpdates[0]);
+// The installed pack each update applies to: its version (null = any) and game code. 6.13.1 shares
+// its Code.pul with 6.13.0, so the version tells them apart.
+constexpr struct {
+    const char* version;
+    const char* codePulSha256;
+} kUpdateFrom[kUpdateCount] = {
+    {"6.13.1", "7471e1d2f61c11ab0de6544728406ee1359a4eab736b2dc6a73b741f69e7b4a3"},
+    {nullptr, "58f4ac46afdeda4d57aacab361b381ccd95f08c3dbb2779e6e5760b48b1df036"},
+};
+constexpr const char* kLatestVersion = "6.13.4";
 
 constexpr char kPackPrefix[] = "RetroRewind6/";
 constexpr char kStateFile[] = ".download_state";
@@ -418,11 +443,11 @@ private:
 
 enum class Step { Ok, Network, Damaged, Disk, Cancelled };
 
-// True when `pack`/Binaries/Code.pul is the one this build has native code for.
-bool HasPinnedCode(const fs::path& pack) {
+// SHA-256 of `pack`/Binaries/Code.pul, empty when it cannot be read.
+std::string CodePulSha256(const fs::path& pack) {
     FILE* file = std::fopen((pack / "Binaries" / "Code.pul").string().c_str(), "rb");
     if (file == nullptr) {
-        return false;
+        return {};
     }
     CryptoPP::SHA256 sha;
     std::vector<uint8_t> chunk(64 * 1024);
@@ -432,8 +457,11 @@ bool HasPinnedCode(const fs::path& pack) {
     std::fclose(file);
     uint8_t digest[CryptoPP::SHA256::DIGESTSIZE];
     sha.Final(digest);
-    return Hex(digest, sizeof(digest)) == kRelease.codePulSha256;
+    return Hex(digest, sizeof(digest));
 }
+
+// True when `pack`/Binaries/Code.pul is the one this build has native code for.
+bool HasPinnedCode(const fs::path& pack) { return CodePulSha256(pack) == kRelease.codePulSha256; }
 
 std::string PackVersion(const fs::path& pack) {
     char text[32] = {};
@@ -453,9 +481,9 @@ std::string PackVersion(const fs::path& pack) {
 
 const Release& PinnedRelease() { return kRelease; }
 
-const char* PinnedVersion() { return kUpdate.version; }
+const char* PinnedVersion() { return kLatestVersion; }
 
-uint64_t RequiredFreeBytes() { return kRelease.unpackedBytes + kUpdate.unpackedBytes + (200ull << 20); }
+uint64_t RequiredFreeBytes() { return kRelease.unpackedBytes + (250ull << 20); }
 
 Job::~Job() {
     Cancel();
@@ -503,12 +531,32 @@ void Job::Run() {
     fs::path partial = target_;
     partial += ".partial";
     std::error_code ec;
-    // An installed pack that already holds this build's game code and is only behind on the small
-    // update gets just that, unpacked straight over it, instead of the whole 1.9 GB again. A pack
-    // already at the newest version is downloaded afresh: that is what asking again means.
-    const bool updateOnly =
-        !fs::exists(partial, ec) && HasPinnedCode(target_) &&
-        (PackVersion(target_) != kUpdate.version || fs::exists(target_ / kStateFile, ec));
+    // An installed pack gets only the updates after its own game code, unpacked straight over it,
+    // instead of the whole 1.9 GB again: one that already holds this build's game code and is only
+    // behind (or was interrupted) gets the newest update, an older one every update from its own.
+    // A pack already at the newest version is downloaded afresh: that is what asking again means.
+    std::vector<const Release*> stages{&kRelease};
+    if (!fs::exists(partial, ec)) {
+        const std::string installedCode = CodePulSha256(target_);
+        const std::string installedVersion = PackVersion(target_);
+        if (installedCode == kRelease.codePulSha256) {
+            if (installedVersion != kLatestVersion || fs::exists(target_ / kStateFile, ec)) {
+                stages = {&kUpdates[kUpdateCount - 1]};
+            }
+        } else {
+            for (size_t i = 0; i < kUpdateCount; ++i) {
+                if (installedCode == kUpdateFrom[i].codePulSha256 &&
+                    (kUpdateFrom[i].version == nullptr || installedVersion == kUpdateFrom[i].version)) {
+                    stages.clear();
+                    for (size_t k = i; k < kUpdateCount; ++k) {
+                        stages.push_back(&kUpdates[k]);
+                    }
+                    break;
+                }
+            }
+        }
+    }
+    const bool updateOnly = stages.front() != &kRelease;
     const fs::path work = updateOnly ? target_ : partial;
     const fs::path statePath = work / kStateFile;
     // Which archive an interrupted run was in, and the entry it had reached.
@@ -524,13 +572,16 @@ void Job::Run() {
     std::vector<uint8_t> chunk(64 * 1024);
     std::vector<char> fileBuffer(256 * 1024);
 
-    // The full archive, then the update over it.
-    for (const Release* stage : {&kRelease, &kUpdate}) {
+    // An interrupted run continues in the archive it was in.
+    for (size_t i = 1; i < stages.size(); ++i) {
+        if (stateHash == stages[i]->tableSha256) {
+            stages.erase(stages.begin(), stages.begin() + static_cast<std::ptrdiff_t>(i));
+            break;
+        }
+    }
+    for (const Release* stage : stages) {
     const Release& release = *stage;
     const bool fullArchive = stage == &kRelease;
-    if (fullArchive && (updateOnly || stateHash == kUpdate.tableSha256)) {
-        continue;
-    }
 
     // 1. The file table.
     std::vector<uint8_t> table(release.tableBytes);
@@ -788,6 +839,12 @@ void Job::Run() {
         return;
     }
     fs::remove(statePath, ec);
+    // The archives' own version.txt lags behind (6.13.3's says "6.13.2"); record what was installed
+    // so the launcher does not keep offering the same update.
+    if (FILE* version = std::fopen((work / "version.txt").string().c_str(), "wb")) {
+        std::fputs(kLatestVersion, version);
+        std::fclose(version);
+    }
     if (updateOnly) {
         return;  // unpacked in place: nothing to move
     }

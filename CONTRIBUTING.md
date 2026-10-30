@@ -85,33 +85,65 @@ is picked up on its own, with no code change and no app update.
 
 A release that changes `Code.pul` is different. That file is the mod's PowerPC
 game logic, and because everything here is compiled to native code ahead of time
-rather than emulated, it has to be translated on a desktop and compiled into the
-app - a phone cannot pick it up at runtime. The app detects this case from the
-release's small delta archive before downloading anything large, refuses it, and
-leaves the player's working install alone.
+rather than emulated, it has to be translated on a desktop and compiled in - a
+phone or a Switch cannot pick it up at runtime. The app detects this case from
+the release's small update archive before downloading anything large, refuses
+it, and leaves the player's working install alone.
 
-To add support for such a release:
+### With the PC builder
 
-1. Re-translate against the new `Code.pul` (see the translator's `retro_rewind`
-   build shards under `generated/build_shards`) and rebuild. If the new release
-   patches different base-game functions, `translate-mod` refuses and says so:
-   re-translate the base game first (`translate-recursive`, then
-   `emit-base-manifest`), then `translate-mod`, then `emit-build-shards`.
-2. Put the new `Code.pul` SHA-256 in `SUPPORTED_CODE_PUL_SHA256` in
-   `android/app/src/main/kotlin/com/driftdroid/android/RetroRewindRelease.kt`,
-   with the version in a trailing comment, in place of the old one: one build
-   carries the translated code of one `Code.pul`. Also add the release to
-   `KNOWN_CODE_PUL_SHA256`, so the app can judge it without downloading its
-   update archive. An install left on the old code is updated by the app before
-   it is launched.
-3. Move the fallback release used when the device is offline: update `VERSION`,
-   `ARCHIVE_URL`, `ARCHIVE_BYTES` and `ARCHIVE_SHA256` in the same file to the
+`tools/pc-builder` (see [docs/pc-builder.md](docs/pc-builder.md)) fetches the
+newest `Code.pul` from the update server by itself every time it runs and
+records the version and hash it used in the game pack
+(`driftdroid-pack.json`: `retroRewind`, `retroRewindCodeSha256`). A player
+re-runs the builder after a Retro Rewind update. `--retro-rewind 6.13.3` builds
+for an older release; `--check-retro-rewind` prints what a build would use.
+
+### For a build made in this repository
+
+1. Put the new `Code.pul` in
+   `PulsarPacks/completed/RetroRewind/RetroRewind6/Binaries/`, back up
+   `generated/`, `build/mods/` and `build/base/`, and run the five translator
+   steps (`translate-recursive`, `emit-base-manifest`, `translate-mod`,
+   `generate-data-init`, `emit-build-shards`) **twice**: the base translation
+   takes into account what the Retro Rewind step wrote on the previous pass, so
+   only the second pass is final (it reports nothing changed). Shard files are
+   named by content: run `cmake .` and `ninja -t cleandead` in each build folder
+   before building.
+2. Android, `android/app/src/main/kotlin/com/driftdroid/android/RetroRewindRelease.kt`:
+   replace the hash in `SUPPORTED_CODE_PUL_SHA256` (one build carries the
+   translated code of one `Code.pul`), add the release to
+   `KNOWN_CODE_PUL_SHA256`, and move the offline fallback (`VERSION`,
+   `ARCHIVE_URL`, `ARCHIVE_BYTES`, `ARCHIVE_SHA256`, `CODE_PUL_SHA256`) to the
    new full archive. Not every release has one (6.13.1 only exists as an update
-   on top of 6.13.0); the app installs the newest full archive and applies the
-   updates above it.
+   on top of 6.13.0).
+3. Switch, `runtime/src/retro_rewind_download.cpp`: `kRelease` is the full
+   archive for a fresh install; `kUpdates` lists the update archives oldest
+   first, and `kUpdateFrom` says which installed pack each one applies to. An
+   installed pack gets only the updates after its own game code. Each entry
+   pins the archive size and its zip directory (offset, size, SHA-256), so a
+   file changed on the server fails cleanly. The values come from the end of
+   the archive with HTTP range requests: find the end-of-central-directory
+   record (`PK 05 06`) in the last 64 KiB, read the directory size and offset
+   from it (zip64: follow the `PK 06 07` locator), and hash
+   `[offset, offset + size)`.
 4. Check hand-written code that depends on the mod's own code addresses
    (`runtime/src/hle/low_detail_karts.cpp`).
-5. Test both a fresh install and "Check for updates" on an existing install.
+5. Test: a Retro Rewind race on PC, a fresh install and "Check for updates" on
+   Android, and the Switch downloader on PC. The downloader has a test entry
+   point:
+
+   ```sh
+   clang++ -std=c++20 -O1 -DCRYPTOPP_DISABLE_ASM -DCRYPTOPP_NO_GLOBAL_BYTE -DNOMINMAX \
+       -DRR_DOWNLOAD_TEST_MAIN -Iruntime/include -Iruntime/third_party \
+       runtime/src/retro_rewind_download.cpp linux-native-build/libmkw_cryptopp.a \
+       -lmbedtls -lmbedx509 -lmbedcrypto -lpthread -o rrdl
+   ./rrdl /path/to/RetroRewind6 runtime/assets/certs/cacert.pem
+   ```
+
+   The Crypto++ defines must match the ones the library was built with, or
+   SHA-256 crashes. To test an upgrade, point it at a pack whose `Code.pul` and
+   `version.txt` are those of an older release; it updates in place.
 
 Never relax the hash check to make a release install. It exists because an
 unsupported `Code.pul` desyncs from the recompiled logic at runtime instead of

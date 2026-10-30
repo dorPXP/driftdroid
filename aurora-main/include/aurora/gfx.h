@@ -77,6 +77,9 @@ uint32_t aurora_get_frame_interpolation_fps();
 void aurora_set_skip_unready_pipelines(bool enabled);
 bool aurora_get_skip_unready_pipelines();
 uint32_t aurora_get_queued_pipeline_count();
+// True while the start-up rebuild of last session's pipelines is running. Those mostly load from
+// the shader cache rather than compile.
+bool aurora_is_pipeline_prewarm_active();
 
 // Controls whether display copies bypass the Wii's vertical copy filter.
 void aurora_set_disable_copy_filter(bool disabled);

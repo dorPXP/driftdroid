@@ -3,6 +3,9 @@
 #include "gx_cp_decode.h"
 #include "isa/big_endian.h"
 
+#include <chrono>
+#include <cstdio>
+#include <cstdlib>
 #include <cstdlib>
 #include <unordered_map>
 #include <type_traits>
@@ -50,9 +53,12 @@ using GxCpDecode::SameVtxAttrFmt;
 // Small display lists dominate the in-race call count. Cache them as well, but
 // cap both individual entries and aggregate copied command bytes so malformed
 // guest input cannot turn this optimization into unbounded host allocation.
-constexpr uint32_t kDlScanCacheMaxEntryBytes = 64u * 1024u;
+// The entry cap was 64 KiB, sized for Nintendo's tracks. Custom tracks (Retro Rewind) ship model
+// lists larger than that; each one was then walked again on every call, about 0.65 ms a time on
+// Switch (1.5 ms of a race frame on one custom track, 2026-10-13).
+constexpr uint32_t kDlScanCacheMaxEntryBytes = 2u * 1024u * 1024u;
 constexpr size_t kDlScanCacheMaxEntries = 16384;
-constexpr size_t kDlScanCacheMaxStoredBytes = 8u * 1024u * 1024u;
+constexpr size_t kDlScanCacheMaxStoredBytes = 32u * 1024u * 1024u;
 
 // Display-list write tracking (audit F6a): re-digesting every list every call is the
 // costliest step of GX__CallDisplayList, and wasted on BRRES shape lists that are written

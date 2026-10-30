@@ -8,7 +8,14 @@
 #include "hle/storage/riivolution.h"
 #include "runtime_log.h"
 
+#include <array>
+#include <cstring>
+#include <filesystem>
+#include <fstream>
+#include <mutex>
+#include <set>
 #include <string_view>
+#include <vector>
 
 // ============================================================================
 // Configuration
@@ -245,6 +252,88 @@ static bool ResolveRiivolutionSaveHostPath(const std::string& absoluteWiiPath, s
     return true;
 }
 
+// A save made on a Wii of another region stamps that region in the top four bits of the halfword at
+// 0x26B0A (RKSYS::CheckRegion, 0x805482D8). This PAL game then only offers "Create New Save Data" or
+// "Return to the Wii Menu" ("Your Country setting has been changed..."), which is what players saw
+// after importing a US save. The save format is otherwise the same in every region, so the save is
+// restamped as PAL with its checksum fixed (CRC-32 of the first 0x27FFC bytes, stored after them),
+// once per file, keeping the original as rksys.dat.region-backup.
+namespace {
+constexpr size_t kSaveBytes = 0x2BC000;
+constexpr size_t kSaveRegionOffset = 0x26B0A;
+constexpr size_t kSaveChecksumOffset = 0x27FFC;
+constexpr uint16_t kSaveRegionPal = 2;
+
+uint32_t SaveCrc32(const uint8_t* data, size_t length) {
+    static const auto table = [] {
+        std::array<uint32_t, 256> t{};
+        for (uint32_t n = 0; n < 256; ++n) {
+            uint32_t c = n;
+            for (int k = 0; k < 8; ++k) {
+                c = (c & 1) != 0 ? 0xEDB88320u ^ (c >> 1) : c >> 1;
+            }
+            t[n] = c;
+        }
+        return t;
+    }();
+    uint32_t crc = 0xFFFFFFFFu;
+    for (size_t i = 0; i < length; ++i) {
+        crc = table[(crc ^ data[i]) & 0xFF] ^ (crc >> 8);
+    }
+    return crc ^ 0xFFFFFFFFu;
+}
+
+void RestampSaveRegion(const std::string& hostPath) {
+    static std::mutex mutex;
+    static std::set<std::string> checked;
+    std::lock_guard lock(mutex);
+    if (!checked.insert(hostPath).second) {
+        return;
+    }
+    std::error_code ec;
+    if (std::filesystem::file_size(hostPath, ec) != kSaveBytes || ec) {
+        return;
+    }
+    std::vector<uint8_t> save(kSaveBytes);
+    {
+        std::ifstream in(hostPath, std::ios::binary);
+        if (!in.read(reinterpret_cast<char*>(save.data()), static_cast<std::streamsize>(save.size()))) {
+            return;
+        }
+    }
+    const auto readBe32 = [&](size_t offset) {
+        return (uint32_t{save[offset]} << 24) | (uint32_t{save[offset + 1]} << 16) | (uint32_t{save[offset + 2]} << 8) |
+               uint32_t{save[offset + 3]};
+    };
+    const uint16_t stamp = static_cast<uint16_t>((save[kSaveRegionOffset] << 8) | save[kSaveRegionOffset + 1]);
+    if (std::memcmp(save.data(), "RKSD", 4) != 0 || (stamp >> 12) == kSaveRegionPal ||
+        SaveCrc32(save.data(), kSaveChecksumOffset) != readBe32(kSaveChecksumOffset)) {
+        return; // not a save, already PAL, or damaged (the game reports that itself)
+    }
+    std::filesystem::copy_file(hostPath, hostPath + ".region-backup", std::filesystem::copy_options::skip_existing, ec);
+    const uint16_t restamped = static_cast<uint16_t>((stamp & 0x0FFF) | (kSaveRegionPal << 12));
+    save[kSaveRegionOffset] = static_cast<uint8_t>(restamped >> 8);
+    save[kSaveRegionOffset + 1] = static_cast<uint8_t>(restamped);
+    const uint32_t crc = SaveCrc32(save.data(), kSaveChecksumOffset);
+    for (int i = 0; i < 4; ++i) {
+        save[kSaveChecksumOffset + i] = static_cast<uint8_t>(crc >> (24 - 8 * i));
+    }
+    std::ofstream out(hostPath, std::ios::binary | std::ios::trunc);
+    out.write(reinterpret_cast<const char*>(save.data()), static_cast<std::streamsize>(save.size()));
+    LogNandWarning("SaveRegion", "save from region %u restamped as PAL: %s", static_cast<unsigned>(stamp >> 12),
+                   hostPath.c_str());
+}
+
+std::string WithSaveRegionChecked(std::string hostPath) {
+    constexpr std::string_view kSaveName = "rksys.dat";
+    if (hostPath.size() >= kSaveName.size() &&
+        hostPath.compare(hostPath.size() - kSaveName.size(), kSaveName.size(), kSaveName) == 0) {
+        RestampSaveRegion(hostPath);
+    }
+    return hostPath;
+}
+} // namespace
+
 std::string TranslateNandPath(const char* wiiPath) {
     std::string wiiPathStr = NormalizeAbsoluteWiiPath(wiiPath);
     if (wiiPathStr.empty()) {
@@ -253,10 +342,10 @@ std::string TranslateNandPath(const char* wiiPath) {
 
     std::string redirectedHostPath;
     if (ResolveRiivolutionSaveHostPath(wiiPathStr, redirectedHostPath)) {
-        return redirectedHostPath;
+        return WithSaveRegionChecked(std::move(redirectedHostPath));
     }
 
-    return BuildHostNandPath(wiiPathStr);
+    return WithSaveRegionChecked(BuildHostNandPath(wiiPathStr));
 }
 
 // ============================================================================
@@ -513,6 +602,26 @@ bool SeedFaceLibDatabase(const std::string& hostPath) {
 
 bool IsFaceLibDatabasePath(const char* path) {
     return std::strcmp(path, "/shared2/menu/FaceLib/RFL_DB.dat") == 0;
+}
+
+std::optional<int32_t> NandCheckSystemSaveRead(const char* who,
+    const std::filesystem::path& hostPath, int mode, bool ios) {
+    const auto action = RuntimeNandSave::CheckRead(hostPath, mode);
+    if (action == RuntimeNandSave::ReadAction::Proceed) return std::nullopt;
+    if (action == RuntimeNandSave::ReadAction::Missing) {
+        LogNandWarning(who, "treating empty or zero-filled system save '%s' as missing",
+                       hostPath.string().c_str());
+        return ios ? ISFS_ENOENT : NAND_RESULT_NOEXISTS;
+    }
+    if (action == RuntimeNandSave::ReadAction::RecoveryNeeded) {
+        LogNandError(who, "system save '%s' is missing or blank but its .nandsafe.tmp contains data; "
+                         "back up both files before attempting recovery",
+                     hostPath.string().c_str());
+    } else {
+        LogNandError(who, "could not inspect system save '%s' or its write shadow; leaving data untouched",
+                     hostPath.string().c_str());
+    }
+    return ios ? ISFS_EIO : NAND_RESULT_UNKNOWN;
 }
 
 // Create directories recursively

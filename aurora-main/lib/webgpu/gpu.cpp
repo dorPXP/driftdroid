@@ -105,6 +105,7 @@ static std::array<char, 256> g_deviceLostMessage{};
 static std::atomic_bool g_initialized{false};
 static std::atomic_bool g_deviceLostRecoverable{false};
 static std::atomic_bool g_deviceRecoveryAttempted{false};
+static std::atomic_bool g_deviceShared{false};
 static AuroraBackend g_lastInitializedBackend = BACKEND_AUTO;
 
 namespace {
@@ -376,9 +377,60 @@ static TextureWithSampler create_depth_texture(uint32_t width, uint32_t height) 
   };
 }
 
+// Picture adjustment for the presented image (GitHub issue #15). The values are baked into a second
+// copy pipeline, rebuilt on the presenting thread when they change; at the defaults the plain copy
+// pipeline is used, so nothing changes for anyone who never touches the sliders.
+static std::atomic<float> g_pictureBrightness{1.0f};
+static std::atomic<float> g_pictureContrast{1.0f};
+static std::atomic<float> g_pictureSaturation{1.0f};
+static std::atomic<uint32_t> g_pictureGeneration{1};
+static std::mutex g_picturePipelineMutex;
+static wgpu::RenderPipeline g_picturePipeline;
+static uint32_t g_picturePipelineGeneration = 0;
+
+static wgpu::RenderPipeline build_copy_pipeline(const std::string& fragmentBody, const char* label);
+
 void create_copy_pipeline() {
-  wgpu::ShaderSourceWGSL sourceDescriptor{};
-  sourceDescriptor.code = R"""(
+  g_CopyBindGroupLayout = {};
+  g_CopyPipeline = build_copy_pipeline("    return vec4(color.rgb, 1.0);\n", "XFB Copy Module");
+  // A new device (or a recovered one) invalidates the adjusted pipeline too.
+  const std::lock_guard lock(g_picturePipelineMutex);
+  g_picturePipeline = {};
+  g_picturePipelineGeneration = 0;
+}
+
+void set_picture_adjust(float brightness, float contrast, float saturation) noexcept {
+  g_pictureBrightness.store(std::clamp(brightness, 0.25f, 2.0f), std::memory_order_relaxed);
+  g_pictureContrast.store(std::clamp(contrast, 0.25f, 2.0f), std::memory_order_relaxed);
+  g_pictureSaturation.store(std::clamp(saturation, 0.0f, 2.0f), std::memory_order_relaxed);
+  g_pictureGeneration.fetch_add(1, std::memory_order_release);
+}
+
+wgpu::RenderPipeline present_pipeline() {
+  const float brightness = g_pictureBrightness.load(std::memory_order_relaxed);
+  const float contrast = g_pictureContrast.load(std::memory_order_relaxed);
+  const float saturation = g_pictureSaturation.load(std::memory_order_relaxed);
+  if (brightness == 1.0f && contrast == 1.0f && saturation == 1.0f) {
+    return g_CopyPipeline;
+  }
+  const uint32_t generation = g_pictureGeneration.load(std::memory_order_acquire);
+  const std::lock_guard lock(g_picturePipelineMutex);
+  if (!g_picturePipeline || g_picturePipelineGeneration != generation) {
+    const std::string body = fmt::format(
+        "    var c = color.rgb * {:.4f};\n"
+        "    c = (c - vec3(0.5)) * {:.4f} + vec3(0.5);\n"
+        "    let luma = dot(c, vec3(0.2126, 0.7152, 0.0722));\n"
+        "    c = mix(vec3(luma), c, {:.4f});\n"
+        "    return vec4(clamp(c, vec3(0.0), vec3(1.0)), 1.0);\n",
+        brightness, contrast, saturation);
+    g_picturePipeline = build_copy_pipeline(body, "XFB Picture Adjust Module");
+    g_picturePipelineGeneration = generation;
+  }
+  return g_picturePipeline;
+}
+
+static wgpu::RenderPipeline build_copy_pipeline(const std::string& fragmentBody, const char* label) {
+  const std::string code = std::string(R"""(
 @group(0) @binding(0)
 var efb_sampler: sampler;
 @group(0) @binding(1)
@@ -411,12 +463,12 @@ fn vs_main(@builtin(vertex_index) vtxIdx: u32) -> VertexOutput {
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let color = textureSample(efb_texture, efb_sampler, in.uv);
-    return vec4(color.rgb, 1.0);
-}
-)""";
+)""") + fragmentBody + "}\n";
+  wgpu::ShaderSourceWGSL sourceDescriptor{};
+  sourceDescriptor.code = code.c_str();
   const wgpu::ShaderModuleDescriptor moduleDescriptor{
       .nextInChain = &sourceDescriptor,
-      .label = "XFB Copy Module",
+      .label = label,
   };
   auto module = g_device.CreateShaderModule(&moduleDescriptor);
   const std::array colorTargets{wgpu::ColorTargetState{
@@ -452,7 +504,10 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
       .entryCount = bindGroupLayoutEntries.size(),
       .entries = bindGroupLayoutEntries.data(),
   };
-  g_CopyBindGroupLayout = g_device.CreateBindGroupLayout(&bindGroupLayoutDescriptor);
+  // Both copy pipelines share one layout, so bind groups made for either work with both.
+  if (!g_CopyBindGroupLayout) {
+    g_CopyBindGroupLayout = g_device.CreateBindGroupLayout(&bindGroupLayoutDescriptor);
+  }
   const wgpu::PipelineLayoutDescriptor layoutDescriptor{
       .bindGroupLayoutCount = 1,
       .bindGroupLayouts = &g_CopyBindGroupLayout,
@@ -476,7 +531,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
           },
       .fragment = &fragmentState,
   };
-  g_CopyPipeline = g_device.CreateRenderPipeline(&pipelineDescriptor);
+  return g_device.CreateRenderPipeline(&pipelineDescriptor);
 }
 
 wgpu::BindGroup create_copy_bind_group(wgpu::TextureView sourceView, wgpu::Sampler sampler) {
@@ -947,6 +1002,8 @@ bool initialize(AuroraBackend auroraBackend) {
   return true;
 }
 
+void mark_device_shared() noexcept { g_deviceShared.store(true, std::memory_order_release); }
+
 void fail_if_device_lost() noexcept {
   if (!g_deviceLost.load(std::memory_order_acquire)) {
     return;
@@ -962,8 +1019,16 @@ void fail_if_device_lost() noexcept {
     return;
   }
 
+  // initialize() drops g_device/g_queue and builds a new device. Other threads still use the old
+  // ones, and cached pipelines/textures belong to the old device: a recovery then crashed on a
+  // null handle (GitHub issue #12, lost surface on Mali-G57). Only recover while this thread is
+  // the device's only user.
   if (g_deviceLostRecoverable.load(std::memory_order_acquire) &&
-      !g_deviceRecoveryAttempted.exchange(true, std::memory_order_acq_rel)) {
+      g_deviceShared.load(std::memory_order_acquire)) {
+    Log.warn("WebGPU device lost to a transient-looking cause (lost surface) after other threads started "
+             "using it; recovery is not safe now");
+  } else if (g_deviceLostRecoverable.load(std::memory_order_acquire) &&
+             !g_deviceRecoveryAttempted.exchange(true, std::memory_order_acq_rel)) {
     Log.warn("WebGPU device lost to a transient-looking cause (lost surface); attempting one-time recovery");
     if (initialize(g_lastInitializedBackend)) {
       Log.info("WebGPU device recovered");
@@ -1040,9 +1105,19 @@ void release_surface() noexcept {
   }
   g_surface = {};
   if (hadSurface && g_instance && g_device && g_queue) {
+#if !defined(__SWITCH__)
+    // Retired swapchain is freed after a later submission completes and the device ticks. Not on
+    // Switch: the deko3d shim has no wgpuDeviceTick (nor Unconfigure, so this never runs there).
+    submit_staging_commands(g_device.CreateCommandEncoder().Finish());
+#endif
     const auto future = g_queue.OnSubmittedWorkDone(
         wgpu::CallbackMode::WaitAnyOnly, [](wgpu::QueueWorkDoneStatus, wgpu::StringView) {});
-    g_instance.WaitAny(future, 1000000000);
+    if (const auto status = g_instance.WaitAny(future, 1000000000); status != wgpu::WaitStatus::Success) {
+      Log.warn("Timed out waiting for queue idle on surface release: {}", magic_enum::enum_name(status));
+    }
+#if !defined(__SWITCH__)
+    g_device.Tick();
+#endif
   }
 }
 

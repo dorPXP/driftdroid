@@ -1,4 +1,5 @@
 #include "memory.h"
+#include "sound_core.h"
 #include "guest_interrupt_context.h"
 #include "hle_stubs.h"
 #include "ppc_runtime.h"
@@ -81,6 +82,17 @@ bool PushAudioBlock(uint32_t startAddr, uint32_t length) {
     }
 
     if (src) {
+#if !defined(__SWITCH__) && !defined(__ANDROID__)
+        // Desktop test aid: MKW_AUDIO_DUMP=<file> appends the raw output (big-endian 16-bit,
+        // right then left, 32 kHz) so two runs can be compared.
+        static std::FILE* const dump = [] {
+            const char* path = std::getenv("MKW_AUDIO_DUMP");
+            return path != nullptr ? std::fopen(path, "wb") : nullptr;
+        }();
+        if (dump != nullptr) {
+            std::fwrite(src, 1, bytes, dump);
+        }
+#endif
         return AudioBackend::Instance().PushWiiAiSamplesBE16(src, bytes);
     }
 
@@ -453,9 +465,11 @@ void Audio_HLE_Tick(CpuContext* ctx, uint32_t deltaMicros)
                     ReportAudioProblem("Audio", "AI DMA callback not registered; skipping");
                 }
             } else {
+                SoundCore::BeginAudioInterrupt();
                 Memory::TryWrite32(kAICallbackBusyAddr, 1);
                 InvokeIndirectCpu(callback, cpu);
                 Memory::TryWrite32(kAICallbackBusyAddr, 0);
+                SoundCore::EndAudioInterrupt();
                 AxDspHle::ServiceDeferredCallbacks();
             }
         }

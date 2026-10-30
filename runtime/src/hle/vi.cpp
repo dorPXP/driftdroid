@@ -1,3 +1,4 @@
+#include "sound_core.h"
 #include "hle_stubs.h"
 #include "memory.h"
 #include "abi_bridge.h"
@@ -468,7 +469,28 @@ void VI_HLE_PollRetrace(CpuContext* ctx) {
     AdvanceDueRetraces(ctx, 8, true);
 }
 
+namespace {
+void ProcessRetracesDeferred(int maxToProcess, bool flushReschedule);
+}
+
 void VI_HLE_ProcessRetracesDeferred(int maxToProcess) {
+    ProcessRetracesDeferred(maxToProcess, true);
+}
+
+// The same service for callers that are in the middle of a translated function (the pumps in the
+// drawing path, gx_vertex.cpp). The reschedule at the end must not run there: it would switch
+// guest threads with the private register copy below as "the CPU", and when this thread comes
+// back only that copy is restored. The thread's real register file is left holding an old saved
+// snapshot, stack pointer included, and the interrupted function goes on with it. Seen as the
+// game's main loop losing r14-r31 right after the Retro WFC login starts (network completions
+// wake a thread here). A thread woken in this call stays Ready until the next frame wait, which
+// is what happened before these pumps ran during drawing at all.
+void VI_HLE_ProcessRetracesDeferredNoSwitch(int maxToProcess) {
+    ProcessRetracesDeferred(maxToProcess, false);
+}
+
+namespace {
+void ProcessRetracesDeferred(int maxToProcess, bool flushReschedule) {
     if (maxToProcess <= 0 || !OS_HLE_InterruptsEnabled()) {
         return;
     }
@@ -499,8 +521,11 @@ void VI_HLE_ProcessRetracesDeferred(int maxToProcess) {
     // that the dispatch has fully unwound, instead of leaving the woken thread "Ready" until the
     // 100ms stranded-sleeper safety net in ProcessSleepTimers force-resumes it - too slow for
     // WFC's own bounded connect-retry budget.
-    OS_HLE_RunDeferredReschedule(cpu);
+    if (flushReschedule) {
+        OS_HLE_RunDeferredReschedule(cpu);
+    }
 }
+} // namespace
 
 void VI_HLE_WaitForNextRetracePoll() {
     if (g_guestPausedForBackground.load(std::memory_order_acquire)) {
@@ -525,8 +550,15 @@ void VI_HLE_WaitForNextRetracePoll() {
     // deadline is farther away. The high-resolution wait removes the 1 ms
     // scheduler overshoot when retrace is the next event.
     const bool retraceIsNext = retraceDeadline <= now + 1ms;
+    const bool soundCore = SoundCore::Enabled();
+    if (soundCore) {
+        SoundCore::MainIdleBegin();
+    }
     SleepPreciselyUntil(retraceIsNext ? retraceDeadline : now + 1ms, retraceIsNext,
                         kFinalSpinWindow);
+    if (soundCore) {
+        SoundCore::MainIdleEnd();
+    }
 }
 
 namespace {

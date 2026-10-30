@@ -1,6 +1,7 @@
 // OSMessageQueue HLE.
 
 #include <cstdint>
+#include "sound_core.h"
 #include <iostream>
 
 #include "abi_bridge.h"
@@ -156,6 +157,9 @@ extern "C" int32_t OS__SendMessage_HLE_801a735c(CpuContext* ctx)
         cpu->gpr[3] = 0;
         return 0;
     }
+    if (SoundCore::HandleSend(cpu, queuePtr, msg)) {
+        return static_cast<int32_t>(cpu->gpr[3]);
+    }
 
     // Append, then wake receivers blocked on the receive queue (offset 0x08);
     // a full queue parks this thread on the send queue.
@@ -178,6 +182,9 @@ extern "C" int32_t OS__ReceiveMessage_HLE_801a7424(CpuContext* ctx)
     if (queuePtr == 0) {
         cpu->gpr[3] = 0;
         return 0;
+    }
+    if (SoundCore::HandleReceive(cpu, queuePtr, outMsgPtr, block)) {
+        return static_cast<int32_t>(cpu->gpr[3]);
     }
 
     // Pop, then wake senders now that there is space; an empty queue parks this
@@ -206,6 +213,10 @@ extern "C" int32_t OS__JamMessage_HLE_801a7500(CpuContext* ctx)
     if (queuePtr == 0) {
         cpu->gpr[3] = 0;
         return 0;
+    }
+    // SoundThread::Shutdown jams its exit message; the guest thread still receives it below.
+    if (SoundCore::HandleSend(cpu, queuePtr, msg)) {
+        return static_cast<int32_t>(cpu->gpr[3]);
     }
 
     // Prepend instead of append; otherwise identical to OSSendMessage.

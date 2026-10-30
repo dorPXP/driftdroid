@@ -1,5 +1,6 @@
 package com.driftdroid.android.rom
 
+import com.driftdroid.android.T
 import android.app.Activity
 import android.content.Intent
 import android.graphics.Color
@@ -54,19 +55,19 @@ class RomImportOverlay private constructor(
         column.setPadding(pad, pad, pad, pad)
 
         val title = TextView(activity)
-        title.text = "Please select the Mario Kart Wii ROM ISO"
+        title.text = T("Please select the Mario Kart Wii ROM ISO")
         title.setTextColor(Color.WHITE)
         title.textSize = 20f
         title.gravity = Gravity.CENTER
 
         val subtitle = TextView(activity)
-        subtitle.text = "(ONLY PAL REGION SUPPORTED)"
+        subtitle.text = T("(ONLY PAL REGION SUPPORTED)")
         subtitle.setTextColor(Color.argb(200, 255, 210, 90))
         subtitle.textSize = 14f
         subtitle.gravity = Gravity.CENTER
         subtitle.setPadding(0, dp(8), 0, dp(24))
 
-        selectButton.text = "Select ROM file (.iso / .wbfs)"
+        selectButton.text = T("Select ROM file (.iso / .wbfs)")
         selectButton.setOnClickListener { launchPicker() }
 
         progressBar.max = 1000
@@ -119,7 +120,7 @@ class RomImportOverlay private constructor(
         if (extension != "wbfs") {
             val gameId = readGameId(uri)
             if (gameId == null) {
-                showResult(false, "Couldn't read \"$name\" - make sure it's a valid disc image.")
+                showResult(false, T("Couldn't read \"%s\" - make sure it's a valid disc image.").format(name))
                 return
             }
             if (gameId != "RMCP01") {
@@ -142,7 +143,7 @@ class RomImportOverlay private constructor(
                 null
             }
         if (fd == null) {
-            showResult(false, "Couldn't open \"$name\" for reading.")
+            showResult(false, T("Couldn't open \"%s\" for reading.").format(name))
             return
         }
         openFd = fd
@@ -151,7 +152,7 @@ class RomImportOverlay private constructor(
         progressBar.visibility = View.VISIBLE
         progressBar.progress = 0
         statusText.setTextColor(Color.WHITE)
-        statusText.text = "Extracting \"$name\" - this can take a while for a multi-GB disc..."
+        statusText.text = T("Extracting \"%s\" - this can take a while for a multi-GB disc...").format(name)
 
         val poller =
             object : Runnable {
@@ -161,7 +162,7 @@ class RomImportOverlay private constructor(
                     if (total > 0) {
                         progressBar.progress = ((done * 1000) / total).toInt().coerceIn(0, 1000)
                         val percent = (done * 100) / total
-                        statusText.text = "Extracting \"$name\"... $percent%"
+                        statusText.text = T("Extracting \"%s\"... %s%%").format(name, percent)
                     }
                     mainHandler.postDelayed(this, 400)
                 }
@@ -187,7 +188,7 @@ class RomImportOverlay private constructor(
         if (error == null) {
             progressBar.progress = 1000
             statusText.setTextColor(Color.rgb(120, 255, 150))
-            statusText.text = "Done! Starting the game..."
+            statusText.text = T("Done! Starting the game...")
             (container.parent as? ViewGroup)?.removeView(container)
             onImportComplete()
         } else {

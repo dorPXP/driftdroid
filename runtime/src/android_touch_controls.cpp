@@ -9,10 +9,13 @@
 
 #include <jni.h>
 #include <algorithm>
+#include <atomic>
 #include <mutex>
 
 #include <SDL3/SDL_gamepad.h>
 #include <SDL3/SDL_joystick.h>
+
+#include "wii_remote_input.h"
 
 namespace {
 
@@ -77,6 +80,47 @@ Java_com_driftdroid_android_touch_TouchInputBridge_nativeSetTouchAxis(JNIEnv*, j
         const auto scaled = static_cast<Sint16>(clamped * 32767.0f);
         SDL_SetJoystickVirtualAxis(joystick, axis, scaled);
     }
+}
+
+// Tilt steering (MotionSteering.kt) only steers while the player drives a race; in menus a phone held
+// slightly tilted moved the cursor by itself.
+extern "C" bool RuntimePlayerIsDriving();  // hle/input/pad.cpp
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_driftdroid_android_touch_TouchInputBridge_nativeIsDriving(JNIEnv*, jclass) {
+    return RuntimePlayerIsDriving() ? JNI_TRUE : JNI_FALSE;
+}
+
+// Tilt steering's value, for a real controller that is player 1 (hle/input/pad.cpp): the touch
+// axis above only reaches the touch gamepad.
+std::atomic<bool> g_motionSteering{false};
+std::atomic<float> g_motionSteerValue{0.0f};
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_driftdroid_android_touch_TouchInputBridge_nativeSetMotionSteer(JNIEnv*, jclass, jboolean steering,
+                                                                         jfloat value) {
+    g_motionSteerValue.store(std::clamp(value, -1.0f, 1.0f), std::memory_order_relaxed);
+    g_motionSteering.store(steering == JNI_TRUE, std::memory_order_relaxed);
+}
+
+extern "C" bool AndroidMotionSteer(float* value) {
+    if (!g_motionSteering.load(std::memory_order_relaxed)) {
+        return false;
+    }
+    *value = g_motionSteerValue.load(std::memory_order_relaxed);
+    return true;
+}
+
+// Wii Wheel mode (WiiWheelMode.kt): one accelerometer reading in g, already in the remote's axes.
+extern "C" JNIEXPORT void JNICALL
+Java_com_driftdroid_android_touch_TouchInputBridge_nativePublishWiiRemoteMotion(JNIEnv*, jclass, jfloat x,
+                                                                                jfloat y, jfloat z) {
+    WiiRemoteInput::PublishMotion(x, y, z);
+}
+
+// A shake WiiWheelMode.kt detected: the same trick pulse as a D-pad press.
+extern "C" JNIEXPORT void JNICALL
+Java_com_driftdroid_android_touch_TouchInputBridge_nativeWiiRemoteTrickPulse(JNIEnv*, jclass) {
+    WiiRemoteInput::TriggerTrickPulse();
 }
 
 #endif  // __ANDROID__

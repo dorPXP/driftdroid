@@ -410,6 +410,7 @@ static PendingPipeline* touch_pending_pipeline(PipelineRef hash, bool prioritize
 
   g_priorityPipelines.emplace_back(std::move(*backgroundIt));
   g_backgroundPipelines.erase(backgroundIt);
+  g_pipelineCv.notify_all();
   return &g_priorityPipelines.back();
 }
 
@@ -544,7 +545,8 @@ static PipelineRef find_pipeline_impl(ShaderType type, const PipelineConfig& con
   }
 
   if (notifyWorker) {
-    g_pipelineCv.notify_one();
+    // Compiler workers and renderer waiters share this condition variable.
+    g_pipelineCv.notify_all();
   }
   if (notifyWaiters) {
     g_pipelineCv.notify_all();
@@ -1207,6 +1209,7 @@ static void load_pipeline_cache() {
                                                   gx::create_pipeline);
   const auto queued = queuedPipelines.load();
   if (queued > 0) {
+    webgpu::mark_device_shared();
     g_prewarmCount = queued;
     g_prewarmStart = std::chrono::steady_clock::now();
     g_prewarmActive.store(true, std::memory_order_release);
@@ -1331,6 +1334,8 @@ uint32_t queued_pipeline_count() noexcept {
 #endif
 }
 
+bool pipeline_prewarm_active() noexcept { return g_prewarmActive.load(std::memory_order_relaxed); }
+
 bool try_pipeline(PipelineRef ref, wgpu::RenderPipeline& pipeline) {
   std::scoped_lock lock{g_pipelineMutex};
   const auto it = g_pipelines.find(ref);
@@ -1387,3 +1392,5 @@ void aurora_set_skip_unready_pipelines(const bool enabled) { aurora::gfx::set_sk
 bool aurora_get_skip_unready_pipelines() { return aurora::gfx::skip_unready_pipelines(); }
 
 uint32_t aurora_get_queued_pipeline_count() { return aurora::gfx::queued_pipeline_count(); }
+
+bool aurora_is_pipeline_prewarm_active() { return aurora::gfx::pipeline_prewarm_active(); }

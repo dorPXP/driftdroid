@@ -1,5 +1,16 @@
 #pragma once
 
+// The per-thread pieces of guest CPU state (current context, NI mirror, dispatch memos) are
+// plain globals on Switch and Android, where a thread_local access is an out-of-line call (the
+// current context itself is per thread everywhere but Android, see ppc_isa_context.h). Guest
+// code runs on the emulation thread plus, optionally, the sound host thread (sound_core.h), which
+// is written to never touch them: it is recognised by its one CpuContext (MkwIsSoundCpu), keeps
+// its own memos and sets its own FP control register.
+// MKW_FORCE_GUEST_STATE_GLOBAL selects the same layout on a desktop build, for testing.
+#if defined(__SWITCH__) || defined(__ANDROID__) || defined(MKW_FORCE_GUEST_STATE_GLOBAL)
+#define MKW_GUEST_STATE_GLOBAL 1
+#endif
+
 #include <atomic>
 #include <cstdint>
 

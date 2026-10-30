@@ -522,6 +522,18 @@ endif()
 # a registration file is silently never compiled and never errors. The stale-glob
 # failure mode is worth far more than the milliseconds.
 file(GLOB_RECURSE SOURCES CONFIGURE_DEPENDS "src/*.cpp")
+# TEMP-SNDAUDIT: desktop test builds can log the sound thread's heap calls
+# (src/hle/audio/sound_core_audit.cpp). Off by default; the wraps need that file.
+option(MKW_SOUND_AUDIT "Log heap calls made by the sound host thread (desktop tests)" OFF)
+if(MKW_SOUND_AUDIT AND NOT MKW_TARGET_SWITCH)
+    foreach(mkw_audit_address 80229814 80229B84 80226C04 80226C78)
+        add_link_options(-Wl,--wrap=func_${mkw_audit_address})
+    endforeach()
+    set_source_files_properties("${CMAKE_CURRENT_LIST_DIR}/src/hle/audio/sound_core_audit.cpp" PROPERTIES
+        COMPILE_DEFINITIONS MKW_SOUND_AUDIT
+        SKIP_UNITY_BUILD_INCLUSION ON
+        SKIP_PRECOMPILE_HEADERS ON)
+endif()
 set(MKW_BASE_PRODUCT_SOURCE "${CMAKE_CURRENT_LIST_DIR}/src/product/base_product.cpp")
 set(MKW_RETRO_REWIND_PRODUCT_SOURCE "${CMAKE_CURRENT_LIST_DIR}/src/product/retro_rewind_product.cpp")
 # The host ISA guard is the one translation unit that must not receive the

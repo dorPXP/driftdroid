@@ -648,9 +648,10 @@ extern "C" int32_t Network_HLE_OpenDevice(const char* path, uint32_t mode) {
     if (!path) {
         return -101;
     }
-    if (!RuntimeConfigFile::NetworkEnabled(true)) {
-        // The guest opens several /dev/net nodes at boot and retries; report the
-        // reason online will not work exactly once.
+    const bool isIpTop = std::strcmp(path, "/dev/net/ip/top") == 0;
+    const bool isSsl = std::strcmp(path, "/dev/net/ssl") == 0;
+    // KD and NCD provide local identity/configuration services even offline.
+    if ((isIpTop || isSsl) && !RuntimeConfigFile::NetworkEnabled(true)) {
         static bool reported = false;
         if (!reported) {
             reported = true;
@@ -665,10 +666,10 @@ extern "C" int32_t Network_HLE_OpenDevice(const char* path, uint32_t mode) {
         kind = DeviceKind::KdTime;
     } else if (std::strcmp(path, "/dev/net/ncd/manage") == 0) {
         kind = DeviceKind::NcdManage;
-    } else if (std::strcmp(path, "/dev/net/ip/top") == 0) {
+    } else if (isIpTop) {
         kind = DeviceKind::IpTop;
         EnsureSocketRuntime();
-    } else if (std::strcmp(path, "/dev/net/ssl") == 0) {
+    } else if (isSsl) {
         kind = DeviceKind::Ssl;
         EnsureSocketRuntime();
     } else {
@@ -690,25 +691,46 @@ extern "C" int32_t Network_HLE_Close(uint32_t fd) {
     return 0;
 }
 
+// Every call the game makes to the network devices and what it got back: the first 300, then any
+// failure. Added 2026-10-27 after an on-console "error 84020" that left no trace in the log.
+static void NetTrace(const char* what, DeviceKind kind, uint32_t cmd, int32_t result) {
+    static std::atomic<uint32_t> count{0};
+    const uint32_t n = count.fetch_add(1, std::memory_order_relaxed);
+    if (n >= 300 && result >= 0) {
+        return;
+    }
+    const char* name = kind == DeviceKind::KdRequest ? "kd/request"
+                       : kind == DeviceKind::KdTime  ? "kd/time"
+                       : kind == DeviceKind::NcdManage ? "ncd"
+                       : kind == DeviceKind::IpTop ? "ip/top"
+                                                   : "ssl";
+    NetFail("%s %s cmd=%#x -> %d", what, name, cmd, result);
+}
+
 extern "C" int32_t Network_HLE_Ioctl(uint32_t fd, uint32_t cmd, uint32_t inBuf, uint32_t inLen,
                                       uint32_t outBuf, uint32_t outLen) {
     const auto device = GetDeviceKind(fd);
     if (!device) {
         return -101;
     }
+    int32_t result = -101;
     switch (*device) {
     case DeviceKind::KdRequest:
-        return HandleKdIoctl(cmd, inBuf, inLen, outBuf, outLen);
+        result = HandleKdIoctl(cmd, inBuf, inLen, outBuf, outLen);
+        break;
     case DeviceKind::KdTime:
-        return HandleKdTimeIoctl(cmd, inBuf, inLen, outBuf, outLen);
+        result = HandleKdTimeIoctl(cmd, inBuf, inLen, outBuf, outLen);
+        break;
     case DeviceKind::IpTop:
-        return HandleIpTopIoctl(cmd, inBuf, inLen, outBuf, outLen);
+        result = HandleIpTopIoctl(cmd, inBuf, inLen, outBuf, outLen);
+        break;
     case DeviceKind::NcdManage:
-        return 0;
     case DeviceKind::Ssl:
-        return 0;
+        result = 0;
+        break;
     }
-    return -101;
+    NetTrace("ioctl", *device, cmd, result);
+    return result;
 }
 
 extern "C" int32_t Network_HLE_Ioctlv(uint32_t fd, uint32_t cmd, uint32_t numIn, uint32_t numOut,
@@ -730,22 +752,29 @@ extern "C" int32_t Network_HLE_Ioctlv(uint32_t fd, uint32_t cmd, uint32_t numIn,
     const std::vector<IoVector> in(vectors.begin(), vectors.begin() + numIn);
     const std::vector<IoVector> out(vectors.begin() + numIn, vectors.end());
 
+    int32_t result = -101;
     switch (*device) {
     case DeviceKind::NcdManage:
-        return HandleNcdIoctlv(cmd, in, out);
+        result = HandleNcdIoctlv(cmd, in, out);
+        break;
     case DeviceKind::IpTop:
-        return HandleIpTopIoctlv(cmd, in, out);
+        result = HandleIpTopIoctlv(cmd, in, out);
+        break;
     case DeviceKind::KdRequest:
-        return HandleKdIoctlv(cmd, in, out);
+        result = HandleKdIoctlv(cmd, in, out);
+        break;
     case DeviceKind::KdTime: {
         const uint32_t inBuf = in.empty() ? 0 : in[0].address;
         const uint32_t inLen = in.empty() ? 0 : in[0].size;
         const uint32_t outBuf = out.empty() ? 0 : out[0].address;
         const uint32_t outLen = out.empty() ? 0 : out[0].size;
-        return HandleKdTimeIoctl(cmd, inBuf, inLen, outBuf, outLen);
+        result = HandleKdTimeIoctl(cmd, inBuf, inLen, outBuf, outLen);
+        break;
     }
     case DeviceKind::Ssl:
-        return HandleSslIoctlv(cmd, in, out);
+        result = HandleSslIoctlv(cmd, in, out);
+        break;
     }
-    return -101;
+    NetTrace("ioctlv", *device, cmd, result);
+    return result;
 }

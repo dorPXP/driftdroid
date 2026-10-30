@@ -88,6 +88,11 @@ extern "C" {
 #endif
 
 #define PAD_NATIVE_BUTTON_INVALID 0xFFFFFFFF
+// Analog triggers (L2/R2, ZL/ZR on some pads) used as buttons in a button mapping. Not SDL button
+// numbers: PADRead turns them into presses past the trigger activation zone, and a trigger bound
+// this way no longer drives the analog L/R value.
+#define PAD_NATIVE_BUTTON_LEFT_TRIGGER 0x1000
+#define PAD_NATIVE_BUTTON_RIGHT_TRIGGER 0x1001
 
 typedef struct PADStatus {
   u16 button;
@@ -278,6 +283,17 @@ BOOL PADGetSensorData(u32 port, PADSensorType sensor, f32* data, int nValues);
 BOOL PADSetRumbleIntensity(u32 port, u16 low, u16 high);
 BOOL PADGetRumbleIntensity(u32 port, u16* low, u16* high);
 BOOL PADSupportsRumbleIntensity(u32 port);
+/* Player setting: when off, the game's rumble commands are ignored (all controllers). */
+void PADSetRumbleEnabled(BOOL enabled);
+BOOL PADGetRumbleEnabled(void);
+/* Player setting, 0 to 200 percent (100 = the controller's own strength). 0 turns rumble off. */
+void PADSetRumbleStrength(u32 percent);
+u32 PADGetRumbleStrength(void);
+/* Ports with a device vibrator (Android) install this: player one's device vibrates when the game
+ * rumbles a connected controller that has no motor of its own. Called with 0 to stop, otherwise the
+ * strength in percent, and only when that value changes. */
+typedef void (*PADDeviceRumbleCallback)(u32 strengthPercent);
+void PADSetDeviceRumbleCallback(PADDeviceRumbleCallback callback);
 
 typedef enum PADBatteryState {
   PAD_BATTERYSTATE_ERROR = -1,

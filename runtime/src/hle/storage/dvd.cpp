@@ -14,6 +14,7 @@ extern "C" void GxNotifyGuestRamDmaWrite(uint32_t addr, uint32_t size);
 #include "runtime_config.h"
 #include "runtime_log.h"
 #include "runtime_product.h"
+#include "sound_core.h"
 
 #include <cstdint>
 #include <cstdlib>
@@ -113,6 +114,32 @@ extern "C" uint32_t g_dvdFstReservedSize;
 // memcpy when both of its end bytes take Write8's native fast path and map contiguously; the
 // guard and the writable bias are per sub-page, so the bytes between share that answer. Anything
 // else - executable pages, MMIO, unmapped holes - still goes through Write8 one byte at a time.
+// Around the host half of a guest disc read. On a console the reading thread sleeps until the
+// drive is done and the sound thread runs meanwhile; here the read blocks the emulation thread,
+// and a slow SD card (Switch) could hold the sound thread out of its sections for 250 ms and more
+// while a race loads. The read only fills a host buffer, so the emulation thread counts as asleep.
+struct HostReadScope {
+    const bool soundCore = SoundCore::Enabled();
+    HostReadScope()
+    {
+        if (soundCore) {
+            SoundCore::MainIdleBegin();
+        }
+    }
+    ~HostReadScope()
+    {
+        if (soundCore) {
+            SoundCore::MainIdleEnd();
+        }
+    }
+};
+
+static bool ReadHost(const std::filesystem::path& hostPath, uint64_t offset, uint32_t length,
+                     std::vector<uint8_t>& destination, DvdReadContract::HostReadFailure& failure) {
+    HostReadScope scope;
+    return DvdReadContract::ReadExact(hostPath, offset, length, destination, failure);
+}
+
 static void CopyToGuestAsDma(uint32_t dest, const uint8_t* data, size_t size) {
     constexpr uint32_t kSubPage = 1u << RecompMod::kExecutableWriteGuardPageShift;
     size_t done = 0;
@@ -961,7 +988,7 @@ extern "C" int32_t DVDReadPrio_8015E834(uint32_t fileInfoPtr, uint32_t bufferPtr
 
     std::vector<uint8_t> tempBuf;
     DvdReadContract::HostReadFailure failure;
-    if (!DvdReadContract::ReadExact(entry.hostPath, uOffset, uLength, tempBuf, failure)) {
+    if (!ReadHost(entry.hostPath, uOffset, uLength, tempBuf, failure)) {
         return DvdReadFatal(fileInfoPtr, entry.hostPath, offset, uLength,
                             DvdReadContract::Describe(failure));
     }
@@ -1028,11 +1055,11 @@ extern "C" int32_t DVD__ReadAbsAsyncPrio_HLE_801628cc(uint32_t cmdBlockPtr,
         } else {
             std::vector<uint8_t> tempBuf;
             DvdReadContract::HostReadFailure failure;
-            if (!DvdReadContract::ReadExact(readInfo.entry->hostPath,
-                                            readInfo.fileOffset,
-                                            readInfo.readLength,
-                                            tempBuf,
-                                            failure)) {
+            if (!ReadHost(readInfo.entry->hostPath,
+                          readInfo.fileOffset,
+                          readInfo.readLength,
+                          tempBuf,
+                          failure)) {
                 bytesRead = DvdReadFatal(cmdBlockPtr, readInfo.entry->hostPath,
                                          readInfo.fileOffset, readInfo.readLength,
                                          DvdReadContract::Describe(failure));
@@ -1144,11 +1171,11 @@ extern "C" int32_t DVDLowRead_80166330(uint32_t buffer, uint32_t length, uint32_
 
     std::vector<uint8_t> tempBuf;
     DvdReadContract::HostReadFailure failure;
-    if (!DvdReadContract::ReadExact(readInfo.entry->hostPath,
-                                    readInfo.fileOffset,
-                                    readInfo.readLength,
-                                    tempBuf,
-                                    failure)) {
+    if (!ReadHost(readInfo.entry->hostPath,
+                  readInfo.fileOffset,
+                  readInfo.readLength,
+                  tempBuf,
+                  failure)) {
         ReportDvdReadError(readInfo.entry->hostPath, readInfo.fileOffset,
                            readInfo.readLength, DvdReadContract::Describe(failure));
         return finish(false);

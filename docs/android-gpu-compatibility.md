@@ -39,7 +39,7 @@ makes; it has not necessarily been played on.
 
 ### Settings that override the automatic choice
 
-In the in-game settings sidebar:
+In the in-game settings menu:
 
 - **Fix stretched graphics (Snapdragon):** Automatic, Off, Characters only, Everything (slower).
   Takes effect the next time the game starts.

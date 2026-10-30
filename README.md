@@ -3,8 +3,9 @@
 
 A native Android port of [WiiCompiled](https://github.com/patchzyy/Wiicompiled), a static
 recompilation of Mario Kart Wii to native code. This fork adds everything the game needs to be a
-phone app: touch controls, motion steering, a mobile settings sidebar, a launcher, and an in-app
-way to turn your own game disc into a playable install, with no PC step in between.
+phone app: touch controls, motion steering, a mobile settings menu and a launcher. The game
+code itself is made from your own disc by **DriftDroid Builder**, a Windows and Linux program, so neither the
+app nor anything else in this project carries any of the game.
 
 There's no emulator in the loop, no interpreter, no JIT, no PowerPC anywhere at runtime - the game
 runs as translated native ARM64 code, same as the original desktop project.
@@ -18,17 +19,18 @@ runs as translated native ARM64 code, same as the original desktop project.
 
 ## Status
 
-DriftDroid is playable end to end: install the app, point it at your own disc
-image once, and it builds a working game on the device. No PC step, no manual
-file staging.
+DriftDroid is playable end to end: run DriftDroid Builder once on a Windows or Linux PC
+with your own disc image, import the game pack it makes into the app, and pick
+the same disc image on the phone for the game's data.
 
 - **Races, menus, audio, saves and online play work**, with touch controls or a
   physical controller.
 - **Both Original Mario Kart Wii and Retro Rewind** are supported, chosen from
-  the launcher screen. Retro Rewind 6.13.0 and 6.13.1 are the versions this
-  release runs.
-- **Getting the game onto the device is done in-app**: pick your disc image and
-  DriftDroid verifies it's a clean PAL `RMCP01` disc and extracts it for you.
+  the launcher screen. Retro Rewind 6.13.4 is the version this release runs.
+- **The game code comes from your disc, on your PC**: DriftDroid Builder
+  translates and compiles it into a game pack (one zip) that the app imports.
+- **The game data comes from your disc, on the phone**: pick your disc image
+  and DriftDroid verifies it's a clean PAL `RMCP01` disc and extracts it.
 
 It is still an active, personal fork rather than a finished product. Expect
 rough edges, and expect performance to vary a lot between devices - see
@@ -49,12 +51,35 @@ Vulkan doesn't work for you.
 
 **Touch controls, tuned for Mario Kart Wii specifically.** Drag-anywhere
 steering joystick, GameCube-diamond-style face buttons, D-Pad (needed for bike
-wheelies), and L/R for items and drift. Every control can be repositioned,
-resized, or hidden from a long-press edit mode, and double-tapping A can hold
-acceleration for you.
+wheelies), and L/R for items and drift. In the layout editor (Settings >
+Controls > Edit touch layout) you drag buttons to move them, pinch to resize,
+and tap one to hide it, fade it or recolour it (including how solid the colour
+is). Layouts can be saved, swapped, exported and imported; vertical and
+horizontal mode each keep their own layout and their own saved list.
+Double-tapping A can hold acceleration for you.
 
-**Motion steering.** Tilt-to-steer, with its own calibration and sensitivity,
-for anyone who played the original with a Wii Wheel.
+**Motion controls.** Settings > Controls > Motion controls, "Steer with":
+- **Tilt**: tilt the phone like a wheel, with sensitivity, flip and "set
+  straight ahead".
+- **Wii Wheel**: the phone is handed to the game as a Wii Remote in a Wii Wheel,
+  so the game's own wheel code steers and shaking the phone does real tricks and
+  wheelies. The phone's own vibration is filtered out so it can't steer or trick.
+- **Stick** with **Shake for tricks**: steer with the stick, shake for tricks.
+
+In every mode, pushing the stick sideways takes over the steering. With a real
+controller connected the phone's motion is paused and the controller plays like a
+normal controller (its D-pad does tricks). Wii Wheel and shake changes need a
+restart, which the menu does for you.
+
+**Vertical mode (experimental).** Play upright like Mario Kart Tour: the race
+fills the tall screen, the race HUD moves to the corners and the touch controls
+get their own layout. Launcher > Graphics > Vertical mode.
+
+**Save import and export.** Bring your profile over from a Wii NAND backup or
+Dolphin (`rksys.dat`), or copy it out, from the launcher's **Save data**.
+
+**Picture settings.** Brightness, contrast and saturation in the Display
+settings.
 
 **Real controller support.** Controllers are fed to the game as a GameCube-style
 pad. Mappings are positional (`south`, `east`, `west`, `north`) rather than
@@ -75,26 +100,24 @@ many frames, instead of running in slow motion. It works in the original game
 and in Retro Rewind, offline and online. Menus stay at 60, and Retro Rewind's
 time trials and ghost races stay at 60 because the mod requires it there.
 
-**It updates itself.** When a newer release is out, an **Update available**
-button appears on the launcher screen. DriftDroid downloads the new APK, checks
-it against the release's checksum and against its own signing key, and hands it
-to Android, which asks you to confirm. Saves and game data stay. (New in 1.3.0,
-so it first gets used by the release after it.)
-
 **It behaves like a phone app.** The game pauses when you background it instead
 of fast-forwarding through everything it missed, it can drop its render
 resolution when the device gets hot rather than sliding into a slideshow, and it
 mutes its own music while you play something else - without stealing audio
 focus from your music app.
 
-**An in-game settings sidebar**, reachable from the gear button or the Back
-button:
+**An in-game settings menu**, reachable from the gear button or the Back
+button. It slides in from the side (in vertical mode it comes up from the bottom),
+the race stays visible behind it, and every change is saved the moment you make
+it. Pages Display, Controls and Sound:
 - Internal resolution, display mode, and FPS counter
 - Frame interpolation, copy filter, and shader-compilation behavior
 - 30 FPS races, and simpler computer karts for lighter races
 - Thermal resolution scaling and experimental multithreaded graphics
 - Touch control visibility and double-tap auto-hold
-- Controller assignment and full per-button mapping, with presets
+- Controller assignment (pick a player and a controller from dropdowns) and full
+  per-button mapping, with presets
+- Vibration and its strength (the phone vibrates for a controller without a motor)
 - Volume sliders and instant mute
 
 Everything you change is saved to `Config.toml` on the device and restored on
@@ -136,8 +159,9 @@ a phone, and the honest summary is:
   from the launcher's **Graphics...** screen.
 - Enough free storage for the extracted game data (a few GB) plus headroom during the one-time
   extraction step.
-- A clean, unmodified **PAL `RMCP01`** disc image of Mario Kart Wii, dumped by you. Only the clean
-  PAL revision is supported; other regions or modified executables are rejected.
+- A clean, unmodified **PAL `RMCP01`** disc image of Mario Kart Wii (.iso or .wbfs), dumped by you.
+  Only the clean PAL revision is supported; other regions or modified executables are rejected.
+- **A Windows 10/11 or Linux (x86-64) PC, once**, to run DriftDroid Builder (about 25 GB of free space while it works).
 
 > [!NOTE]
 > Nobody here will tell you where to get the game. Dumping your own disc is on you, and links to
@@ -145,14 +169,22 @@ a phone, and the honest summary is:
 
 ## Installing
 
-Grab the latest APK from this repo's [Releases](https://github.com/dorPXP/driftdroid/releases)
-page and sideload it - it isn't on the Play Store. On first launch the app asks you to pick your
-Mario Kart Wii disc image, checks it really is a clean PAL disc, and extracts it on the device.
-That's the whole setup.
+From this repo's [Releases](https://github.com/dorPXP/driftdroid/releases) page, get both the APK
+and **DriftDroid Builder** (a zip) of the same version. The app isn't on the Play Store.
 
-To update, install the new APK over the old one - saves, the extracted game and Retro Rewind all
-stay. From 1.3.0 on the app can do this itself: tap **Update available** on the launcher screen
-when it appears.
+1. On your PC, unpack DriftDroid Builder and open `DriftDroidBuilder.exe` (Linux: `DriftDroidBuilder`).
+   In its window, choose your disc image, pick Android and press **Start**. It takes 30 minutes to a
+   couple of hours and makes `output/DriftDroid-GamePack-<version>.zip`.
+2. Install the APK on your phone, copy the game pack zip over, and tap **Import Game Pack...** in
+   the launcher.
+3. Start the game. The first time, it asks for your disc image again and extracts the game's data
+   on the phone.
+
+To update, install the new APK over the old one - saves, the extracted game data and Retro Rewind
+all stay. A game pack fits one app version, so make a new one with the matching builder.
+
+DriftDroid Builder also makes the **Switch** version (`DriftDroid.nro` and `RetroRewind.nro`); that
+needs devkitPro's "Switch Development" tools installed on the PC.
 
 > [!CAUTION]
 > Only take builds from this repository's own Releases page. Don't install an APK someone shared
@@ -175,6 +207,12 @@ cmake --build <your-android-build-dir>
 # copy the built .so files into android/app/src/main/jniLibs/arm64-v8a/, then:
 cd android && ./gradlew assembleRelease
 ```
+
+A build made this way carries the game code inside the APK, for your own use. Release APKs don't:
+they carry a toolkit id (`assets/toolkit-id.txt`) and load the game code from an imported game
+pack instead. DriftDroid Builder is made from a finished build by `tools/pc-builder/extract_plan.py`
+and `tools/pc-builder/make_toolkit.sh`; how it works is in [`docs/pc-builder.md`](docs/pc-builder.md).
+Switch files, controls and log messages are in [`docs/switch.md`](docs/switch.md).
 
 Build `assembleRelease` for anything you intend to measure. Debug builds enable Android's runtime
 checks and are substantially slower.
@@ -228,10 +266,11 @@ up on your phone at runtime. So:
 
 - A Retro Rewind update that changes **tracks, characters or other assets** works immediately, with
   no app update at all.
-- A Retro Rewind update that changes **game code** needs a new DriftDroid build. The app detects
-  this before downloading anything large, tells you, and leaves your working install alone rather
-  than replacing it with something that would crash. When that new DriftDroid build is out, the
-  **Update available** button on the launcher screen gets it.
+- A Retro Rewind update that changes **game code** needs a new DriftDroid build (and a new game
+  pack made with its builder). The app detects this before downloading anything large, tells you,
+  and leaves your working install alone rather than replacing it with something that would crash.
+  When that new DriftDroid build is out, run its DriftDroid Builder on your PC to make the new
+  game pack.
 - After DriftDroid itself has been updated for a newer Retro Rewind, an install still on the old
   one is brought up to date when you tap Retro Rewind, before the game starts.
 
@@ -265,8 +304,8 @@ a DriftDroid update first; the app will say so instead of installing something b
 [Retro Rewind versions](#retro-rewind-versions).
 
 **How do I update DriftDroid?**
-Install the new APK over the old one, or tap **Update available** on the launcher screen when it
-shows up. Nothing is lost either way.
+Install the new APK over the old one and import the game pack made by the same version of
+DriftDroid Builder. Saves, settings and Retro Rewind stay.
 
 **Is there gonna be a Switch version?**
 There is one: [DriftDroid for Nintendo Switch - Beta 1](https://github.com/dorPXP/driftdroid/releases/tag/switch-beta1)
@@ -287,7 +326,7 @@ That's thermal throttling, not a bug in the build. See [Performance](#performanc
 heats up.
 
 **It never reaches 60, and everything looks like slow motion.**
-Turn on **30 FPS races** in the settings sidebar. The race then runs at normal speed with half
+Turn on **30 FPS races** in the settings menu. The race then runs at normal speed with half
 the frames. It applies from the next race.
 
 **Retro Rewind crashes when I open Retro WFC or a menu after updating.**
@@ -297,7 +336,7 @@ for the Retro Rewind you have now.
 
 **Characters or menu icons are stretched across the screen.**
 A driver bug on Snapdragon 8 Elite class GPUs (Adreno 8xx). The fix turns itself on for those
-GPUs; if you still see it, set **Fix stretched graphics (Snapdragon)** in the settings sidebar to
+GPUs; if you still see it, set **Fix stretched graphics (Snapdragon)** in the settings menu to
 **Everything**, or try a different GPU driver (next question).
 
 **Can I use a different GPU driver?**
@@ -311,7 +350,7 @@ used. Please report the device and GPU - that is exactly the list that needs fix
 
 **Some characters or objects are invisible.**
 A few Adreno GPUs miscompile one of the shaders. Enable **Fix missing characters (some Adreno
-GPUs)** in the settings sidebar. It turns itself on for the Adreno 750 (Galaxy S24 class).
+GPUs)** in the settings menu. It turns itself on for the Adreno 750 (Galaxy S24 class).
 
 **The game crashed / stopped with an error.**
 Open an issue with the crash template. If you're on a debug build you can pull the run log with:
@@ -348,8 +387,8 @@ position-tracked).
 
 - **[patchzyy/WiiCompiled](https://github.com/patchzyy/Wiicompiled)** - the static recompilation
   project this Android port is built on top of.
-- **[aurora](https://github.com/encounter/aurora)** - the GX rendering/windowing backend this
-  project's whole graphics layer sits on. MIT licensed.
+- **[aurora](https://github.com/encounter/aurora)** by Luke Street and contributors - the GX
+  rendering/windowing backend this project's whole graphics layer sits on. MIT licensed.
 - **[Dawn](https://dawn.googlesource.com/dawn)** - Google's WebGPU implementation, powering
   aurora's Vulkan and OpenGL ES backends on Android.
 - **[Dolphin Emulator](https://github.com/dolphin-emu/dolphin)** - an invaluable reference for Wii
@@ -360,7 +399,17 @@ position-tracked).
 - **[KartPad](https://github.com/chrissotraidis/kartpad)** by Chris Sotraidis - the iOS/Android
   sibling port this fork's settings sidebar layout, touch control styling, and motion (tilt)
   steering calibration curve were directly modeled on, and the source of several GX command
-  processor fixes and the in-app updater this fork carries.
+  processor fixes, the in-app updater, and the phone vibration fallback and vibration strength
+  setting this fork carries.
+- **App icon**: a 3D render made for this project in Blender. The kart is
+  **"Kart" by [absence_art](https://sketchfab.com/absence_art)** on Sketchfab
+  (<https://sketchfab.com/3d-models/kart-1eef98f88e804e3481d8b1bfb311ee06>), licensed
+  [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/); it was repainted, posed and rendered
+  with the Android robot and the effects. The Android robot is reproduced or modified from work
+  created and shared by Google and used according to terms described in the
+  [Creative Commons 3.0 Attribution License](https://creativecommons.org/licenses/by/3.0/).
+- Every fix taken from these projects, with its author and source, is listed in
+  [`docs/ported-changes.md`](docs/ported-changes.md).
 - Everyone in the static recompilation community.
 
 Bundled third-party components and their licenses live in

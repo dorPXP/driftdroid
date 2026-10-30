@@ -50,7 +50,7 @@ inline void MkwWriteHostFpControl(uint32_t value) noexcept
 #endif
 
 
-#if defined(__SWITCH__) || defined(__ANDROID__)
+#if defined(MKW_GUEST_STATE_GLOBAL)
 inline bool g_mkwHostNiActive = false;  // see g_currentCpuContext
 #else
 inline thread_local bool g_mkwHostNiActive = false;
@@ -60,7 +60,7 @@ inline thread_local bool g_mkwHostNiActive = false;
 // while NI is active, 0.0 (identity, `|value| < 0.0` is always false) otherwise, so that path
 // needs no branch. Every writer of g_mkwHostNiActive must write this beside it in agreement.
 inline constexpr double kMkwNiFlushThreshold = 0x1p-126;  // 0x3810000000000000
-#if defined(__SWITCH__) || defined(__ANDROID__)
+#if defined(MKW_GUEST_STATE_GLOBAL)
 inline double g_mkwNiFlushThreshold = 0.0;  // see g_currentCpuContext
 #else
 inline thread_local double g_mkwNiFlushThreshold = 0.0;
@@ -80,6 +80,18 @@ inline void MkwApplyHostNiMode(uint32_t fpscr) noexcept
     // cannot disagree with the register even if the incoming CSR held only some of the bits.
     g_mkwHostNiActive = wantNi;
     g_mkwNiFlushThreshold = wantNi ? kMkwNiFlushThreshold : 0.0;
+}
+
+// Sets the host FP control register for a guest FPSCR without touching the mirror: for the sound
+// host thread, which shares the emulation thread's mirror and must run in the same NI mode.
+inline void MkwApplyHostNiModeRegisterOnly(uint32_t fpscr) noexcept
+{
+    const uint32_t csr = MkwReadHostFpControl();
+    const uint32_t want = (fpscr & 0x4u) != 0
+        ? (csr | kMkwMxcsrFlushToZeroBits)
+        : (csr & ~kMkwMxcsrFlushToZeroBits);
+    if (want != csr)
+        MkwWriteHostFpControl(want);
 }
 
 /// <summary>

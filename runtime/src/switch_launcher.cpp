@@ -4,6 +4,7 @@
 // actual surface, so docked (1080p) and handheld (720p) look the same.
 #if defined(__SWITCH__)
 
+#include "i18n.h"
 #include "switch_launcher.h"
 
 #include <switch.h>
@@ -195,12 +196,33 @@ void ResolveInput() {
     g_in.yEdge = false;
 }
 
+// Every launcher text goes through these two: the width and the drawing both use the translation, so
+// centred and right-aligned text stays aligned (a text with no translation is shown as written).
 float TextWidth(float px, const char* text) {
-    return g.font->CalcTextSizeA(px * g.s, FLT_MAX, 0.0f, text).x;
+    return g.font->CalcTextSizeA(px * g.s, FLT_MAX, 0.0f, i18n::Tr(text)).x;
 }
 
 void Text(float x, float y, float px, ImU32 color, const char* text) {
-    g.dl->AddText(g.font, px * g.s, g.P(x, y), color, text);
+    g.dl->AddText(g.font, px * g.s, g.P(x, y), color, i18n::Tr(text));
+}
+
+// A translated sentence with %s / %d filled in; the key is the English format string.
+template <typename... Args>
+std::string Fmt(const char* key, Args... args) {
+    char buf[600];
+    std::snprintf(buf, sizeof(buf), i18n::Tr(key), args...);
+    return buf;
+}
+
+// Text that shrinks to fit maxWidth (reference units) instead of running past the edge of its panel.
+void TextFit(float x, float y, float px, ImU32 color, const char* text, float maxWidth) {
+    const float width = TextWidth(px, text) / g.s;
+    if (width > maxWidth) {
+        const float scaled = std::max(14.0f, px * maxWidth / width);
+        Text(x, y + (px - scaled) * 0.5f, scaled, color, text);
+        return;
+    }
+    Text(x, y, px, color, text);
 }
 
 void TextCentered(float centerX, float y, float px, ImU32 color, const char* text) {
@@ -415,7 +437,15 @@ bool Button(const char* id, const char* label, const char* sub, float x, float y
     }
     const bool hasSub = sub != nullptr && sub[0] != 0;
     const float labelY = hasSub ? y + h * 0.5f - 31 : y + h * 0.5f - 15;
-    Text(x + 28, labelY, 30, textColor, label);
+    // A long translation shrinks to fit its button instead of running over the edge.
+    float labelPx = 30;
+    const float labelWidth = TextWidth(labelPx, label) / g.s;
+    if (labelWidth > w - 40) {
+        labelPx = std::max(15.0f, labelPx * (w - 40) / labelWidth);
+    }
+    // Still too wide at the smallest size: cut it with "..." rather than run over the edge.
+    const std::string fitted = Fit(labelPx, i18n::Tr(label), w - 40, false);
+    Text(x + 28, labelY + (30 - labelPx) * 0.5f, labelPx, textColor, fitted.c_str());
     if (hasSub) {
         Text(x + 28, y + h * 0.5f + 6, 20, subColor, sub);
     }
@@ -630,7 +660,13 @@ std::string FreeSpaceText() {
     const auto now = Clock::now();
     if (cached.empty() || now - refreshed > std::chrono::seconds(2)) {
         const uint64_t free = SwitchImport::FreeSpaceBytes();
-        cached = free == UINT64_MAX ? std::string() : "SD card: " + FormatBytes(free) + " free";
+        if (free == UINT64_MAX) {
+            cached.clear();
+        } else {
+            char line[96];
+            std::snprintf(line, sizeof(line), TR("SD card: %s free"), FormatBytes(free).c_str());
+            cached = line;
+        }
         refreshed = now;
     }
     return cached;
@@ -908,10 +944,10 @@ void DrawImport(Ui& ui) {
         } else if (image.gameId.empty()) {
             title = "Not a readable Wii disc image";
         } else {
-            title = "Unsupported game (ID " + image.gameId + ")";
+            title = Fmt("Unsupported game (ID %s)", image.gameId.c_str());
         }
         const std::string size = FormatBytes(image.totalSize);
-        const std::string parts = image.parts.size() > 1 ? std::to_string(image.parts.size()) + " parts" : "";
+        const std::string parts = image.parts.size() > 1 ? Fmt("%d parts", static_cast<int>(image.parts.size())) : "";
         if (ListRow("##row", width, 92, stripe, title.c_str(), ShortPath(image.parts[0]), size.c_str(),
                     parts.empty() ? nullptr : parts.c_str(), focusFirst && i == 0)) {
             if (image.Supported()) {
@@ -954,8 +990,8 @@ void BeginInstall(Ui& ui) {
     const uint64_t needed = replacing ? SwitchImport::kReplaceFreeBytes : SwitchImport::kRequiredFreeBytes;
     if (free < needed) {
         ui.resultOk = false;
-        ui.resultMessage = "Not enough free space on the SD card: about " + FormatBytes(needed) + " is needed, " +
-                           FormatBytes(free) + " is free. Free up some space on the SD card and try again.";
+        ui.resultMessage = Fmt("Not enough free space on the SD card: about %s is needed, %s is free. Free up some space on the SD card and try again.",
+                               FormatBytes(needed).c_str(), FormatBytes(free).c_str());
         Go(ui, Screen::Done);
         return;
     }
@@ -983,13 +1019,13 @@ void DrawDialog(Ui& ui) {
     const std::string fit1 = Fit(24, ShortPath(ui.pendingImage.parts[0]), w - 88, true);
     Text(x + 44, y + 110, 24, kText, fit1.c_str());
     const std::string line2 = ui.dataState == DataState::Missing
-                                  ? "Unpacks to " + ShortPath(ui.dataRoot.string()) + " and uses about 2.7 GB."
-                                  : "Unpacks over " + ShortPath(ui.dataRoot.string()) + "; little extra space is needed.";
+                                  ? Fmt("Unpacks to %s and uses about 2.7 GB.", ShortPath(ui.dataRoot.string()).c_str())
+                                  : Fmt("Unpacks over %s; little extra space is needed.", ShortPath(ui.dataRoot.string()).c_str());
     const std::string fit2 = Fit(21, line2, w - 88, false);
     Text(x + 44, y + 154, 21, kMuted, fit2.c_str());
     const char* line3 = ui.dataState == DataState::Ready ? "This replaces the game data that is already installed."
                                                          : "It takes about 6 minutes. Keep the console on.";
-    Text(x + 44, y + 190, 21, kMuted, line3);
+    TextFit(x + 44, y + 190, 21, kMuted, line3, w - 88);
 
     const float by = y + h - 112;
     if (ui.focusPending) {
@@ -1118,8 +1154,8 @@ void BeginRetroDownload(Ui& ui) {
     const uint64_t free = SwitchImport::FreeSpaceBytes();
     if (free < needed) {
         ui.resultOk = false;
-        ui.resultMessage = "Not enough free space on the SD card: about " + FormatBytes(needed) + " is needed, " +
-                           FormatBytes(free) + " is free. Free up some space on the SD card and try again.";
+        ui.resultMessage = Fmt("Not enough free space on the SD card: about %s is needed, %s is free. Free up some space on the SD card and try again.",
+                               FormatBytes(needed).c_str(), FormatBytes(free).c_str());
         Go(ui, Screen::Done);
         return;
     }
@@ -1139,15 +1175,14 @@ void DrawRetroDialog(Ui& ui) {
 
     const bool resume = FileExists(kRetroRewindPartialDir);
     Text(x + 44, y + 40, 38, kText, ui.retroRewindPack ? "Download Retro Rewind again?" : "Download Retro Rewind?");
-    const std::string line1 = std::string("Version ") + RetroRewindDownload::PinnedVersion() +
-                              ", straight from the official Retro Rewind server.";
-    Text(x + 44, y + 110, 24, kText, line1.c_str());
-    Text(x + 44, y + 154, 21, kMuted,
-         resume ? "Continues the download that was started before."
-                : "About 1.8 GB to download; needs Wi-Fi and 2.3 GB free on the SD card.");
-    Text(x + 44, y + 190, 21, kMuted, "It can take 10 to 30 minutes. Keep the console on.");
+    const std::string line1 = Fmt("Version %s, straight from the official Retro Rewind server.", RetroRewindDownload::PinnedVersion());
+    TextFit(x + 44, y + 110, 24, kText, line1.c_str(), w - 88);
+    TextFit(x + 44, y + 154, 21, kMuted,
+            resume ? "Continues the download that was started before."
+                   : "About 1.8 GB to download; needs Wi-Fi and 2.3 GB free on the SD card.", w - 88);
+    TextFit(x + 44, y + 190, 21, kMuted, "It can take 10 to 30 minutes. Keep the console on.", w - 88);
     if (ui.retroRewindPack) {
-        Text(x + 44, y + 226, 21, kMuted, "The pack you have now stays in use until the new one is complete.");
+        TextFit(x + 44, y + 226, 21, kMuted, "The pack you have now stays in use until the new one is complete.", w - 88);
     }
 
     const float by = y + h - 112;
@@ -1361,10 +1396,9 @@ void DrawMods(Ui& ui) {
     for (int i = first; i < std::min(count, first + kRows); ++i) {
         const SwitchMods::Mod& mod = ui.mods[static_cast<size_t>(i)];
         const std::string label = Fit(30, mod.name, 760, false);
-        char sub[64];
-        std::snprintf(sub, sizeof(sub), "%s  -  priority %d of %d", mod.enabled ? "On" : "Off", i + 1, count);
+        const std::string sub = Fmt("%s  -  priority %d of %d", i18n::Tr(mod.enabled ? "On" : "Off"), i + 1, count);
         ImGui::PushID(i);
-        if (Button("##mod", label.c_str(), sub, 160, y, 960, 62, mod.enabled ? Tone::Primary : Tone::Normal)) {
+        if (Button("##mod", label.c_str(), sub.c_str(), 160, y, 960, 62, mod.enabled ? Tone::Primary : Tone::Normal)) {
             toggled = i;
         }
         ImGui::PopID();
@@ -1392,15 +1426,15 @@ void DrawMods(Ui& ui) {
         if (ui.modDeleteArmed == current.name) {
             const std::string name = current.name;
             if (SwitchMods::Delete(current)) {
-                Notify(ui, "Deleted " + name + ".", kGood);
+                Notify(ui, Fmt("Deleted %s.", name.c_str()), kGood);
             } else {
-                Notify(ui, "Could not delete " + name + ".");
+                Notify(ui, Fmt("Could not delete %s.", name.c_str()));
             }
             ui.modsLoaded = false;
             ui.modsChanged = true;
         } else {
             ui.modDeleteArmed = current.name;
-            Notify(ui, "Press Y again to delete " + current.name + " from the SD card.", kWarn, 4);
+            Notify(ui, Fmt("Press Y again to delete %s from the SD card.", current.name.c_str()), kWarn, 4);
         }
     } else if (g_in.moveY != 0) {
         ui.modDeleteArmed.clear();
@@ -1626,9 +1660,10 @@ void DrawBrowse(Ui& ui) {
             std::string right;
             ImU32 rightColor = kMuted;
             if (e.isDisc) {
-                right = e.disc.Supported() ? "Mario Kart Wii (PAL)  -  " + FormatBytes(e.disc.totalSize)
-                                           : "Game ID " + (e.disc.gameId.empty() ? std::string("unknown") : e.disc.gameId) +
-                                                 "  -  " + FormatBytes(e.disc.totalSize);
+                right = e.disc.Supported() ? Fmt("Mario Kart Wii (PAL)  -  %s", FormatBytes(e.disc.totalSize).c_str())
+                                           : Fmt("Game ID %s  -  %s",
+                                                 (e.disc.gameId.empty() ? std::string(i18n::Tr("unknown")) : e.disc.gameId).c_str(),
+                                                 FormatBytes(e.disc.totalSize).c_str());
                 rightColor = e.disc.Supported() ? kGood : kMuted;
             } else if (!e.isDir) {
                 right = FormatBytes(e.size);
@@ -1814,8 +1849,46 @@ void SwitchLauncherInitFonts(const AuroraWindowSize*) {
     config.FontDataOwnedByAtlas = false;
     config.OversampleH = 2;
     config.OversampleV = 1;
+    // The language's own characters on top of the default range. The standard font covers Latin,
+    // Cyrillic and Japanese; the console's Chinese and Korean fonts are merged in for those languages
+    // (they are only asked for the characters the language uses, so the atlas stays small).
+    i18n::SetLanguage(i18n::SavedChoice());
+    static ImVector<ImWchar> glyphRanges;  // everything the chosen language needs
+    static ImVector<ImWchar> nameRanges;   // only the characters of the languages' own names
+    {
+        ImFontGlyphRangesBuilder builder;
+        builder.AddRanges(io.Fonts->GetGlyphRangesDefault());
+        for (const unsigned int codepoint : i18n::UsedCodepoints()) {
+            builder.AddChar(static_cast<ImWchar>(codepoint));
+        }
+        for (const unsigned int codepoint : i18n::NameCodepoints()) {
+            builder.AddChar(static_cast<ImWchar>(codepoint));
+        }
+        builder.BuildRanges(&glyphRanges);
+        ImFontGlyphRangesBuilder names;
+        for (const unsigned int codepoint : i18n::NameCodepoints()) {
+            names.AddChar(static_cast<ImWchar>(codepoint));
+        }
+        names.BuildRanges(&nameRanges);
+    }
     io.Fonts->AddFontFromMemoryTTF(standard.address, static_cast<int>(standard.size), kFontBakePx, &config,
-                                   io.Fonts->GetGlyphRangesDefault());
+                                   glyphRanges.Data);
+    // The console's Korean and Chinese fonts are always merged in, for the Language list's own names;
+    // in the matching language they also take that language's full text. Merged on top, the Chinese
+    // font would replace the standard font's kanji with Chinese forms, so for Japanese it only gets
+    // the few characters of the language names.
+    const std::string& language = i18n::Language();
+    for (const PlSharedFontType type : {PlSharedFontType_KO, PlSharedFontType_ChineseSimplified}) {
+        const bool active = (type == PlSharedFontType_KO && language == "ko") ||
+                            (type == PlSharedFontType_ChineseSimplified && language == "zh-Hans");
+        PlFontData extra{};
+        if (R_SUCCEEDED(plGetSharedFontByType(&extra, type)) && extra.address != nullptr) {
+            ImFontConfig merge = config;
+            merge.MergeMode = true;
+            io.Fonts->AddFontFromMemoryTTF(extra.address, static_cast<int>(extra.size), kFontBakePx, &merge,
+                                           active ? glyphRanges.Data : nameRanges.Data);
+        }
+    }
     PlFontData extended{};
     if (R_SUCCEEDED(plGetSharedFontByType(&extended, PlSharedFontType_NintendoExt)) && extended.address != nullptr) {
         static const ImWchar kButtonRange[] = {0xE000, 0xE153, 0};

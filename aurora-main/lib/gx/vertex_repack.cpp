@@ -171,14 +171,14 @@ void repack_with_layout(const std::array<AttrConfig, MaxVtxAttr>& src, u32 srcSt
     return;
   }
   out.assign(static_cast<size_t>(count) * dstStride, 0);
-  for (u32 v = 0; v < count; ++v) {
-    const u8* in = vertices + static_cast<size_t>(v) * srcStride;
-    u8* o = out.data() + static_cast<size_t>(v) * dstStride;
-    for (u32 attr = GX_VA_PNMTXIDX; attr <= GX_VA_TEX7; ++attr) {
-      const auto& s = src[attr];
-      if (s.attrType == GX_NONE) continue;
-      const u8* srcBase = in + s.offset;
-      u8* dstBase = o + dst[attr].offset;
+  // Walk one attribute at a time so absent attributes and the decode format are resolved once per
+  // draw instead of once per vertex (all-draws mode cost; KartPad ac118be0).
+  for (u32 attr = GX_VA_PNMTXIDX; attr <= GX_VA_TEX7; ++attr) {
+    const auto& s = src[attr];
+    if (s.attrType == GX_NONE) continue;
+    for (u32 v = 0; v < count; ++v) {
+      const u8* srcBase = vertices + static_cast<size_t>(v) * srcStride + s.offset;
+      u8* dstBase = out.data() + static_cast<size_t>(v) * dstStride + dst[attr].offset;
       if (is_index_attr(attr)) {
         dstBase[0] = srcBase[0]; // Matrix-index attributes are always direct bytes.
         continue;

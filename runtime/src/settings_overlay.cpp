@@ -9,9 +9,12 @@
 #include "music_player.h"
 #include "thermal_quality.h"
 #include "runtime_config.h"
+#include "wii_remote_input.h"
+#include "i18n.h"
 #include "runtime_log.h"
 #include "runtime_product.h"
 
+#include <dolphin/pad.h>
 #include <imgui.h>
 #include <imgui_internal.h>
 #include <SDL3/SDL_events.h>
@@ -19,6 +22,7 @@
 #include <SDL3/SDL_keyboard.h>
 #include <SDL3/SDL_mouse.h>
 #include <SDL3/SDL_scancode.h>
+#include <SDL3/SDL_timer.h>
 
 #include <array>
 #include <algorithm>
@@ -30,6 +34,8 @@
 #include <cstdint>
 #include <limits>
 #include <iostream>
+#include <cstring>
+#include <functional>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -79,6 +85,9 @@ const char* GraphicsApiDisplayName() {
 }
 
 bool g_topBarVisible = false;
+// The quick panel (2026-10-27): the everyday switches in a strip at the top, without the full menu.
+bool g_quickPanelVisible = false;
+bool g_quickPanelWasVisible = false;
 int g_controllerPort = 0;
 float g_resolutionScale = RuntimeConfigFile::ResolutionMultiplier(1.0f);
 int g_audioVolumePercent = static_cast<int>(std::lround(RuntimeConfigFile::AudioVolume(1.0f) * 100.0f));
@@ -185,18 +194,19 @@ struct ControllerButtonItem {
 };
 
 constexpr std::array<ControllerButtonItem, PAD_BUTTON_COUNT> kControllerButtons = {{
-    {"a", "A", PAD_BUTTON_A},
-    {"b", "B", PAD_BUTTON_B},
-    {"x", "X", PAD_BUTTON_X},
-    {"y", "Y", PAD_BUTTON_Y},
-    {"start", "Start", PAD_BUTTON_START},
-    {"z", "Z", PAD_TRIGGER_Z},
-    {"l", "L", PAD_TRIGGER_L},
-    {"r", "R", PAD_TRIGGER_R},
-    {"up", "D-pad Up", PAD_BUTTON_UP},
-    {"down", "D-pad Down", PAD_BUTTON_DOWN},
-    {"left", "D-pad Left", PAD_BUTTON_LEFT},
-    {"right", "D-pad Right", PAD_BUTTON_RIGHT},
+    // GameCube buttons, with what each does in Mario Kart Wii (GitHub issue #15 asked for clearer names).
+    {"a", TRN("A (accelerate, OK)"), PAD_BUTTON_A},
+    {"b", TRN("B (brake, back)"), PAD_BUTTON_B},
+    {"x", TRN("X"), PAD_BUTTON_X},
+    {"y", TRN("Y"), PAD_BUTTON_Y},
+    {"start", TRN("Start (pause)"), PAD_BUTTON_START},
+    {"z", TRN("Z"), PAD_TRIGGER_Z},
+    {"l", TRN("L (use item)"), PAD_TRIGGER_L},
+    {"r", TRN("R (drift, hop)"), PAD_TRIGGER_R},
+    {"up", TRN("D-pad Up (trick)"), PAD_BUTTON_UP},
+    {"down", TRN("D-pad Down"), PAD_BUTTON_DOWN},
+    {"left", TRN("D-pad Left"), PAD_BUTTON_LEFT},
+    {"right", TRN("D-pad Right"), PAD_BUTTON_RIGHT},
 }};
 
 struct NativeButtonItem {
@@ -205,40 +215,58 @@ struct NativeButtonItem {
     uint32_t nativeButton;
 };
 
-constexpr std::array<NativeButtonItem, SDL_GAMEPAD_BUTTON_COUNT + 1> kNativeButtons = {{
-    {"unmapped", "Unmapped / analog trigger", PAD_NATIVE_BUTTON_INVALID},
-    {"south", "South (A / Cross)", SDL_GAMEPAD_BUTTON_SOUTH},
-    {"east", "East (B / Circle)", SDL_GAMEPAD_BUTTON_EAST},
-    {"west", "West (X / Square)", SDL_GAMEPAD_BUTTON_WEST},
-    {"north", "North (Y / Triangle)", SDL_GAMEPAD_BUTTON_NORTH},
-    {"back", "Back / Select", SDL_GAMEPAD_BUTTON_BACK},
-    {"guide", "Guide / Home", SDL_GAMEPAD_BUTTON_GUIDE},
-    {"start", "Start / Options", SDL_GAMEPAD_BUTTON_START},
-    {"left_stick", "Left stick click", SDL_GAMEPAD_BUTTON_LEFT_STICK},
-    {"right_stick", "Right stick click", SDL_GAMEPAD_BUTTON_RIGHT_STICK},
-    {"left_shoulder", "Left shoulder", SDL_GAMEPAD_BUTTON_LEFT_SHOULDER},
-    {"right_shoulder", "Right shoulder", SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER},
-    {"dpad_up", "D-pad Up", SDL_GAMEPAD_BUTTON_DPAD_UP},
-    {"dpad_down", "D-pad Down", SDL_GAMEPAD_BUTTON_DPAD_DOWN},
-    {"dpad_left", "D-pad Left", SDL_GAMEPAD_BUTTON_DPAD_LEFT},
-    {"dpad_right", "D-pad Right", SDL_GAMEPAD_BUTTON_DPAD_RIGHT},
-    {"misc1", "Misc 1 / Share", SDL_GAMEPAD_BUTTON_MISC1},
-    {"right_paddle1", "Right paddle 1", SDL_GAMEPAD_BUTTON_RIGHT_PADDLE1},
-    {"left_paddle1", "Left paddle 1", SDL_GAMEPAD_BUTTON_LEFT_PADDLE1},
-    {"right_paddle2", "Right paddle 2", SDL_GAMEPAD_BUTTON_RIGHT_PADDLE2},
-    {"left_paddle2", "Left paddle 2", SDL_GAMEPAD_BUTTON_LEFT_PADDLE2},
-    {"touchpad", "Touchpad", SDL_GAMEPAD_BUTTON_TOUCHPAD},
-    {"misc2", "Misc 2", SDL_GAMEPAD_BUTTON_MISC2},
-    {"misc3", "Misc 3 / GC L click", SDL_GAMEPAD_BUTTON_MISC3},
-    {"misc4", "Misc 4 / GC R click", SDL_GAMEPAD_BUTTON_MISC4},
-    {"misc5", "Misc 5", SDL_GAMEPAD_BUTTON_MISC5},
-    {"misc6", "Misc 6", SDL_GAMEPAD_BUTTON_MISC6},
+constexpr std::array<NativeButtonItem, SDL_GAMEPAD_BUTTON_COUNT + 3> kNativeButtons = {{
+    {"unmapped", TRN("Nothing (L/R: the analog trigger)"), PAD_NATIVE_BUTTON_INVALID},
+    {"left_trigger", TRN("Left trigger (L2 / ZL)"), PAD_NATIVE_BUTTON_LEFT_TRIGGER},
+    {"right_trigger", TRN("Right trigger (R2 / ZR)"), PAD_NATIVE_BUTTON_RIGHT_TRIGGER},
+    {"south", TRN("South (A / Cross)"), SDL_GAMEPAD_BUTTON_SOUTH},
+    {"east", TRN("East (B / Circle)"), SDL_GAMEPAD_BUTTON_EAST},
+    {"west", TRN("West (X / Square)"), SDL_GAMEPAD_BUTTON_WEST},
+    {"north", TRN("North (Y / Triangle)"), SDL_GAMEPAD_BUTTON_NORTH},
+    {"back", TRN("Back / Select"), SDL_GAMEPAD_BUTTON_BACK},
+    {"guide", TRN("Guide / Home"), SDL_GAMEPAD_BUTTON_GUIDE},
+    {"start", TRN("Start / Options"), SDL_GAMEPAD_BUTTON_START},
+    {"left_stick", TRN("Left stick click"), SDL_GAMEPAD_BUTTON_LEFT_STICK},
+    {"right_stick", TRN("Right stick click"), SDL_GAMEPAD_BUTTON_RIGHT_STICK},
+    {"left_shoulder", TRN("Left shoulder"), SDL_GAMEPAD_BUTTON_LEFT_SHOULDER},
+    {"right_shoulder", TRN("Right shoulder"), SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER},
+    {"dpad_up", TRN("D-pad Up"), SDL_GAMEPAD_BUTTON_DPAD_UP},
+    {"dpad_down", TRN("D-pad Down"), SDL_GAMEPAD_BUTTON_DPAD_DOWN},
+    {"dpad_left", TRN("D-pad Left"), SDL_GAMEPAD_BUTTON_DPAD_LEFT},
+    {"dpad_right", TRN("D-pad Right"), SDL_GAMEPAD_BUTTON_DPAD_RIGHT},
+    {"misc1", TRN("Misc 1 / Share"), SDL_GAMEPAD_BUTTON_MISC1},
+    {"right_paddle1", TRN("Right paddle 1"), SDL_GAMEPAD_BUTTON_RIGHT_PADDLE1},
+    {"left_paddle1", TRN("Left paddle 1"), SDL_GAMEPAD_BUTTON_LEFT_PADDLE1},
+    {"right_paddle2", TRN("Right paddle 2"), SDL_GAMEPAD_BUTTON_RIGHT_PADDLE2},
+    {"left_paddle2", TRN("Left paddle 2"), SDL_GAMEPAD_BUTTON_LEFT_PADDLE2},
+    {"touchpad", TRN("Touchpad"), SDL_GAMEPAD_BUTTON_TOUCHPAD},
+    {"misc2", TRN("Misc 2"), SDL_GAMEPAD_BUTTON_MISC2},
+    {"misc3", TRN("Misc 3 / GC L click"), SDL_GAMEPAD_BUTTON_MISC3},
+    {"misc4", TRN("Misc 4 / GC R click"), SDL_GAMEPAD_BUTTON_MISC4},
+    {"misc5", TRN("Misc 5"), SDL_GAMEPAD_BUTTON_MISC5},
+    {"misc6", TRN("Misc 6"), SDL_GAMEPAD_BUTTON_MISC6},
 }};
 
 // Classic Controller Pro layout, indexed like kControllerButtons: the SNES-style
 // diamond (A right, B bottom, X top, Y left) with digital bumpers driving the GC
-// triggers and Z on Back/Select (the same home the NSO GC default gives it).
+// triggers and Z on Back/Select (the same home the NSO GC default gives it). A value
+// "first,second" binds both (the same form the button list saves).
+//
+// On Switch the console's buttons reach SDL by label, not position (A is "south", see
+// aurora-main/lib/switch/input_switch.cpp), so the positional names here swapped A with B and X
+// with Y there ("the pro controller preset swaps a and b", 2026-10-27). The Switch's L/R are
+// second bindings next to ZL/ZR there: with L on the bumper only, ZL and ZR did nothing.
 constexpr std::array<const char*, PAD_BUTTON_COUNT> kClassicProPreset = {
+#if defined(__SWITCH__)
+    "south",          // A
+    "east",           // B
+    "west",           // X
+    "north",          // Y
+    "start",          // Start
+    "back",           // Z
+    "left_trigger,left_shoulder",    // L: ZL or L
+    "right_trigger,right_shoulder",  // R: ZR or R
+#else
     "east",           // A
     "south",          // B
     "north",          // X
@@ -247,8 +275,22 @@ constexpr std::array<const char*, PAD_BUTTON_COUNT> kClassicProPreset = {
     "back",           // Z
     "left_shoulder",  // L
     "right_shoulder", // R
+#endif
     "dpad_up", "dpad_down", "dpad_left", "dpad_right",
 };
+
+#if defined(__SWITCH__)
+// GameCube layout on Switch: aurora's default (L/R the analog ZL/ZR) plus the bumpers as second
+// bindings, the same as a first start (ApplyConfiguredMappings). The plain default left L doing
+// nothing and R on Z, undoing "i want the L and R button to do the same as ZL and ZR".
+constexpr std::array<const char*, PAD_BUTTON_COUNT> kGameCubeSwitchPreset = {
+    "south", "east", "west", "north", "start",
+    "unmapped",                  // Z (its bumper is R's now; the game looks behind on X too)
+    "unmapped,left_shoulder",    // L: ZL or L
+    "unmapped,right_shoulder",   // R: ZR or R
+    "dpad_up", "dpad_down", "dpad_left", "dpad_right",
+};
+#endif
 
 struct ResolutionItem {
     const char* label;
@@ -347,6 +389,23 @@ ControllerBindingPair SplitControllerBinding(const std::string& value) {
     return {TrimBindingToken(value.substr(0, comma)), TrimBindingToken(value.substr(comma + 1))};
 }
 
+// Binds a preset (indexed like kControllerButtons) on a port and saves it to Config.toml.
+void ApplyPreset(uint32_t port, const std::array<const char*, PAD_BUTTON_COUNT>& preset) {
+    for (size_t i = 0; i < kControllerButtons.size(); ++i) {
+        const ControllerBindingPair binding = SplitControllerBinding(preset[i]);
+        const NativeButtonItem* primary = FindNativeButton(binding.primary);
+        if (primary == nullptr) {
+            continue;
+        }
+        const NativeButtonItem* secondary = binding.secondary.empty() ? nullptr : FindNativeButton(binding.secondary);
+        PADSetButtonMapping(port, PADButtonMapping{primary->nativeButton, kControllerButtons[i].padButton});
+        PADSetAltButtonMapping(port, PADButtonMapping{secondary != nullptr ? secondary->nativeButton
+                                                                           : PAD_NATIVE_BUTTON_INVALID,
+                                                      kControllerButtons[i].padButton});
+        RuntimeConfigFile::SetControllerButton(i, preset[i]);
+    }
+}
+
 const NativeButtonItem& NativeButtonForValue(uint32_t nativeButton) {
     const auto it = std::find_if(kNativeButtons.begin(), kNativeButtons.end(), [&](const NativeButtonItem& item) {
         return nativeButton == item.nativeButton;
@@ -354,12 +413,22 @@ const NativeButtonItem& NativeButtonForValue(uint32_t nativeButton) {
     return it == kNativeButtons.end() ? kNativeButtons.front() : *it;
 }
 
+#if defined(__SWITCH__)
+extern "C" void AuroraSwitchSetMenuOpen(int open);  // aurora lib/switch/input_switch.cpp
+#endif
+
 void SetTopBarVisible(bool visible) {
     if (g_topBarVisible == visible) {
         return;
     }
     g_topBarVisible = visible;
+    if (visible) {
+        g_quickPanelVisible = false;  // the full menu replaces it
+    }
     PADBlockInput(visible);
+#if defined(__SWITCH__)
+    AuroraSwitchSetMenuOpen(visible ? 1 : 0);  // tilt steering stays out of the menu's navigation
+#endif
 #if defined(__ANDROID__)
     AndroidNotifySettingsVisibilityChanged(visible);
 #endif
@@ -429,7 +498,373 @@ void ApplyConfiguredMappings() {
     }
 }
 
+// Settings widgets (remaster, 2026-10-24): finger-sized rows that read the same on a phone, a TV
+// and a PC. The user found the old panel cramped and PC-like; the approved look is plain solid
+// colours (no gradients or glow), a switch on the right of each on/off row, and sliders and
+// lists full width under their label. Same signatures as the ImGui calls they replace, so the
+// pages below only changed names.
+namespace ui {
+
+constexpr ImVec4 kPanel{0.078f, 0.102f, 0.200f, 1.0f};    // #141A33
+constexpr ImVec4 kRow{0.106f, 0.133f, 0.259f, 1.0f};       // #1B2242
+constexpr ImVec4 kRowHover{0.133f, 0.169f, 0.333f, 1.0f};
+constexpr ImVec4 kRowActive{0.165f, 0.212f, 0.400f, 1.0f};
+constexpr ImVec4 kLine{0.165f, 0.200f, 0.376f, 1.0f};       // #2A3360
+constexpr ImVec4 kText{0.933f, 0.945f, 0.980f, 1.0f};
+constexpr ImVec4 kMuted{0.604f, 0.639f, 0.780f, 1.0f};      // #9AA3C7
+constexpr ImVec4 kAccent{0.498f, 0.851f, 0.341f, 1.0f};     // #7FD957
+constexpr ImVec4 kFocus{0.247f, 0.816f, 0.941f, 1.0f};      // #3FD0F0
+constexpr ImVec4 kTrackOff{0.200f, 0.224f, 0.369f, 1.0f};
+
+// The part of an ImGui label before "##".
+const char* LabelEnd(const char* label) {
+    const char* hashes = std::strstr(label, "##");
+    return hashes != nullptr ? hashes : label + std::strlen(label);
+}
+
+// The visible text of a widget label (before any "##id"), translated. The label itself stays the ImGui
+// ID, so widget IDs do not change with the language.
+std::string Visible(const char* label) {
+    const std::string english(label, LabelEnd(label));
+    return i18n::Tr(english.c_str());
+}
+
+// Rows fill the panel; inside a PC menu, which sizes itself to its contents, they keep a width.
+float RowWidth() {
+    const float available = ImGui::GetContentRegionAvail().x;
+    return available > ImGui::GetFontSize() * 12.0f ? available : ImGui::GetFontSize() * 26.0f;
+}
+
+void Label(const char* label) {
+    const char* end = LabelEnd(label);
+    if (end != label) {
+        const std::string shown = Visible(label);
+        ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + RowWidth());
+        ImGui::TextUnformatted(shown.c_str(), shown.c_str() + shown.size());
+        ImGui::PopTextWrapPos();
+    }
+}
+
+bool Toggle(const char* label, bool* value) {
+    const float fs = ImGui::GetFontSize();
+    const float width = RowWidth();
+    const float pad = fs * 0.9f;
+    const ImVec2 track(fs * 2.6f, fs * 1.5f);
+    const std::string shown = Visible(label);
+    const float wrap = width - track.x - pad * 3.0f;
+    const ImVec2 text = ImGui::CalcTextSize(shown.c_str(), shown.c_str() + shown.size(), false, wrap);
+    const float height = std::max(fs * 3.0f, text.y + fs * 1.4f);
+    // EnableNav: an InvisibleButton is skipped by controller navigation without it, so on Switch
+    // the D-pad jumped over every switch in the menu (Shake to trick could not be reached).
+    const bool pressed = ImGui::InvisibleButton(label, ImVec2(width, height), ImGuiButtonFlags_EnableNav);
+    if (pressed) {
+        *value = !*value;
+    }
+    const ImVec2 min = ImGui::GetItemRectMin();
+    const ImVec2 max = ImGui::GetItemRectMax();
+    ImDrawList* draw = ImGui::GetWindowDrawList();
+    const ImVec4 bg = ImGui::IsItemActive()                               ? kRowActive
+                      : ImGui::IsItemHovered() || ImGui::IsItemFocused() ? kRowHover
+                                                                          : kRow;
+    draw->AddRectFilled(min, max, ImGui::GetColorU32(bg), fs * 0.6f);
+    draw->AddText(ImGui::GetFont(), fs, ImVec2(min.x + pad, (min.y + max.y - text.y) * 0.5f),
+                  ImGui::GetColorU32(ImGuiCol_Text), shown.c_str(), shown.c_str() + shown.size(), wrap);
+    const ImVec2 trackMin(max.x - pad - track.x, (min.y + max.y - track.y) * 0.5f);
+    const ImVec2 trackMax(trackMin.x + track.x, trackMin.y + track.y);
+    draw->AddRectFilled(trackMin, trackMax, ImGui::GetColorU32(*value ? kAccent : kTrackOff), track.y * 0.5f);
+    const float knob = track.y * 0.5f - fs * 0.2f;
+    const float knobX = *value ? trackMax.x - track.y * 0.5f : trackMin.x + track.y * 0.5f;
+    draw->AddCircleFilled(ImVec2(knobX, (trackMin.y + trackMax.y) * 0.5f), knob,
+                          ImGui::GetColorU32(*value ? ImVec4(1.0f, 1.0f, 1.0f, 1.0f) : ImVec4(0.78f, 0.80f, 0.90f, 1.0f)));
+    return pressed;
+}
+
+// A slider row: the label with the value at its right, then a thin track filled up to a round knob.
+// The ImGui slider underneath is drawn invisible and still does the dragging, the controller steps
+// and the focus frame.
+bool SliderBody(const char* label, const char* valueText, float fraction, const std::function<bool()>& slider) {
+    const float fs = ImGui::GetFontSize();
+    const float width = RowWidth();
+    const std::string shown = Visible(label);
+    const float startX = ImGui::GetCursorPosX();
+    ImGui::TextUnformatted(shown.c_str(), shown.c_str() + shown.size());
+    ImGui::SameLine(startX + width - ImGui::CalcTextSize(valueText).x);
+    ImGui::TextUnformatted(valueText);
+    const ImVec4 clear(0.0f, 0.0f, 0.0f, 0.0f);
+    for (const ImGuiCol col : {ImGuiCol_FrameBg, ImGuiCol_FrameBgHovered, ImGuiCol_FrameBgActive, ImGuiCol_SliderGrab,
+                               ImGuiCol_SliderGrabActive, ImGuiCol_Text}) {
+        ImGui::PushStyleColor(col, clear);
+    }
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(fs * 0.8f, fs * 0.75f));
+    ImGui::SetNextItemWidth(width);
+    ImGui::PushID(label);
+    const bool changed = slider();
+    ImGui::PopID();
+    ImGui::PopStyleVar();
+    ImGui::PopStyleColor(6);
+    const ImVec2 min = ImGui::GetItemRectMin();
+    const ImVec2 max = ImGui::GetItemRectMax();
+    const float knob = fs * 0.75f;
+    const float left = min.x + knob;
+    const float right = max.x - knob;
+    const float y = (min.y + max.y) * 0.5f;
+    const float x = left + (right - left) * std::clamp(fraction, 0.0f, 1.0f);
+    ImDrawList* draw = ImGui::GetWindowDrawList();
+    const float half = fs * 0.18f;
+    draw->AddRectFilled(ImVec2(left, y - half), ImVec2(right, y + half), ImGui::GetColorU32(kTrackOff), half);
+    draw->AddRectFilled(ImVec2(left, y - half), ImVec2(x, y + half), ImGui::GetColorU32(kAccent), half);
+    if (ImGui::IsItemActive()) {
+        draw->AddCircleFilled(ImVec2(x, y), knob * 1.25f, ImGui::GetColorU32(ImVec4(kAccent.x, kAccent.y, kAccent.z, 0.35f)));
+    }
+    draw->AddCircleFilled(ImVec2(x, y), knob, ImGui::GetColorU32(ImVec4(1.0f, 1.0f, 1.0f, 1.0f)));
+    return changed;
+}
+
+bool SliderInt(const char* label, int* value, int min, int max, const char* format = "%d",
+               ImGuiSliderFlags flags = 0) {
+    if (LabelEnd(label) == label) {
+        return ImGui::SliderInt(label, value, min, max, format, flags);  // caller placed it
+    }
+    char valueText[64];
+    std::snprintf(valueText, sizeof(valueText), format, *value);
+    const float fraction = max > min ? static_cast<float>(*value - min) / static_cast<float>(max - min) : 0.0f;
+    return SliderBody(label, valueText, fraction,
+                      [&] { return ImGui::SliderInt("##slider", value, min, max, format, flags); });
+}
+
+bool SliderFloat(const char* label, float* value, float min, float max, const char* format = "%.3f",
+                 ImGuiSliderFlags flags = 0) {
+    if (LabelEnd(label) == label) {
+        return ImGui::SliderFloat(label, value, min, max, format, flags);
+    }
+    char valueText[64];
+    std::snprintf(valueText, sizeof(valueText), format, *value);
+    const float fraction = max > min ? (*value - min) / (max - min) : 0.0f;
+    return SliderBody(label, valueText, fraction,
+                      [&] { return ImGui::SliderFloat("##slider", value, min, max, format, flags); });
+}
+
+bool Combo(const char* label, int* current, const char* const items[], int count) {
+    Label(label);
+    ImGui::SetNextItemWidth(RowWidth());
+    ImGui::PushID(label);
+    struct Items {
+        const char* const* list;
+    } source{items};
+    const bool changed = ImGui::Combo(
+        "##combo", current,
+        [](void* data, int index) -> const char* { return i18n::Tr(static_cast<Items*>(data)->list[index]); }, &source,
+        count);
+    ImGui::PopID();
+    return changed;
+}
+
+bool BeginCombo(const char* label, const char* preview) {
+    Label(label);
+    ImGui::SetNextItemWidth(RowWidth());
+    const std::string id = std::string("##") + label;
+    return ImGui::BeginCombo(id.c_str(), preview);
+}
+
+void Section(const char* label) {
+    ImGui::Dummy(ImVec2(0.0f, ImGui::GetFontSize() * 0.4f));
+    const std::string upper = i18n::Upper(Visible(label));
+    ImGui::PushStyleColor(ImGuiCol_Text, kFocus);
+    ImGui::TextUnformatted(upper.c_str());
+    ImGui::PopStyleColor();
+}
+
+// A row that opens something (a dialog, the layout editor): label, optional detail, and "›".
+bool LinkRow(const char* label, const char* detail = nullptr) {
+    const float fs = ImGui::GetFontSize();
+    const float width = RowWidth();
+    const float pad = fs * 0.9f;
+    const std::string shown = Visible(label);
+    const std::string shownDetail = detail != nullptr ? std::string(i18n::Tr(detail)) : std::string();
+    const float height = detail != nullptr ? fs * 3.6f : fs * 3.0f;
+    const bool pressed = ImGui::InvisibleButton(label, ImVec2(width, height), ImGuiButtonFlags_EnableNav);
+    const ImVec2 min = ImGui::GetItemRectMin();
+    const ImVec2 max = ImGui::GetItemRectMax();
+    ImDrawList* draw = ImGui::GetWindowDrawList();
+    const ImVec4 bg = ImGui::IsItemActive()                               ? kRowActive
+                      : ImGui::IsItemHovered() || ImGui::IsItemFocused() ? kRowHover
+                                                                          : kRow;
+    draw->AddRectFilled(min, max, ImGui::GetColorU32(bg), fs * 0.6f);
+    const float textTop = detail != nullptr ? min.y + fs * 0.6f : (min.y + max.y - fs) * 0.5f;
+    draw->AddText(ImVec2(min.x + pad, textTop), ImGui::GetColorU32(ImGuiCol_Text), shown.c_str(), shown.c_str() + shown.size());
+    if (detail != nullptr) {
+        draw->AddText(ImGui::GetFont(), fs * 0.85f, ImVec2(min.x + pad, textTop + fs * 1.25f),
+                      ImGui::GetColorU32(kMuted), shownDetail.c_str());
+    }
+    draw->AddText(ImVec2(max.x - pad - ImGui::CalcTextSize(">").x, (min.y + max.y - fs) * 0.5f),
+                  ImGui::GetColorU32(kMuted), ">");
+    return pressed;
+}
+
+// A button whose label is translated; the ImGui ID follows the shown text.
+bool Button(const char* label, const ImVec2& size = ImVec2(0.0f, 0.0f)) {
+    return ImGui::Button(i18n::TrLabel(label).c_str(), size);
+}
+
+// The panel's colours and spacing, around everything it draws.
+struct Theme {
+    Theme() {
+        const float fs = ImGui::GetFontSize();
+        const std::pair<ImGuiCol, ImVec4> colors[] = {
+            {ImGuiCol_WindowBg, kPanel},          {ImGuiCol_ChildBg, ImVec4(0, 0, 0, 0)},
+            {ImGuiCol_PopupBg, kPanel},           {ImGuiCol_Border, kLine},
+            {ImGuiCol_Text, kText},               {ImGuiCol_TextDisabled, kMuted},
+            {ImGuiCol_FrameBg, kRow},             {ImGuiCol_FrameBgHovered, kRowHover},
+            {ImGuiCol_FrameBgActive, kRowActive}, {ImGuiCol_Button, kRow},
+            {ImGuiCol_ButtonHovered, kRowHover},  {ImGuiCol_ButtonActive, kRowActive},
+            {ImGuiCol_Header, kRowHover},         {ImGuiCol_HeaderHovered, kRowActive},
+            {ImGuiCol_HeaderActive, kRowActive},  {ImGuiCol_SliderGrab, kAccent},
+            {ImGuiCol_SliderGrabActive, kFocus},  {ImGuiCol_CheckMark, kAccent},
+            {ImGuiCol_Separator, kLine},          {ImGuiCol_NavCursor, kFocus},
+            {ImGuiCol_ScrollbarBg, ImVec4(0, 0, 0, 0)}, {ImGuiCol_ScrollbarGrab, kLine},
+        };
+        for (const auto& [index, color] : colors) {
+            ImGui::PushStyleColor(index, color);
+        }
+        colorCount = static_cast<int>(std::size(colors));
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(fs * 1.1f, fs * 0.9f));
+        ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(fs * 0.8f, fs * 0.7f));
+        ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(fs * 0.5f, fs * 0.45f));
+        ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, fs * 0.6f);
+        ImGui::PushStyleVar(ImGuiStyleVar_GrabRounding, fs * 0.6f);
+        ImGui::PushStyleVar(ImGuiStyleVar_GrabMinSize, fs * 1.6f);
+        ImGui::PushStyleVar(ImGuiStyleVar_PopupRounding, fs * 0.6f);
+        ImGui::PushStyleVar(ImGuiStyleVar_ScrollbarSize, fs * 0.35f);
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
+        varCount = 9;
+    }
+    ~Theme() {
+        ImGui::PopStyleVar(varCount);
+        ImGui::PopStyleColor(colorCount);
+    }
+    int colorCount = 0;
+    int varCount = 0;
+};
+
+} // namespace ui
+
+// Vibration, every platform: rumble.cfg holds "1" or "0" (missing = on), then the strength in
+// percent, 0 to 200 (missing = 100; files from before the strength setting have only the first).
+std::filesystem::path RumbleSettingPath() { return RuntimeConfigFile::ApplicationDataDirectory() / "rumble.cfg"; }
+
+void LoadRumbleSetting() {
+    int enabled = 1;
+    int strength = 100;
+    if (FILE* file = std::fopen(RumbleSettingPath().string().c_str(), "rb")) {
+        if (std::fscanf(file, "%d", &enabled) != 1) {
+            enabled = 1;
+        }
+        if (std::fscanf(file, "%d", &strength) != 1) {
+            strength = 100;
+        }
+        std::fclose(file);
+    }
+    PADSetRumbleEnabled(enabled != 0 ? TRUE : FALSE);
+    PADSetRumbleStrength(static_cast<u32>(std::clamp(strength, 0, 200)));
+}
+
+void SaveRumbleSetting() {
+    if (FILE* file = std::fopen(RumbleSettingPath().string().c_str(), "wb")) {
+        std::fprintf(file, "%d %u\n", PADGetRumbleEnabled() != FALSE ? 1 : 0, PADGetRumbleStrength());
+        std::fclose(file);
+    }
+}
+
+void DrawRumbleSetting() {
+    bool enabled = PADGetRumbleEnabled() != FALSE;
+    if (ui::Toggle("Vibration", &enabled)) {
+        PADSetRumbleEnabled(enabled ? TRUE : FALSE);
+        SaveRumbleSetting();
+    }
+    // Adapted from KartPad 0.8.5's rumble strength. Phones without amplitude control vibrate at
+    // their one strength.
+    ImGui::BeginDisabled(!enabled);
+    int strength = static_cast<int>(PADGetRumbleStrength());
+    if (ui::SliderInt("Vibration strength", &strength, 0, 200, "%d%%")) {
+        PADSetRumbleStrength(static_cast<u32>(strength));
+    }
+    if (ImGui::IsItemDeactivatedAfterEdit()) {
+        SaveRumbleSetting();
+    }
+    ImGui::EndDisabled();
+}
+
+#if defined(__SWITCH__)
+extern "C" const char* AuroraSwitchPlayerController(int player);  // aurora lib/switch/input_switch.cpp
+extern "C" int AuroraSwitchPlayerPressing(int player);
+extern "C" int AuroraSwitchShowControllerApplet();
+extern "C" const unsigned char kAuroraSwitchPlayerColors[4][3];
+
+ImVec4 SwitchPlayerColor(int player) {
+    return ImVec4(kAuroraSwitchPlayerColors[player][0] / 255.0f, kAuroraSwitchPlayerColors[player][1] / 255.0f,
+                  kAuroraSwitchPlayerColors[player][2] / 255.0f, 1.0f);
+}
+
+// A round player badge ("1"-"4") in that player's colour.
+void PlayerBadge(int player) {
+    const float fs = ImGui::GetFontSize();
+    const float size = fs * 1.6f;
+    const ImVec2 min = ImGui::GetCursorScreenPos();
+    ImGui::Dummy(ImVec2(size, size));
+    char text[2] = {static_cast<char>('1' + player), 0};
+    const ImVec2 textSize = ImGui::CalcTextSize(text);
+    ImDrawList* draw = ImGui::GetWindowDrawList();
+    draw->AddCircleFilled(ImVec2(min.x + size * 0.5f, min.y + size * 0.5f), size * 0.5f,
+                          ImGui::GetColorU32(SwitchPlayerColor(player)));
+    draw->AddText(ImVec2(min.x + (size - textSize.x) * 0.5f, min.y + (size - textSize.y) * 0.5f),
+                  ImGui::GetColorU32(ImVec4(1.0f, 1.0f, 1.0f, 1.0f)), text);
+}
+
+// Who is which player: the console's own player numbers (the lights on each controller), each with
+// a colour that the console's controller screen uses too. A row lights up while its controller
+// holds a button, so everyone can find their own. Players join, swap or leave on the console's
+// controller screen, the one games show; a dropdown here moved players off the port the game
+// expected them on (2026-10-27).
+void DrawSwitchPlayers() {
+    ui::Section("Players");
+    const float fs = ImGui::GetFontSize();
+    const float width = ui::RowWidth();
+    for (int player = 0; player < 4; ++player) {
+        const char* controller = AuroraSwitchPlayerController(player);
+        const bool pressing = controller != nullptr && AuroraSwitchPlayerPressing(player) != 0;
+        const ImVec2 min = ImGui::GetCursorScreenPos();
+        const float height = fs * 2.4f;
+        ImDrawList* draw = ImGui::GetWindowDrawList();
+        const ImVec4 color = SwitchPlayerColor(player);
+        draw->AddRectFilled(min, ImVec2(min.x + width, min.y + height),
+                            ImGui::GetColorU32(pressing ? ImVec4(color.x * 0.45f, color.y * 0.45f, color.z * 0.45f, 1.0f)
+                                                        : ui::kRow),
+                            fs * 0.6f);
+        ImGui::SetCursorScreenPos(ImVec2(min.x + fs * 0.6f, min.y + (height - fs * 1.6f) * 0.5f));
+        PlayerBadge(player);
+        ImGui::SameLine(0.0f, fs * 0.6f);
+        ImGui::SetCursorScreenPos(ImVec2(ImGui::GetCursorScreenPos().x, min.y + (height - fs) * 0.5f));
+        if (controller != nullptr) {
+            ImGui::Text(TR("Player %d   %s"), player + 1, TR(controller));
+        } else {
+            ImGui::TextDisabled(TR("Player %d   not connected"), player + 1);
+        }
+        ImGui::SetCursorScreenPos(ImVec2(min.x, min.y + height + fs * 0.3f));
+        ImGui::Dummy(ImVec2(width, 0.0f));
+    }
+    ImGui::TextDisabled(TR("Press a button: your row lights up. The lights on each controller show its number too."));
+    if (ui::LinkRow("Change controllers", "Add players, swap who is who, or change grip")) {
+        AuroraSwitchShowControllerApplet();
+    }
+}
+#endif
+
 void DrawControllerSettings() {
+#if defined(__SWITCH__)
+    DrawSwitchPlayers();
+    ui::Section("Buttons and vibration");
+#endif
+    DrawRumbleSetting();
 #if defined(__ANDROID__)
     // Lives here (not under Graphics, where it was originally placed) since it's an input
     // setting, not a display one - confirmed directly that it wasn't found under Graphics. The
@@ -439,7 +874,7 @@ void DrawControllerSettings() {
     // (seeded via nativeSetTouchControlsVisibleCache, updated on every toggle here). Most useful
     // right after a real controller auto-connects and hides the touch overlay
     // (TouchControlsOverlay.setControllerConnected) but the player wants it back anyway.
-    if (ImGui::Checkbox("Touch controls", &g_androidTouchControlsVisibleCache)) {
+    if (ui::Toggle("Touch controls", &g_androidTouchControlsVisibleCache)) {
         AndroidSetTouchOverlayVisible(g_androidTouchControlsVisibleCache);
     }
     // Requested feature (GitHub issue #4): holding an item behind you for protection while also
@@ -449,47 +884,54 @@ void DrawControllerSettings() {
     // being a per-device UI preference rather than a game setting. Actual detection/hold logic
     // lives in TouchButtonView.kt; this is just the settings-menu entry point plus a live mirror
     // of its current state (seeded via nativeSetDoubleTapAutoHoldCache).
-    if (ImGui::Checkbox("Double-tap A to auto-hold acceleration", &g_androidDoubleTapAutoHoldCache)) {
+    if (ui::Toggle("Double-tap A to auto-hold acceleration", &g_androidDoubleTapAutoHoldCache)) {
         AndroidSetDoubleTapAutoHold(g_androidDoubleTapAutoHoldCache);
     }
     ImGui::Separator();
 #endif
-    for (int port = 0; port < PAD_MAX_CONTROLLERS; ++port) {
-        const std::string label = "Port " + std::to_string(port + 1);
-        ImGui::RadioButton(label.c_str(), &g_controllerPort, port);
-        if (port + 1 < PAD_MAX_CONTROLLERS) {
-            ImGui::SameLine();
-        }
-    }
+    // Dropdowns, not radio buttons and a pop-out menu: the pop-out opened on top of the list
+    // and read as a separate window on a phone.
+    static const char* const kPlayerNames[] = {"Player 1", "Player 2", "Player 3", "Player 4"};
+    static_assert(sizeof(kPlayerNames) / sizeof(kPlayerNames[0]) >= PAD_MAX_CONTROLLERS);
+    ui::Combo("Player", &g_controllerPort, kPlayerNames, PAD_MAX_CONTROLLERS);
 
-    ImGui::Separator();
     controller_mapping_wizard::DrawSetupList();
     const uint32_t controllerCount = PADCount();
     if (controllerCount == 0) {
-        ImGui::TextDisabled("No controller connected");
+        ImGui::TextDisabled(TR("No controller connected"));
         return;
     }
 
+#if !defined(__SWITCH__)
+    // Not on Switch: players are the console's own player numbers there (DrawSwitchPlayers).
     const char* currentName = PADGetName(static_cast<uint32_t>(g_controllerPort));
-    ImGui::Text("Assigned: %s", currentName != nullptr ? currentName : "None");
-    if (ImGui::BeginMenu("Assign connected controller")) {
+    const s32 currentIndex = PADGetIndexForPort(static_cast<uint32_t>(g_controllerPort));
+    if (ui::BeginCombo("Controller", currentName != nullptr ? currentName : "None")) {
         for (uint32_t index = 0; index < controllerCount; ++index) {
             const char* name = PADGetNameForControllerIndex(index);
+            std::string label = name != nullptr ? name : "Unknown controller";
+            for (int port = 0; port < PAD_MAX_CONTROLLERS; ++port) {
+                if (port != g_controllerPort && PADGetIndexForPort(port) == static_cast<s32>(index)) {
+                    label += " (" + std::string(TR(kPlayerNames[port])) + ")";
+                    break;
+                }
+            }
             ImGui::PushID(static_cast<int>(index));
-            if (ImGui::MenuItem(name != nullptr ? name : "Unknown controller")) {
+            if (ImGui::Selectable(label.c_str(), currentIndex == static_cast<s32>(index))) {
                 PADSetPortForIndex(index, static_cast<uint32_t>(g_controllerPort));
                 g_configuredControllerIndices.fill(std::numeric_limits<int32_t>::min());
                 ApplyConfiguredMappings();
             }
             ImGui::PopID();
         }
-        ImGui::EndMenu();
+        ImGui::EndCombo();
     }
+#endif
 
     uint32_t mappingCount = 0;
     PADButtonMapping* mappings = PADGetButtonMappings(static_cast<uint32_t>(g_controllerPort), &mappingCount);
     if (mappings == nullptr || mappingCount != PAD_BUTTON_COUNT) {
-        ImGui::TextDisabled("Assign a controller to edit its buttons");
+        ImGui::TextDisabled(TR("Assign a controller to edit its buttons"));
         return;
     }
 
@@ -515,9 +957,13 @@ void DrawControllerSettings() {
         altRowExpanded.fill(false);
     }
 
-    ImGui::SeparatorText("Presets");
-    if (ImGui::Button("GameCube")) {
+    ui::Section("Presets");
+    // The platform's default layout (the GameCube preset), also what "Reset mapping" restores.
+    const auto applyGameCubeDefault = [&]() {
         const uint32_t port = static_cast<uint32_t>(g_controllerPort);
+#if defined(__SWITCH__)
+        ApplyPreset(port, kGameCubeSwitchPreset);
+#else
         PADRestoreDefaultMapping(port);
         uint32_t restoredCount = 0;
         if (PADButtonMapping* restored = PADGetButtonMappings(port, &restoredCount)) {
@@ -530,27 +976,38 @@ void DrawControllerSettings() {
                 }
             }
         }
+#endif
         altRowExpanded.fill(false);
         PADSerializeMappings();
         mappings = PADGetButtonMappings(port, &mappingCount);
+    };
+    if (ui::Button("GameCube")) {
+        applyGameCubeDefault();
     }
     ImGui::SameLine();
-    if (ImGui::Button("Classic Controller Pro")) {
+    if (ui::Button("Classic Controller Pro")) {
         const uint32_t port = static_cast<uint32_t>(g_controllerPort);
-        for (size_t i = 0; i < kControllerButtons.size(); ++i) {
-            if (const NativeButtonItem* native = FindNativeButton(kClassicProPreset[i])) {
-                PADSetButtonMapping(port, PADButtonMapping{native->nativeButton, kControllerButtons[i].padButton});
-                PADSetAltButtonMapping(port,
-                                       PADButtonMapping{PAD_NATIVE_BUTTON_INVALID, kControllerButtons[i].padButton});
-                RuntimeConfigFile::SetControllerButton(i, kClassicProPreset[i]);
-            }
-        }
+        ApplyPreset(port, kClassicProPreset);
         altRowExpanded.fill(false);
         PADSerializeMappings();
         mappings = PADGetButtonMappings(port, &mappingCount);
     }
+    // Its own line: three buttons do not fit the Switch's narrow panel.
+    if (ui::Button("Reset mapping")) {
+        applyGameCubeDefault();
+    }
 
-    ImGui::SeparatorText("Button mapping");
+    ui::Section("Button mapping");
+    // The dropdowns hold the longest translated button name (capped at half the panel), not a fixed 190 px.
+    const auto MappingComboWidth = [] {
+        const ImGuiStyle& style = ImGui::GetStyle();
+        float widest = 0.0f;
+        for (const auto& candidate : kNativeButtons) {
+            widest = std::max(widest, ImGui::CalcTextSize(TR(candidate.label)).x);
+        }
+        const float wanted = widest + style.FramePadding.x * 2.0f + ImGui::GetFrameHeight();
+        return std::clamp(wanted, 190.0f, std::max(190.0f, ImGui::GetContentRegionAvail().x * 0.5f));
+    };
     for (size_t i = 0; i < kControllerButtons.size(); ++i) {
         auto mappingIt = std::find_if(mappings, mappings + mappingCount, [&](const PADButtonMapping& mapping) {
             return mapping.padButton == kControllerButtons[i].padButton;
@@ -570,11 +1027,11 @@ void DrawControllerSettings() {
 
         const NativeButtonItem& current = NativeButtonForValue(mappingIt->nativeButton);
         ImGui::PushID(static_cast<int>(i));
-        ImGui::SetNextItemWidth(190.0f);
-        if (ImGui::BeginCombo("##primary", current.label)) {
+        ImGui::SetNextItemWidth(MappingComboWidth());
+        if (ImGui::BeginCombo("##primary", TR(current.label))) {
             for (const auto& candidate : kNativeButtons) {
                 const bool selected = candidate.nativeButton == mappingIt->nativeButton;
-                if (ImGui::Selectable(candidate.label, selected)) {
+                if (ImGui::Selectable(TR(candidate.label), selected)) {
                     const uint32_t port = static_cast<uint32_t>(g_controllerPort);
                     PADSetButtonMapping(port, PADButtonMapping{candidate.nativeButton, kControllerButtons[i].padButton});
                     writeBinding(i, candidate.nativeButton,
@@ -588,6 +1045,9 @@ void DrawControllerSettings() {
             }
             ImGui::EndCombo();
         }
+        // With a second binding showing, the two dropdowns fill the row and the button's name would be
+        // squeezed into a column a letter wide: it goes on its own line below instead.
+        bool altShown = false;
         if (altIt != nullptr) {
             const bool altBound = altIt->nativeButton != PAD_NATIVE_BUTTON_INVALID;
             if (!altBound && !altRowExpanded[i]) {
@@ -596,19 +1056,20 @@ void DrawControllerSettings() {
                     altRowExpanded[i] = true;
                 }
                 if (ImGui::IsItemHovered()) {
-                    ImGui::SetTooltip("Add a second binding; pressing either one works");
+                    ImGui::SetTooltip(TR("Add a second binding; pressing either one works"));
                 }
             } else {
+                altShown = true;
                 ImGui::SameLine();
-                ImGui::TextUnformatted("or");
+                ImGui::TextUnformatted(TR("or"));
                 ImGui::SameLine();
-                const char* altLabel = altBound ? NativeButtonForValue(altIt->nativeButton).label : "None";
-                ImGui::SetNextItemWidth(190.0f);
+                const char* altLabel = altBound ? TR(NativeButtonForValue(altIt->nativeButton).label) : TR("None");
+                ImGui::SetNextItemWidth(MappingComboWidth());
                 if (ImGui::BeginCombo("##alt", altLabel)) {
                     for (const auto& candidate : kNativeButtons) {
                         const bool isNone = candidate.nativeButton == PAD_NATIVE_BUTTON_INVALID;
                         const bool selected = candidate.nativeButton == altIt->nativeButton;
-                        if (ImGui::Selectable(isNone ? "None" : candidate.label, selected)) {
+                        if (ImGui::Selectable(isNone ? TR("None") : TR(candidate.label), selected)) {
                             const uint32_t port = static_cast<uint32_t>(g_controllerPort);
                             PADSetAltButtonMapping(
                                 port, PADButtonMapping{candidate.nativeButton, kControllerButtons[i].padButton});
@@ -625,73 +1086,66 @@ void DrawControllerSettings() {
                 }
             }
         }
-        ImGui::SameLine();
-        ImGui::TextUnformatted(kControllerButtons[i].label);
+        if (altShown) {
+            ImGui::Indent(ImGui::GetFontSize());
+            ImGui::TextDisabled("%s", TR(kControllerButtons[i].label));
+            ImGui::Unindent(ImGui::GetFontSize());
+        } else {
+            ImGui::SameLine();
+            ImGui::TextUnformatted(TR(kControllerButtons[i].label));
+        }
         ImGui::PopID();
     }
 
 }
 
 void DrawAudioSettings() {
-    ImGui::SetNextItemWidth(220.0f);
-    if (ImGui::SliderInt("Master", &g_audioVolumePercent, 0, 100, "%d%%")) {
+    if (ui::SliderInt("Master", &g_audioVolumePercent, 0, 100, "%d%%")) {
         const float volume = static_cast<float>(g_audioVolumePercent) / 100.0f;
         AudioBackend::Instance().SetMasterVolume(volume);
         RuntimeConfigFile::SetAudioVolume(volume);
     }
-    if (ImGui::SliderInt("Music", &g_musicVolumePercent, 0, 100, "%d%%")) {
+    if (ui::SliderInt("Music", &g_musicVolumePercent, 0, 100, "%d%%")) {
         const float volume = static_cast<float>(g_musicVolumePercent) / 100.0f;
         MusicAttenuation::SetMusicVolume(volume);
         RuntimeConfigFile::SetMusicVolume(volume);
     }
-    if (ImGui::SliderInt("Sound Effects", &g_soundEffectsVolumePercent, 0, 100, "%d%%")) {
+    if (ui::SliderInt("Sound Effects", &g_soundEffectsVolumePercent, 0, 100, "%d%%")) {
         const float volume = static_cast<float>(g_soundEffectsVolumePercent) / 100.0f;
         MusicAttenuation::SetSoundEffectsVolume(volume);
         RuntimeConfigFile::SetSoundEffectsVolume(volume);
     }
-    if (ImGui::SliderInt("UI", &g_uiVolumePercent, 0, 100, "%d%%")) {
+    if (ui::SliderInt("UI", &g_uiVolumePercent, 0, 100, "%d%%")) {
         const float volume = static_cast<float>(g_uiVolumePercent) / 100.0f;
         MusicAttenuation::SetUiVolume(volume);
         RuntimeConfigFile::SetUiVolume(volume);
     }
-    if (ImGui::SliderInt("Voices", &g_voicesVolumePercent, 0, 100, "%d%%")) {
+    if (ui::SliderInt("Voices", &g_voicesVolumePercent, 0, 100, "%d%%")) {
         const float volume = static_cast<float>(g_voicesVolumePercent) / 100.0f;
         MusicAttenuation::SetVoicesVolume(volume);
         RuntimeConfigFile::SetVoicesVolume(volume);
     }
-    if (ImGui::Checkbox("Mute", &g_audioMuted)) {
+    if (ui::Toggle("Mute", &g_audioMuted)) {
         AudioBackend::Instance().SetMuted(g_audioMuted);
         RuntimeConfigFile::SetAudioMuted(g_audioMuted);
     }
     ImGui::Separator();
-    if (ImGui::Checkbox("Mix audio on a worker thread", &g_audioMixWorker)) {
-        // Applies immediately: SetMixWorkerEnabled joins any in-flight mix
-        // before switching, so the change never lands mid-frame.
-        AxDspHle::SetMixWorkerEnabled(g_audioMixWorker);
-        RuntimeConfigFile::SetAudioMixWorker(g_audioMixWorker);
-    }
-    if (ImGui::IsItemHovered()) {
-        ImGui::SetTooltip(
-            "Runs the AX/DSP voice mix off the game thread. Turn this off if you "
-            "suspect an audio problem; the mix then runs inline as it used to.");
-    }
-    ImGui::Separator();
     // Android detects other apps' playback passively (ExternalMediaDetector.kt, never audio
     // focus); desktop uses the platform media-session monitor.
-    if (ImGui::Checkbox("Mute game music while external media is playing",
+    if (ui::Toggle("Mute game music while external media is playing",
                         &g_attenuateMusicWhenMediaPlays)) {
         MusicAttenuation::SetEnabled(g_attenuateMusicWhenMediaPlays);
         RuntimeConfigFile::SetAttenuateMusicWhenMediaPlays(g_attenuateMusicWhenMediaPlays);
     }
     if (g_attenuateMusicWhenMediaPlays) {
         if (MusicAttenuation::IsExternalMediaPlaying()) {
-            ImGui::TextDisabled("External media is playing; game music is muted.");
+            ImGui::TextDisabled(TR("External media is playing; game music is muted."));
         } else if (!MusicAttenuation::IsMediaControlInitializationComplete()) {
-            ImGui::TextDisabled(kMediaMonitorWaitingText);
+            ImGui::TextDisabled("%s", TR(kMediaMonitorWaitingText));
         } else if (!MusicAttenuation::IsMediaControlAvailable()) {
-            ImGui::TextDisabled(kMediaMonitorUnavailableText);
+            ImGui::TextDisabled("%s", TR(kMediaMonitorUnavailableText));
         } else {
-            ImGui::TextDisabled("No external media is currently playing.");
+            ImGui::TextDisabled(TR("No external media is currently playing."));
         }
     }
 }
@@ -700,30 +1154,77 @@ void DrawAudioSettings() {
 extern "C" void AuroraSwitchSetMotionSteering(int enabled, float sensitivity, int inverted);
 extern "C" void AuroraSwitchRecenterMotionSteering();
 extern "C" int AuroraSwitchMotionSteeringSeen();
+extern "C" float AuroraSwitchMotionValue(int player);
 
 // Tilt to steer (aurora-main/lib/switch/input_switch.cpp). Kept in its own small file beside
 // Config.toml, like the music player's settings.
 struct MotionSteeringSettings {
-    bool enabled = false;
+    bool players[4] = {};  // per player since 2026-10-27; the file keeps them as a bit mask
+    bool shake[4] = {};    // Shake to trick, per player (shake_trick.cfg, a bit mask)
     bool inverted = false;
     int sensitivityPercent = 100;
     bool loaded = false;
 };
 MotionSteeringSettings g_motionSteering;
 
+int MotionPlayerMask() {
+    int mask = 0;
+    for (int i = 0; i < 4; ++i) {
+        mask |= g_motionSteering.players[i] ? 1 << i : 0;
+    }
+    return mask;
+}
+
 void ApplyMotionSteering(bool save) {
-    AuroraSwitchSetMotionSteering(g_motionSteering.enabled ? 1 : 0,
-                                  static_cast<float>(g_motionSteering.sensitivityPercent) / 100.0f,
+    AuroraSwitchSetMotionSteering(MotionPlayerMask(), static_cast<float>(g_motionSteering.sensitivityPercent) / 100.0f,
                                   g_motionSteering.inverted ? 1 : 0);
     if (!save) {
         return;
     }
     const auto path = RuntimeConfigFile::ApplicationDataDirectory() / "motion_steering.cfg";
     if (FILE* file = std::fopen(path.string().c_str(), "wb")) {
-        std::fprintf(file, "%d %d %d\n", g_motionSteering.enabled ? 1 : 0, g_motionSteering.inverted ? 1 : 0,
+        std::fprintf(file, "%d %d %d\n", MotionPlayerMask(), g_motionSteering.inverted ? 1 : 0,
                      g_motionSteering.sensitivityPercent);
         std::fclose(file);
     }
+}
+
+extern "C" void AuroraSwitchSetShakePlayers(int players);
+
+void ApplyShakeToTrick(bool save) {
+    int mask = 0;
+    for (int i = 0; i < 4; ++i) {
+        mask |= g_motionSteering.shake[i] ? 1 << i : 0;
+    }
+    AuroraSwitchSetShakePlayers(mask);
+    if (!save) {
+        return;
+    }
+    const auto path = RuntimeConfigFile::ApplicationDataDirectory() / "shake_trick.cfg";
+    if (FILE* file = std::fopen(path.string().c_str(), "wb")) {
+        std::fprintf(file, "%d\n", mask);
+        std::fclose(file);
+    }
+}
+
+void LoadShakeToTrick() {
+    int mask = 0;
+    const auto dir = RuntimeConfigFile::ApplicationDataDirectory();
+    if (FILE* file = std::fopen((dir / "shake_trick.cfg").string().c_str(), "rb")) {
+        if (std::fscanf(file, "%d", &mask) != 1) {
+            mask = 0;
+        }
+        std::fclose(file);
+    } else if (FILE* old = std::fopen((dir / "wii_wheel.cfg").string().c_str(), "rb")) {
+        // Before 2026-10-27 it was player 1's Wii Wheel, saved there.
+        int value = 0;
+        mask = std::fscanf(old, "%d", &value) == 1 && value != 0 ? 1 : 0;
+        std::fclose(old);
+    }
+    for (int i = 0; i < 4; ++i) {
+        g_motionSteering.shake[i] = (mask & (1 << i)) != 0;
+    }
+    ApplyShakeToTrick(false);
 }
 
 void LoadMotionSteering() {
@@ -735,33 +1236,84 @@ void LoadMotionSteering() {
     if (FILE* file = std::fopen(path.string().c_str(), "rb")) {
         int enabled = 0, inverted = 0, sensitivity = 100;
         if (std::fscanf(file, "%d %d %d", &enabled, &inverted, &sensitivity) == 3) {
-            g_motionSteering.enabled = enabled != 0;
+            for (int i = 0; i < 4; ++i) {
+                g_motionSteering.players[i] = (enabled & (1 << i)) != 0;  // an old "1" is player 1
+            }
             g_motionSteering.inverted = inverted != 0;
             g_motionSteering.sensitivityPercent = std::clamp(sensitivity, 50, 200);
         }
         std::fclose(file);
     }
     ApplyMotionSteering(false);
+    LoadShakeToTrick();
+}
+
+// A thin bar showing a player's tilt right now, so they can see the sensor works before a race.
+void TiltBar(int player) {
+    const float fs = ImGui::GetFontSize();
+    const float width = ui::RowWidth();
+    const ImVec2 min = ImGui::GetCursorScreenPos();
+    const float height = fs * 0.5f;
+    ImGui::Dummy(ImVec2(width, height + fs * 0.4f));
+    ImDrawList* draw = ImGui::GetWindowDrawList();
+    const float midX = min.x + width * 0.5f;
+    draw->AddRectFilled(min, ImVec2(min.x + width, min.y + height), ImGui::GetColorU32(ui::kTrackOff), height * 0.5f);
+    const float value = std::clamp(AuroraSwitchMotionValue(player), -1.0f, 1.0f);
+    const float x = midX + value * width * 0.5f;
+    draw->AddRectFilled(ImVec2(std::min(midX, x), min.y), ImVec2(std::max(midX, x), min.y + height),
+                        ImGui::GetColorU32(SwitchPlayerColor(player)), height * 0.5f);
+    draw->AddLine(ImVec2(midX, min.y - fs * 0.15f), ImVec2(midX, min.y + height + fs * 0.15f),
+                  ImGui::GetColorU32(ui::kText), 2.0f);
 }
 
 void DrawMotionSteeringSettings() {
     LoadMotionSteering();
-    ImGui::SeparatorText("Tilt to steer (player 1)");
-    bool changed = ImGui::Checkbox("Steer by tilting the console or controller", &g_motionSteering.enabled);
-    if (g_motionSteering.enabled) {
-        ImGui::SetNextItemWidth(220.0f);
-        changed |= ImGui::SliderInt("Sensitivity##Motion", &g_motionSteering.sensitivityPercent, 50, 200, "%d%%");
-        changed |= ImGui::Checkbox("Reverse direction", &g_motionSteering.inverted);
-        if (ImGui::Button("Set straight ahead to how I am holding it now", ImVec2(-1.0f, 48.0f))) {
-            AuroraSwitchRecenterMotionSteering();
+    ui::Section("Tilt to steer");
+    bool changed = false;
+    bool any = false;
+    const int seen = AuroraSwitchMotionSteeringSeen();
+    for (int player = 0; player < 4; ++player) {
+        const char* controller = AuroraSwitchPlayerController(player);
+        char label[64];
+        std::snprintf(label, sizeof(label), "Player %d##Tilt", player + 1);
+        changed |= ui::Toggle(label, &g_motionSteering.players[player]);
+        if (!g_motionSteering.players[player]) {
+            continue;
         }
-        if (AuroraSwitchMotionSteeringSeen() == 0) {
-            ImGui::TextDisabled("Waiting for the tilt sensor...");
+        any = true;
+        if (controller == nullptr) {
+            ImGui::TextDisabled(TR("Not connected"));
+        } else if ((seen & (1 << player)) == 0) {
+            ImGui::TextDisabled(TR("Waiting for the tilt sensor... (a single Joy-Con held sideways has none yet)"));
+        } else {
+            TiltBar(player);
+        }
+    }
+    if (any) {
+        changed |= ui::SliderInt("Sensitivity##Motion", &g_motionSteering.sensitivityPercent, 50, 200, "%d%%");
+        changed |= ui::Toggle("Reverse direction", &g_motionSteering.inverted);
+        if (ui::Button("Set straight ahead again (taken when you resume)", ImVec2(-1.0f, 48.0f))) {
+            AuroraSwitchRecenterMotionSteering();
         }
     }
     if (changed) {
         ApplyMotionSteering(true);
     }
+
+    // Shake to trick (aurora lib/switch/input_switch.cpp): a shake while driving presses the
+    // D-pad in its direction on that player's own controller. Applies right away.
+    ui::Section("Shake to trick");
+    bool shakeChanged = false;
+    for (int player = 0; player < 4; ++player) {
+        char label[64];
+        std::snprintf(label, sizeof(label), "Player %d##Shake", player + 1);
+        shakeChanged |= ui::Toggle(label, &g_motionSteering.shake[player]);
+    }
+    if (shakeChanged) {
+        ApplyShakeToTrick(true);
+    }
+    ImGui::TextWrapped(TR("While driving, shake the controller for tricks: up, down, left or right picks the trick, "
+                       "like the D-pad. On the ground any shake does a wheelie. In menus the D-pad works as usual."));
 }
 #endif
 
@@ -778,16 +1330,16 @@ void DrawMusicPlayer() {
     const float width = ImGui::GetContentRegionAvail().x;
 
     if (tracks.empty()) {
-        ImGui::TextWrapped("No music yet. Put MP3 files in %s on the SD card, then press Look again.",
+        ImGui::TextWrapped(TR("No music yet. Put MP3 files in %s on the SD card, then press Look again."),
                            MusicPlayer::FolderForDisplay().c_str());
-        if (ImGui::Button("Look again", ImVec2(width, 52.0f))) {
+        if (ui::Button("Look again", ImVec2(width, 52.0f))) {
             tracks = MusicPlayer::Rescan();
         }
         return;
     }
 
     const bool haveTrack = status.index >= 0 && status.index < static_cast<int>(tracks.size());
-    ImGui::TextWrapped("%s", haveTrack ? tracks[static_cast<size_t>(status.index)].c_str() : "Nothing playing");
+    ImGui::TextWrapped("%s", haveTrack ? tracks[static_cast<size_t>(status.index)].c_str() : TR("Nothing playing"));
     const auto clock = [](double seconds) {
         const int total = static_cast<int>(seconds);
         char text[16];
@@ -804,7 +1356,7 @@ void DrawMusicPlayer() {
     ImGui::BeginDisabled(!status.loaded || duration <= 0.0f);
     ImGui::SetNextItemWidth(width);
     ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(ImGui::GetStyle().FramePadding.x, 12.0f));
-    if (ImGui::SliderFloat("##MusicPlayerPosition", &position, 0.0f, std::max(duration, 1.0f),
+    if (ui::SliderFloat("##MusicPlayerPosition", &position, 0.0f, std::max(duration, 1.0f),
                            status.loaded ? times.c_str() : "", ImGuiSliderFlags_NoInput)) {
         scrub = position;
         scrubbing = true;
@@ -817,11 +1369,11 @@ void DrawMusicPlayer() {
 
     const float spacing = ImGui::GetStyle().ItemSpacing.x;
     const float half = (width - spacing) / 2.0f;
-    if (ImGui::Button("Back 10 s", ImVec2(half, 48.0f))) {
+    if (ui::Button("Back 10 s", ImVec2(half, 48.0f))) {
         MusicPlayer::Seek(status.positionSeconds - 10.0);
     }
     ImGui::SameLine();
-    if (ImGui::Button("Forward 10 s", ImVec2(half, 48.0f))) {
+    if (ui::Button("Forward 10 s", ImVec2(half, 48.0f))) {
         // Past the end would restart the last moment over and over; go to the next track instead.
         if (status.positionSeconds + 10.0 >= status.durationSeconds) {
             MusicPlayer::Next();
@@ -832,34 +1384,33 @@ void DrawMusicPlayer() {
     ImGui::EndDisabled();
 
     const float third = (width - spacing * 2.0f) / 3.0f;
-    if (ImGui::Button("Previous", ImVec2(third, 60.0f))) {
+    if (ui::Button("Previous", ImVec2(third, 60.0f))) {
         MusicPlayer::Previous();
     }
     ImGui::SameLine();
-    if (ImGui::Button(status.playing ? "Pause" : "Play", ImVec2(third, 60.0f))) {
+    if (ui::Button(status.playing ? "Pause" : "Play", ImVec2(third, 60.0f))) {
         MusicPlayer::TogglePause();
     }
     ImGui::SameLine();
-    if (ImGui::Button("Next", ImVec2(third, 60.0f))) {
+    if (ui::Button("Next", ImVec2(third, 60.0f))) {
         MusicPlayer::Next();
     }
 
     int volume = static_cast<int>(std::lround(MusicPlayer::Volume() * 100.0f));
-    ImGui::SetNextItemWidth(width * 0.62f);
-    if (ImGui::SliderInt("Volume##MusicPlayer", &volume, 0, 100, "%d%%")) {
+    if (ui::SliderInt("Volume##MusicPlayer", &volume, 0, 100, "%d%%")) {
         MusicPlayer::SetVolume(static_cast<float>(volume) / 100.0f);
     }
     bool shuffle = MusicPlayer::Shuffle();
-    if (ImGui::Checkbox("Shuffle", &shuffle)) {
+    if (ui::Toggle("Shuffle", &shuffle)) {
         MusicPlayer::SetShuffle(shuffle);
     }
     bool muteGame = MusicPlayer::MuteGameMusic();
-    if (ImGui::Checkbox("Turn off the game's own music while this plays", &muteGame)) {
+    if (ui::Toggle("Turn off the game's own music while this plays", &muteGame)) {
         MusicPlayer::SetMuteGameMusic(muteGame);
     }
     if (status.loaded) {
         ImGui::SameLine();
-        if (ImGui::Button("Stop")) {
+        if (ui::Button("Stop")) {
             MusicPlayer::Stop();
         }
     }
@@ -873,9 +1424,70 @@ void DrawMusicPlayer() {
         }
         ImGui::PopID();
     }
-    if (ImGui::Button("Look for new files", ImVec2(width, 48.0f))) {
+    if (ui::Button("Look for new files", ImVec2(width, 48.0f))) {
         tracks = MusicPlayer::Rescan();
     }
+}
+
+// Brightness / contrast / saturation of the picture on screen (GitHub issue #15), applied by
+// aurora's final copy to the screen, so menus and screenshots of the settings stay as they are.
+struct PictureSettings {
+    bool loaded = false;
+    int brightnessPercent = 100;
+    int contrastPercent = 100;
+    int saturationPercent = 100;
+};
+PictureSettings g_picture;
+
+void ApplyPictureSettings(bool save) {
+    aurora_set_picture_adjust(g_picture.brightnessPercent / 100.0f, g_picture.contrastPercent / 100.0f,
+                              g_picture.saturationPercent / 100.0f);
+    if (!save) {
+        return;
+    }
+    const auto path = RuntimeConfigFile::ApplicationDataDirectory() / "picture.cfg";
+    if (FILE* file = std::fopen(path.string().c_str(), "wb")) {
+        std::fprintf(file, "%d %d %d\n", g_picture.brightnessPercent, g_picture.contrastPercent,
+                     g_picture.saturationPercent);
+        std::fclose(file);
+    }
+}
+
+void LoadPictureSettings() {
+    if (g_picture.loaded) {
+        return;
+    }
+    g_picture.loaded = true;
+    const auto path = RuntimeConfigFile::ApplicationDataDirectory() / "picture.cfg";
+    if (FILE* file = std::fopen(path.string().c_str(), "rb")) {
+        int brightness = 100, contrast = 100, saturation = 100;
+        if (std::fscanf(file, "%d %d %d", &brightness, &contrast, &saturation) == 3) {
+            g_picture.brightnessPercent = std::clamp(brightness, 25, 200);
+            g_picture.contrastPercent = std::clamp(contrast, 25, 200);
+            g_picture.saturationPercent = std::clamp(saturation, 0, 200);
+        }
+        std::fclose(file);
+    }
+    ApplyPictureSettings(false);
+}
+
+void DrawPictureSettings() {
+    LoadPictureSettings();
+    ui::Section("Picture");
+    bool changed = false;
+    changed |= ui::SliderInt("Brightness", &g_picture.brightnessPercent, 25, 200, "%d%%");
+    changed |= ui::SliderInt("Contrast", &g_picture.contrastPercent, 25, 200, "%d%%");
+    changed |= ui::SliderInt("Saturation", &g_picture.saturationPercent, 0, 200, "%d%%");
+    if (ui::Button("Reset picture")) {
+        g_picture.brightnessPercent = 100;
+        g_picture.contrastPercent = 100;
+        g_picture.saturationPercent = 100;
+        changed = true;
+    }
+    if (changed) {
+        ApplyPictureSettings(true);
+    }
+    ImGui::Separator();
 }
 
 // Render-resolution scale (0.5x-8x the Wii's native output), same list/logic as DrawTopBar's own
@@ -884,17 +1496,51 @@ void DrawMusicPlayer() {
 // DrawAndroidSidebar, which never actually included this setting at all when it replaced the top
 // bar on Android - confirmed directly as a real regression ("in Display settings add
 // resolution(the scaling settings, as those were removed fully.)").
+// The language of the menus. Saved by i18n::SaveChoice; the fonts are built at start-up, so a change
+// applies the next time the game starts.
+void DrawLanguageSetting() {
+    static std::string choice = i18n::SavedChoice();
+    std::string preview = i18n::TrString("Automatic");
+    for (const i18n::LanguageInfo& language : i18n::Languages()) {
+        if (choice == language.code) {
+            preview = language.nativeName;
+        }
+    }
+    if (ui::BeginCombo("Language", preview.c_str())) {
+        const bool autoSelected = choice == "auto";
+        if (ImGui::Selectable(TR("Automatic"), autoSelected)) {
+            choice = "auto";
+            i18n::SaveChoice(choice);
+        }
+        for (const i18n::LanguageInfo& language : i18n::Languages()) {
+            const bool selected = choice == language.code;
+            if (ImGui::Selectable(language.nativeName, selected)) {
+                choice = language.code;
+                i18n::SaveChoice(choice);
+            }
+            if (selected) {
+                ImGui::SetItemDefaultFocus();
+            }
+        }
+        ImGui::EndCombo();
+    }
+    const std::string wanted = choice == "auto" ? i18n::DetectSystemLanguage() : choice;
+    if (wanted != i18n::Language()) {
+        ImGui::TextDisabled("%s", TR("Applies the next time the game starts."));
+    }
+}
+
 void DrawResolutionSettings() {
     const auto resolutionIt = std::find_if(kResolutions.begin(), kResolutions.end(), [](const ResolutionItem& item) {
         return std::fabs(item.scale - g_resolutionScale) < 0.001f;
     });
-    const char* resolutionLabel = resolutionIt != kResolutions.end() ? resolutionIt->label : "Custom";
-    if (ImGui::BeginCombo("Resolution", resolutionLabel)) {
+    const char* resolutionLabel = resolutionIt != kResolutions.end() ? TR(resolutionIt->label) : TR("Custom");
+    if (ui::BeginCombo("Resolution", resolutionLabel)) {
         for (const auto& resolution : kResolutions) {
             const bool selected = std::fabs(resolution.scale - g_resolutionScale) < 0.001f;
             const bool disabled = IsHighFrameRateMode() && IsHighResolutionScale(resolution.scale);
             ImGui::BeginDisabled(disabled);
-            const bool clicked = ImGui::Selectable(resolution.label, selected);
+            const bool clicked = ImGui::Selectable(TR(resolution.label), selected);
             ImGui::EndDisabled();
             if (clicked) {
                 SetResolutionScale(resolution.scale);
@@ -918,7 +1564,7 @@ void DrawResolutionSettings() {
     // ambiguous enough that a manual override is worth having regardless).
     constexpr std::array<const char*, 2> kAspectRatioModes{"Widescreen (16:9)", "4:3 (original Wii)"};
     int aspectRatioIndex = g_widescreen ? 0 : 1;
-    if (ImGui::Combo("Aspect Ratio", &aspectRatioIndex, kAspectRatioModes.data(),
+    if (ui::Combo("Aspect Ratio", &aspectRatioIndex, kAspectRatioModes.data(),
                       static_cast<int>(kAspectRatioModes.size()))) {
         g_widescreen = aspectRatioIndex == 0;
         RuntimeConfigFile::SetWidescreen(g_widescreen);
@@ -927,12 +1573,13 @@ void DrawResolutionSettings() {
     // The picture switches immediately, but the game lays out menus and the HUD when a screen
     // loads, so whatever is already on screen keeps its old layout until the next one.
     ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + 380.0f);
-    ImGui::TextDisabled("The HUD and menus update on the next screen or race.");
+    ImGui::TextDisabled(TR("The HUD and menus update on the next screen or race."));
     ImGui::PopTextWrapPos();
     ImGui::Separator();
 }
 
 void DrawGraphicsSettings() {
+    DrawPictureSettings();
     g_displayMode = static_cast<int>(aurora_get_display_mode());
     struct EffectFlag {
         const char* label;
@@ -944,7 +1591,7 @@ void DrawGraphicsSettings() {
 
     for (const auto& effect : kEffectFlags) {
         bool disabled = (g_disabledPostProcessingPaths & effect.flag) != 0;
-        if (ImGui::Checkbox(effect.label, &disabled)) {
+        if (ui::Toggle(effect.label, &disabled)) {
             if (disabled) {
                 g_disabledPostProcessingPaths |= effect.flag;
             } else {
@@ -954,14 +1601,14 @@ void DrawGraphicsSettings() {
             RuntimeConfigFile::SetDisabledPostProcessingPaths(g_disabledPostProcessingPaths);
         }
     }
-    ImGui::TextDisabled("Applied when the next scene renderer is created.");
+    ImGui::TextDisabled(TR("Applied when the next scene renderer is created."));
     ImGui::Separator();
     static constexpr const char* kDisplayModes[] = {
         "Windowed",
         "Borderless fullscreen",
         "Exclusive fullscreen",
     };
-    if (ImGui::Combo("Display mode", &g_displayMode, kDisplayModes, static_cast<int>(std::size(kDisplayModes)))) {
+    if (ui::Combo("Display mode", &g_displayMode, kDisplayModes, static_cast<int>(std::size(kDisplayModes)))) {
         const auto mode = static_cast<AuroraDisplayMode>(g_displayMode);
         aurora_set_display_mode(mode);
         const AuroraDisplayMode activeMode = aurora_get_display_mode();
@@ -973,19 +1620,57 @@ void DrawGraphicsSettings() {
     }
     if (g_displayMode == AURORA_DISPLAY_MODE_EXCLUSIVE) {
         ImGui::TextDisabled(
-            "Requests the closest native-resolution display mode to the output frame "
-            "rate (60 Hz, or the frame interpolation target).");
+            TR("Requests the closest native-resolution display mode to the output frame "
+            "rate (60 Hz, or the frame interpolation target)."));
     }
+    if (ui::Toggle("Simpler computer karts (faster races)", &g_lowDetailComputerKarts)) {
+        RuntimeSetLowDetailComputerKarts(g_lowDetailComputerKarts);
+        RuntimeConfigFile::SetLowDetailComputerKarts(g_lowDetailComputerKarts);
+    }
+    ImGui::TextDisabled(TR("Applies from the next race."));
+    if (ui::Toggle("30 FPS races (normal speed, half the frames)", &g_thirtyFpsRaces)) {
+        RuntimeSetThirtyFpsRaces(g_thirtyFpsRaces);
+        RuntimeConfigFile::SetThirtyFpsRaces(g_thirtyFpsRaces);
+    }
+    ImGui::TextDisabled(TR("For when 60 can't be held. Applies from the next race."));
+#if defined(__ANDROID__)
+    // A phone that gets hot drops its clocks whatever the game does, so give up pixels before frames.
+    if (ui::Toggle("Lower resolution when the phone gets hot", &g_thermalAutoQuality)) {
+        ThermalQuality::SetEnabled(g_thermalAutoQuality);
+        RuntimeConfigFile::SetThermalAutoQuality(g_thermalAutoQuality);
+    }
+    if (g_thermalAutoQuality) {
+        const float headroom = ThermalQuality::LastHeadroom();
+        const float factor = ThermalQuality::CurrentFactor();
+        if (headroom < 0.0f) {
+            ImGui::TextDisabled(TR("This device does not report thermal readings."));
+        } else if (factor >= 1.0f) {
+            ImGui::TextDisabled(TR("Running at full resolution (heat %.0f%% of the limit)."),
+                                static_cast<double>(headroom) * 100.0);
+        } else {
+            ImGui::TextDisabled(TR("Rendering at %.0f%% resolution (heat %.0f%% of the limit)."),
+                                static_cast<double>(factor) * 100.0,
+                                static_cast<double>(headroom) * 100.0);
+        }
+    }
+#endif
+    if (ui::Toggle("Show FPS", &g_showFps)) {
+        RuntimeConfigFile::SetShowFps(g_showFps);
+    }
+}
+
+void DrawAdvancedSettings() {
+    ImGui::TextWrapped(TR("Technical options. The defaults suit most people; change these when something looks or runs wrong."));
     constexpr std::array<const char*, 3> kFrameInterpolationModes{
         "Off", "120 FPS", "180 FPS",
     };
     const char* currentFrameInterpolationMode =
-        kFrameInterpolationModes[static_cast<size_t>(g_frameInterpolationMode)];
+        TR(kFrameInterpolationModes[static_cast<size_t>(g_frameInterpolationMode)]);
     bool frameInterpolationModeChanged = false;
-    if (ImGui::BeginCombo("Race frame interpolation (experimental)", currentFrameInterpolationMode)) {
+    if (ui::BeginCombo("Race frame interpolation (experimental)", currentFrameInterpolationMode)) {
         for (int mode = 0; mode < static_cast<int>(kFrameInterpolationModes.size()); ++mode) {
             const bool selected = g_frameInterpolationMode == mode;
-            if (ImGui::Selectable(kFrameInterpolationModes[static_cast<size_t>(mode)], selected)) {
+            if (ImGui::Selectable(TR(kFrameInterpolationModes[static_cast<size_t>(mode)]), selected)) {
                 g_frameInterpolationMode = mode;
                 frameInterpolationModeChanged = true;
             }
@@ -1006,84 +1691,50 @@ void DrawGraphicsSettings() {
         }
     }
     ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + 380.0f);
-    ImGui::TextDisabled("Frame interpolation is experimental, you might find visual artifacts");
+    ImGui::TextDisabled(TR("Frame interpolation is experimental, you might find visual artifacts"));
     ImGui::PopTextWrapPos();
-    if (ImGui::Checkbox("Disable copy filter", &g_disableCopyFilter)) {
+    if (ui::Toggle("Disable copy filter", &g_disableCopyFilter)) {
         aurora_set_disable_copy_filter(g_disableCopyFilter);
         RuntimeConfigFile::SetDisableCopyFilter(g_disableCopyFilter);
     }
-    // KartPad issue #193: on some Adreno phones (Galaxy S24 Ultra) characters render as only their
-    // eyes while karts are fine. Off by default - it is an unconfirmed workaround.
-#if defined(__ANDROID__)
-    // A phone that gets hot drops its clocks whatever the game does, so give up pixels before frames.
-    if (ImGui::Checkbox("Lower resolution when the phone gets hot", &g_thermalAutoQuality)) {
-        ThermalQuality::SetEnabled(g_thermalAutoQuality);
-        RuntimeConfigFile::SetThermalAutoQuality(g_thermalAutoQuality);
-    }
-    if (g_thermalAutoQuality) {
-        const float headroom = ThermalQuality::LastHeadroom();
-        const float factor = ThermalQuality::CurrentFactor();
-        if (headroom < 0.0f) {
-            ImGui::TextDisabled("This device does not report thermal readings.");
-        } else if (factor >= 1.0f) {
-            ImGui::TextDisabled("Running at full resolution (heat %.0f%% of the limit).",
-                                static_cast<double>(headroom) * 100.0);
-        } else {
-            ImGui::TextDisabled("Rendering at %.0f%% resolution (heat %.0f%% of the limit).",
-                                static_cast<double>(factor) * 100.0,
-                                static_cast<double>(headroom) * 100.0);
-        }
-    }
-#endif
     // Decodes graphics commands on their own thread, freeing roughly a fifth of the game thread in
     // profiles. Experimental: off by default until it has been played on more devices.
-    if (ImGui::Checkbox("Multithreaded graphics (experimental)", &g_threadedGx)) {
+    if (ui::Toggle("Multithreaded graphics (experimental)", &g_threadedGx)) {
         AuroraSetThreadedGx(g_threadedGx);
         RuntimeConfigFile::SetThreadedGx(g_threadedGx);
     }
 #if !defined(__SWITCH__)
-    if (ImGui::Checkbox("Fix missing characters (some Adreno GPUs)", &g_constantMatrixIndexing)) {
+    // KartPad issue #193: on some Adreno phones (Galaxy S24 Ultra) characters render as only their
+    // eyes while karts are fine. Off by default - it is an unconfirmed workaround.
+    if (ui::Toggle("Fix missing characters (some Adreno GPUs)", &g_constantMatrixIndexing)) {
         AuroraSetConstantMatrixIndexing(g_constantMatrixIndexing);
         RuntimeConfigFile::SetConstantMatrixIndexing(g_constantMatrixIndexing);
     }
     {
         static constexpr std::array<const char*, 4> labels{
             "Automatic", "Off", "Characters only", "Everything (slower)"};
-        if (ImGui::Combo("Fix stretched graphics (Snapdragon)", &g_vertexRepackChoice, labels.data(),
+        if (ui::Combo("Fix stretched graphics (Snapdragon)", &g_vertexRepackChoice, labels.data(),
                          static_cast<int>(labels.size()))) {
             RuntimeConfigFile::SetVertexRepack(kVertexRepackConfigValues[static_cast<size_t>(g_vertexRepackChoice)]);
         }
-        ImGui::TextDisabled("Takes effect the next time the game starts.");
+        ImGui::TextDisabled(TR("Takes effect the next time the game starts."));
     }
 #endif
-    if (ImGui::Checkbox("Simpler computer karts (faster races)", &g_lowDetailComputerKarts)) {
-        RuntimeSetLowDetailComputerKarts(g_lowDetailComputerKarts);
-        RuntimeConfigFile::SetLowDetailComputerKarts(g_lowDetailComputerKarts);
-    }
-    ImGui::TextDisabled("Applies from the next race.");
-    if (ImGui::Checkbox("30 FPS races (normal speed, half the frames)", &g_thirtyFpsRaces)) {
-        RuntimeSetThirtyFpsRaces(g_thirtyFpsRaces);
-        RuntimeConfigFile::SetThirtyFpsRaces(g_thirtyFpsRaces);
-    }
-    ImGui::TextDisabled("For when 60 can't be held. Applies from the next race.");
-    if (ImGui::Checkbox("Skip draws while shaders compile", &g_skipUnreadyPipelines)) {
+    if (ui::Toggle("Skip draws while shaders compile", &g_skipUnreadyPipelines)) {
         aurora_set_skip_unready_pipelines(g_skipUnreadyPipelines);
         RuntimeConfigFile::SetSkipUnreadyPipelines(g_skipUnreadyPipelines);
     }
-    if (ImGui::Checkbox("Show FPS", &g_showFps)) {
-        RuntimeConfigFile::SetShowFps(g_showFps);
-    }
     // Requested in GitHub issue #5, alongside Show FPS.
-    if (ImGui::Checkbox("Show \"shaders compiling\" message", &g_showShaderCompilation)) {
+    if (ui::Toggle("Show \"shaders compiling\" message", &g_showShaderCompilation)) {
         RuntimeConfigFile::SetShowShaderCompilation(g_showShaderCompilation);
     }
 #if defined(__ANDROID__)
-    if (ImGui::Checkbox("Hide the settings button", &g_hideSettingsButton)) {
+    if (ui::Toggle("Hide the settings button", &g_hideSettingsButton)) {
         RuntimeConfigFile::SetHideSettingsButton(g_hideSettingsButton);
         AndroidSetSettingsButtonHidden(g_hideSettingsButton);
     }
     ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + 380.0f);
-    ImGui::TextDisabled("The phone's Back button always opens these settings.");
+    ImGui::TextDisabled(TR("The phone's Back button always opens these settings."));
     ImGui::PopTextWrapPos();
 #endif
     ImGui::Separator();
@@ -1092,6 +1743,18 @@ void DrawGraphicsSettings() {
     // (Turnip prefixes the chip name), the phone's own driver reports the bare chip.
     if (const char* adapter = aurora_get_adapter_name(); adapter != nullptr && adapter[0] != '\0') {
         ImGui::Text("GPU: %s", adapter);
+    }
+    ImGui::Separator();
+    if (ui::Toggle("Mix audio on a worker thread", &g_audioMixWorker)) {
+        // Applies immediately: SetMixWorkerEnabled joins any in-flight mix
+        // before switching, so the change never lands mid-frame.
+        AxDspHle::SetMixWorkerEnabled(g_audioMixWorker);
+        RuntimeConfigFile::SetAudioMixWorker(g_audioMixWorker);
+    }
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip(
+            TR("Runs the AX/DSP voice mix off the game thread. Turn this off if you "
+            "suspect an audio problem; the mix then runs inline as it used to."));
     }
 }
 
@@ -1161,7 +1824,17 @@ void DrawShaderCompilationStatus() {
                                         ImGuiWindowFlags_NoSavedSettings;
     if (ImGui::Begin("Shader Compilation Status", nullptr, kFlags)) {
         ImGui::SetWindowFontScale(0.85f);
-        ImGui::Text("%u shader%s compiling", queuedPipelines, queuedPipelines == 1 ? "" : "s");
+        // At start-up the queue is last session's pipelines being rebuilt, mostly straight from the
+        // shader cache; "compiling" there read as the cache not working.
+        if (aurora_is_pipeline_prewarm_active()) {
+            ImGui::Text(TR("Loading saved shaders: %u left"), queuedPipelines);
+        } else {
+            if (queuedPipelines == 1) {
+                ImGui::TextUnformatted(TR("1 shader compiling"));
+            } else {
+                ImGui::Text(TR("%u shaders compiling"), queuedPipelines);
+            }
+        }
     }
     ImGui::End();
     ImGui::PopStyleVar();
@@ -1322,15 +1995,7 @@ void AutoConfigureNewAndroidControllersIfPresent() {
         // which send SDL_GAMEPAD_BUTTON_LEFT/RIGHT_SHOULDER (this preset's "left_shoulder"/
         // "right_shoulder"), not an analog trigger axis - and matches a real Switch Pro
         // Controller's physical wiring, so the same preset is correct for both.
-        for (size_t i = 0; i < kControllerButtons.size(); ++i) {
-            if (const NativeButtonItem* native = FindNativeButton(kClassicProPreset[i])) {
-                PADSetButtonMapping(targetPort,
-                                     PADButtonMapping{native->nativeButton, kControllerButtons[i].padButton});
-                PADSetAltButtonMapping(
-                    targetPort, PADButtonMapping{PAD_NATIVE_BUTTON_INVALID, kControllerButtons[i].padButton});
-                RuntimeConfigFile::SetControllerButton(i, kClassicProPreset[i]);
-            }
-        }
+        ApplyPreset(targetPort, kClassicProPreset);
         PADSerializeMappings();
         if (index < g_androidControllersAutoConfigured.size()) {
             g_androidControllersAutoConfigured.set(index);
@@ -1341,32 +2006,13 @@ void AutoConfigureNewAndroidControllersIfPresent() {
 }
 #endif  // __ANDROID__
 
-#if defined(__ANDROID__) || defined(__SWITCH__)
-// Touch-friendly replacement for DrawTopBar() below - a top menu bar with hover-opened dropdowns
-// is a desktop/mouse pattern that doesn't translate well to touch (small hit targets, no hover).
-// Reuses DrawGraphicsSettings()/DrawControllerSettings()/DrawAudioSettings() as-is for content -
-// only the outer navigation changes, to avoid re-deriving already-working settings logic.
-// Requested directly: "the settings that already appear when you press the settings button but in
-// the sidebar, cleaner."
-// One full-width, left-aligned row in the root list - label plus an optional trailing glyph
-// (">" for a row that drills into a sub-page, nothing for a plain action). Matches KartPad's own
-// Android sidebar layout (icon+label+chevron rows in a flat scrollable list), which is what was
-// actually requested after seeing a screenshot of it, rather than the tabbed layout this replaces.
-bool DrawSidebarRow(const char* label, const char* trailing = ">") {
-    const float rowHeight = 56.0f;
-    const ImVec2 rowSize(ImGui::GetContentRegionAvail().x, rowHeight);
-    const bool clicked = ImGui::Button((std::string(label) + "##Row").c_str(), rowSize);
-    if (trailing && trailing[0] != '\0') {
-        const float trailingWidth = ImGui::CalcTextSize(trailing).x;
-        const ImVec2 rowMin = ImGui::GetItemRectMin();
-        const ImVec2 rowMax = ImGui::GetItemRectMax();
-        ImGui::GetWindowDrawList()->AddText(
-            ImVec2(rowMax.x - trailingWidth - 16.0f, (rowMin.y + rowMax.y) * 0.5f - ImGui::GetTextLineHeight() * 0.5f),
-            ImGui::GetColorU32(ImGuiCol_TextDisabled), trailing);
-    }
-    return clicked;
-}
-
+// The settings drawer (remaster, 2026-10-24; replaces the root-list sidebar). It slides in from
+// the right over about two fifths of the screen, so the race stays in view; in vertical mode it is a
+// sheet over the bottom half, where the touch buttons sit. Pages are tabs across the top: tapped on a
+// phone, L / R on a controller (the Switch design the user approved, with A / B / + hints at the
+// bottom). Every setting writes Config.toml the moment it changes, so there is no Save button.
+// Music is a page on Switch and PC; the phone has no folder to put music in (and the user did not
+// want it there).
 static bool g_sidebarWasVisible = false;
 
 // Lets a finger drag the current (child) window's content up and down from anywhere on it, the
@@ -1416,156 +2062,472 @@ void ScrollCurrentWindowByTouchDrag() {
     }
 }
 
-void DrawAndroidSidebar() {
+enum class DrawerPage { Display, Controls, Sound, Music, Advanced };
+
+struct DrawerTab {
+    DrawerPage page;
+    const char* label;
+};
+
+constexpr DrawerTab kDrawerTabs[] = {
+    {DrawerPage::Display, "Display"},
+    {DrawerPage::Controls, "Controls"},
+    {DrawerPage::Sound, "Sound"},
+#if !defined(__ANDROID__)
+    {DrawerPage::Music, "Music"},
+#endif
+    {DrawerPage::Advanced, "Advanced"},
+};
+constexpr int kDrawerTabCount = static_cast<int>(std::size(kDrawerTabs));
+
+// A round button-prompt badge ("A", "B", "+", "L", "R") in the Switch's style.
+void HintBadge(const char* key) {
+    const float fs = ImGui::GetFontSize();
+    const ImVec2 textSize = ImGui::CalcTextSize(key);
+    const float height = fs * 1.6f;
+    const float width = std::max(height, textSize.x + fs * 0.9f);
+    const ImVec2 min = ImGui::GetCursorScreenPos();
+    ImGui::Dummy(ImVec2(width, height));
+    ImDrawList* draw = ImGui::GetWindowDrawList();
+    draw->AddRectFilled(min, ImVec2(min.x + width, min.y + height), ImGui::GetColorU32(ImVec4(0.91f, 0.93f, 0.96f, 1.0f)),
+                        height * 0.5f);
+    draw->AddText(ImVec2(min.x + (width - textSize.x) * 0.5f, min.y + (height - textSize.y) * 0.5f),
+                  ImGui::GetColorU32(ui::kPanel), key);
+}
+
+void DrawerPageContent(DrawerPage page) {
+    switch (page) {
+    case DrawerPage::Display:
+        DrawLanguageSetting();
+        DrawResolutionSettings();
+        DrawGraphicsSettings();
+        // Texture packs are managed from the launcher only: its file picker is a separate Activity,
+        // which backgrounds this live session's GPU surface (mid-race that lost the Vulkan surface
+        // and crashed, confirmed on-device).
+#if defined(__ANDROID__)
+        ImGui::Spacing();
+        ImGui::TextDisabled(TR("Texture packs are managed from the launcher screen."));
+#endif
+        break;
+    case DrawerPage::Controls:
+        DrawControllerSettings();
+#if defined(__SWITCH__)
+        DrawMotionSteeringSettings();
+#endif
+#if defined(__ANDROID__)
+        ui::Section("Touch and motion");
+        if (ui::LinkRow("Edit touch layout", "Move, resize or hide the on-screen buttons")) {
+            // The editor and the dialog below are Kotlin views, not ImGui: close the drawer first so
+            // it does not sit on top of them and take their touches.
+            SetTopBarVisible(false);
+            AndroidStartTouchLayoutEdit();
+        }
+        if (ui::LinkRow("Motion steering", "Tilt to steer, shake to trick")) {
+            SetTopBarVisible(false);
+            AndroidShowMotionSteeringDialog();
+        }
+#endif
+        break;
+    case DrawerPage::Sound:
+        DrawAudioSettings();
+        break;
+    case DrawerPage::Music:
+        DrawMusicPlayer();
+        break;
+    case DrawerPage::Advanced:
+        DrawAdvancedSettings();
+        break;
+    }
+}
+
+void DrawSettingsDrawer() {
     if (!g_topBarVisible) {
         g_sidebarWasVisible = false;
         return;
     }
+    static int tab = 0;
+    static bool focusContent = false;
+    const ImGuiIO& io = ImGui::GetIO();
+#if defined(__SWITCH__)
+    // See ForwardGamepadToImGui: slow frames while the menu is open.
+    {
+        static Uint64 lastNs = 0;
+        const Uint64 nowNs = SDL_GetTicksNS();
+        if (g_sidebarWasVisible && lastNs != 0 && nowNs - lastNs >= 80000000u) {
+            std::printf("[menu] %llu ms between menu frames (page %d)\n",
+                        static_cast<unsigned long long>((nowNs - lastNs) / 1000000u), tab);
+        }
+        lastNs = nowNs;
+    }
+#endif
+    const bool portrait = io.DisplaySize.y > io.DisplaySize.x;
+    ui::Theme theme;
+    const float fs = ImGui::GetFontSize();
 
-    ImGuiIO& io = ImGui::GetIO();
-    // ~42% of screen width, matching KartPad's own Android sidebar proportions (measured directly
-    // from a screenshot of it, at the user's request to look at how it actually does this).
-    // Deliberately reaches into where the touch R/X/Y/A/B buttons normally sit; those are hidden
-    // for as long as the sidebar is open (TouchControlsOverlay.setSettingsOpen) rather than trying
-    // to squeeze around them, since gameplay input is already blocked while it's up.
-    const float sidebarWidth = io.DisplaySize.x * 0.42f;
     // Controller navigation only moves inside the focused window: take focus when the panel opens.
     if (!g_sidebarWasVisible) {
         ImGui::SetNextWindowFocus();
+        focusContent = true;
     }
     g_sidebarWasVisible = true;
-    ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x, 0.0f), ImGuiCond_Always, ImVec2(1.0f, 0.0f));
-    ImGui::SetNextWindowSize(ImVec2(sidebarWidth, io.DisplaySize.y), ImGuiCond_Always);
-    ImGui::SetNextWindowBgAlpha(0.94f);
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 12.0f);
+    if (portrait) {
+        ImGui::SetNextWindowPos(ImVec2(0.0f, io.DisplaySize.y), ImGuiCond_Always, ImVec2(0.0f, 1.0f));
+        ImGui::SetNextWindowSize(ImVec2(io.DisplaySize.x, io.DisplaySize.y * 0.56f), ImGuiCond_Always);
+    } else {
+        const float width = std::clamp(io.DisplaySize.x * 0.40f, fs * 26.0f, io.DisplaySize.x * 0.62f);
+        ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x, 0.0f), ImGuiCond_Always, ImVec2(1.0f, 0.0f));
+        ImGui::SetNextWindowSize(ImVec2(width, io.DisplaySize.y), ImGuiCond_Always);
+    }
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, portrait ? fs * 1.2f : 0.0f);
     constexpr ImGuiWindowFlags kFlags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
                                          ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoCollapse |
                                          ImGuiWindowFlags_NoResize;
-    if (!ImGui::Begin("Settings##AndroidSidebar", nullptr, kFlags)) {
+    const bool open = ImGui::Begin("Settings##Drawer", nullptr, kFlags);
+    ImGui::PopStyleVar();
+    if (!open) {
         ImGui::End();
-        ImGui::PopStyleVar();
         return;
     }
 
-    enum class SidebarPage { Root, Display, Controller, Audio, Music };
-    static SidebarPage page = SidebarPage::Root;
+#if !defined(__ANDROID__) && !defined(__SWITCH__)
+    // TEMP-DRAWER: MKW_TEST_SETTINGS_TAB_EVERY=<frames> steps through the pages, for captures.
+    static const long long tabEvery = std::getenv("MKW_TEST_SETTINGS_TAB_EVERY")
+                                          ? std::atoll(std::getenv("MKW_TEST_SETTINGS_TAB_EVERY"))
+                                          : 0;
+    if (tabEvery > 0) {
+        tab = static_cast<int>((g_presentedFrame / static_cast<uint64_t>(tabEvery)) % kDrawerTabCount);
+    } else if (const char* fixed = std::getenv("MKW_TEST_SETTINGS_TAB")) {
+        tab = std::atoi(fixed) % kDrawerTabCount;
+    }
+#endif
+    // L / R change page, B (with nothing being edited and no list open) or + closes.
+    const bool popupOpen = ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId);
+    if (!popupOpen && !ImGui::IsAnyItemActive()) {
+        if (ImGui::IsKeyPressed(ImGuiKey_GamepadL1, false)) {
+            tab = (tab + kDrawerTabCount - 1) % kDrawerTabCount;
+            focusContent = true;
+        }
+        if (ImGui::IsKeyPressed(ImGuiKey_GamepadR1, false)) {
+            tab = (tab + 1) % kDrawerTabCount;
+            focusContent = true;
+        }
+        if (ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false) || ImGui::IsKeyPressed(ImGuiKey_GamepadStart, false)) {
+            SetTopBarVisible(false);
+        }
+    }
 
-    ImGui::SetWindowFontScale(1.15f);
-    ImGui::TextUnformatted(page == SidebarPage::Root ? "Settings"
-                            : page == SidebarPage::Display ? "Display"
-                            : page == SidebarPage::Controller ? "Controller"
-                            : page == SidebarPage::Music ? "Music player"
-                                                          : "Audio");
-    const float closeWidth = ImGui::CalcTextSize("Close").x + ImGui::GetStyle().FramePadding.x * 2.0f + 16.0f;
-    ImGui::SameLine(ImGui::GetContentRegionMax().x - closeWidth);
-    if (ImGui::Button("Close", ImVec2(closeWidth, 0.0f))) {
+    // Tabs: the current one lifted and underlined.
+#if defined(__SWITCH__)
+    HintBadge("L");
+    ImGui::SameLine();
+#endif
+    // L / R switch pages, so the D-pad focus never lands on the tabs or the close button.
+    ImGui::PushItemFlag(ImGuiItemFlags_NoNav, true);
+    for (int i = 0; i < kDrawerTabCount; ++i) {
+        const bool selected = i == tab;
+        const char* tabLabel = TR(kDrawerTabs[i].label);
+        const ImVec2 textSize = ImGui::CalcTextSize(tabLabel);
+        const ImVec2 size(textSize.x + fs * 1.2f, fs * 2.2f);
+        ImGui::PushID(i);
+        if (ImGui::InvisibleButton("tab", size) && !selected) {
+            tab = i;
+            focusContent = true;
+        }
+        ImGui::PopID();
+        const ImVec2 min = ImGui::GetItemRectMin();
+        const ImVec2 max = ImGui::GetItemRectMax();
+        ImDrawList* draw = ImGui::GetWindowDrawList();
+        if (selected) {
+            draw->AddRectFilled(min, max, ImGui::GetColorU32(ui::kRow), fs * 0.5f);
+            draw->AddRectFilled(ImVec2(min.x + fs * 0.4f, max.y - fs * 0.18f), ImVec2(max.x - fs * 0.4f, max.y),
+                                ImGui::GetColorU32(ui::kFocus), fs * 0.1f);
+        }
+        draw->AddText(ImVec2(min.x + (size.x - textSize.x) * 0.5f, min.y + (size.y - textSize.y) * 0.5f),
+                      ImGui::GetColorU32(selected ? ui::kText : ui::kMuted), tabLabel);
+        ImGui::SameLine(0.0f, fs * 0.2f);
+    }
+#if defined(__SWITCH__)
+    HintBadge("R");
+#else
+    const float closeSize = fs * 2.2f;
+    ImGui::SameLine(ImGui::GetContentRegionMax().x - closeSize);
+    if (ui::Button("X##CloseDrawer", ImVec2(closeSize, closeSize))) {
         SetTopBarVisible(false);
     }
-    ImGui::SetWindowFontScale(1.0f);
+#endif
+    ImGui::PopItemFlag();
     ImGui::Separator();
-    ImGui::Spacing();
 
-    ImGui::BeginChild("SidebarPageContent", ImVec2(0.0f, 0.0f), false);
-    if (page == SidebarPage::Root) {
-        if (DrawSidebarRow("Display")) {
-            page = SidebarPage::Display;
-        }
-        if (DrawSidebarRow("Controller")) {
-            page = SidebarPage::Controller;
-        }
-        if (DrawSidebarRow("Audio")) {
-            page = SidebarPage::Audio;
-        }
+    // The page, scrolled by finger drag or by moving the focus with a controller.
 #if defined(__SWITCH__)
-        // Android keeps its files where the player cannot reach them, so there is no folder to
-        // drop music into there yet.
-        if (DrawSidebarRow("Music player")) {
-            page = SidebarPage::Music;
-        }
+    const float footerHeight = fs * 2.6f;
+#else
+    const float footerHeight = fs * 3.6f;
 #endif
-        ImGui::Separator();
-        ImGui::Spacing();
-        // Every slider/checkbox on every page already writes straight to Config.toml the instant
-        // it changes (see e.g. DrawAudioSettings' RuntimeConfigFile::Set* calls) - there is
-        // nothing this button actually needs to commit. It exists anyway, requested directly
-        // while testing, as an explicit confirmation point rather than trusting that silently.
-        static Clock::time_point savedConfirmationUntil{};
-        if (ImGui::Button("Save Settings", ImVec2(-1.0f, 52.0f))) {
-            savedConfirmationUntil = Clock::now() + std::chrono::seconds(2);
-        }
-        if (Clock::now() < savedConfirmationUntil) {
-            if (RuntimeConfigFile::LastSettingWriteSucceeded()) {
-                ImGui::TextColored(ImVec4(0.4f, 0.9f, 0.5f, 1.0f), "Settings saved.");
-            } else {
-                ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), "Could not save settings (see stderr.txt).");
-            }
-        }
-    } else {
-        if (DrawSidebarRow("Back to Settings", "<")) {
-            page = SidebarPage::Root;
-        }
-        ImGui::Separator();
-        ImGui::Spacing();
-        switch (page) {
-        case SidebarPage::Display:
-            DrawResolutionSettings();
-            DrawGraphicsSettings();
-            ImGui::Separator();
-            ImGui::Spacing();
-            // Texture pack import/management deliberately does NOT live here - it used to have a
-            // button on this page that opened Kotlin's ModManager dialog, but that dialog
-            // launches Android's system file picker as a separate Activity, which backgrounds this
-            // live game session's GPU surface. Confirmed directly on-device: doing that mid-race
-            // lost the WebGPU/Vulkan surface ("QueuePresent failed with VK_ERROR_SURFACE_LOST_KHR")
-            // and crashed. No such surface exists yet on the launcher screen (ModePickerActivity),
-            // so that's the only place it's safe - same reasoning as why Retro Rewind's own install
-            // flow only ever runs from there too.
-#if defined(__ANDROID__)
-            ImGui::TextWrapped(
-                "Manage texture packs from the launcher screen (before starting a race).");
-#endif
-            break;
-        case SidebarPage::Controller:
-            DrawControllerSettings();
-            ImGui::Separator();
-            ImGui::Spacing();
-#if defined(__SWITCH__)
-            DrawMotionSteeringSettings();
-#endif
-#if defined(__ANDROID__)
-            if (ImGui::Button("Edit Touch Layout", ImVec2(-1.0f, 48.0f))) {
-                // Editing happens in Kotlin's TouchControlsOverlay, not this ImGui panel - close
-                // the sidebar first so it isn't sitting on top of (and eating touches meant for)
-                // the layout editor that's about to appear.
-                SetTopBarVisible(false);
-                AndroidStartTouchLayoutEdit();
-            }
-            if (ImGui::Button("Motion Steering", ImVec2(-1.0f, 48.0f))) {
-                // Same reasoning as Edit Touch Layout above - the dialog is a real Kotlin
-                // AlertDialog, not an ImGui popup, so get the sidebar out of the way first.
-                SetTopBarVisible(false);
-                AndroidShowMotionSteeringDialog();
-            }
-#endif
-            break;
-        case SidebarPage::Audio:
-            DrawAudioSettings();
-            break;
-        case SidebarPage::Music:
-            DrawMusicPlayer();
-            break;
-        case SidebarPage::Root:
-            break;
-        }
+    ImGui::BeginChild("DrawerPage", ImVec2(0.0f, -footerHeight), ImGuiChildFlags_NavFlattened);
+    const bool pageChanged = focusContent;
+    if (pageChanged) {
+        ImGui::SetScrollY(0.0f);
+        focusContent = false;
     }
+    // Notes longer than the panel wrap at its edge instead of running off it.
+    ImGui::PushTextWrapPos(0.0f);
+    DrawerPageContent(kDrawerTabs[tab].page);
+    ImGui::PopTextWrapPos();
+    ImGui::Dummy(ImVec2(0.0f, fs * 0.5f));
     ScrollCurrentWindowByTouchDrag();
     ImGui::EndChild();
+    // A new page puts the controller focus on its first setting. (SetKeyboardFocusHere would open a
+    // slider's typing box instead.)
+    if (pageChanged) {
+        ImGui::NavInitWindow(ImGui::GetCurrentWindow(), true);
+    }
 
+    ImGui::Separator();
+#if defined(__SWITCH__)
+    const auto hint = [&](const char* key, const char* text) {
+        HintBadge(key);
+        ImGui::SameLine(0.0f, fs * 0.4f);
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextDisabled("%s", TR(text));
+        ImGui::SameLine(0.0f, fs * 1.4f);
+    };
+    hint("A", "Change");
+    hint("B", "Close");
+    hint("+", "Resume");
+    ImGui::NewLine();
+#else
+    ImGui::PushStyleColor(ImGuiCol_Button, ui::kAccent);
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.58f, 0.90f, 0.42f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.42f, 0.76f, 0.28f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.04f, 0.10f, 0.06f, 1.0f));
+    if (ui::Button("Resume", ImVec2(-1.0f, fs * 2.6f))) {
+        SetTopBarVisible(false);
+    }
+    ImGui::PopStyleColor(4);
+#endif
     ImGui::End();
-    ImGui::PopStyleVar();
 }
 
-#endif  // __ANDROID__
+// ---- Quick panel -------------------------------------------------------------------------------
+// Opened with Minus on Switch, F9 on PC and a pull down from the top on the phone. A strip of tiles for
+// the settings people change in the middle of a race; "All settings" opens the full menu. The race keeps
+// running underneath, but the game gets no input while it is open (the same as the full menu).
+void SetQuickPanelVisible(bool visible) {
+    if (visible && g_topBarVisible) {
+        return;  // the full menu is open
+    }
+    if (g_quickPanelVisible == visible) {
+        return;
+    }
+    g_quickPanelVisible = visible;
+#if defined(__SWITCH__)
+    AuroraSwitchSetMenuOpen(visible ? 1 : 0);  // tilt and shake stay out of the panel's navigation
+#endif
+#if defined(__ANDROID__)
+    AndroidNotifySettingsVisibilityChanged(visible);
+#endif
+}
+
+struct QuickTile {
+    const char* label;
+    std::string status;
+    bool on = false;
+    bool enabled = true;
+    std::function<void()> flip;
+};
+
+void DrawQuickPanel() {
+    if (!g_quickPanelVisible) {
+        g_quickPanelWasVisible = false;
+        return;
+    }
+    const ImGuiIO& io = ImGui::GetIO();
+    const bool portrait = io.DisplaySize.y > io.DisplaySize.x;
+    const float fs = ImGui::GetFontSize();
+    ui::Theme theme;
+
+    std::vector<QuickTile> tiles;
+    tiles.push_back({"Vibration", PADGetRumbleEnabled() != FALSE ? "On" : "Off", PADGetRumbleEnabled() != FALSE, true, [] {
+                         PADSetRumbleEnabled(PADGetRumbleEnabled() != FALSE ? FALSE : TRUE);
+                         SaveRumbleSetting();
+                     }});
+    tiles.push_back({"Show FPS", g_showFps ? "On" : "Off", g_showFps, true, [] {
+                         g_showFps = !g_showFps;
+                         RuntimeConfigFile::SetShowFps(g_showFps);
+                     }});
+#if defined(__SWITCH__)
+    LoadMotionSteering();
+    tiles.push_back({"Tilt steer", g_motionSteering.players[0] ? "On" : "Off", g_motionSteering.players[0], true, [] {
+                         g_motionSteering.players[0] = !g_motionSteering.players[0];
+                         ApplyMotionSteering(true);
+                     }});
+    tiles.push_back({"Shake trick", g_motionSteering.shake[0] ? "On" : "Off", g_motionSteering.shake[0], true, [] {
+                         g_motionSteering.shake[0] = !g_motionSteering.shake[0];
+                         ApplyShakeToTrick(true);
+                     }});
+    {
+        const MusicPlayer::Status music = MusicPlayer::GetStatus();
+        tiles.push_back({"Music", music.loaded ? (music.playing ? "Playing" : "Paused") : "No track", music.playing,
+                         music.loaded, [] { MusicPlayer::TogglePause(); }});
+    }
+#endif
+#if defined(__ANDROID__)
+    tiles.push_back({"Touch buttons", g_androidTouchControlsVisibleCache ? "Shown" : "Hidden",
+                     g_androidTouchControlsVisibleCache, true, [] {
+                         g_androidTouchControlsVisibleCache = !g_androidTouchControlsVisibleCache;
+                         AndroidSetTouchOverlayVisible(g_androidTouchControlsVisibleCache);
+                     }});
+    tiles.push_back({"Motion", ">", false, true, [] {
+                         SetQuickPanelVisible(false);
+                         AndroidShowMotionSteeringDialog();
+                     }});
+#endif
+    tiles.push_back({"All settings", ">", false, true, [] {
+                         SetQuickPanelVisible(false);
+                         SetTopBarVisible(true);
+                     }});
+
+    const int count = static_cast<int>(tiles.size());
+    const float margin = fs * 0.8f;
+    const float pad = fs * 0.9f;
+    const int cols = portrait ? 3 : count;
+    const int rows = (count + cols - 1) / cols;
+    const float maxWidth = io.DisplaySize.x - 2.0f * margin;
+    const float gap = fs * 0.5f;
+    float tileW = std::min(fs * 8.5f, (maxWidth - 2.0f * pad - static_cast<float>(cols - 1) * gap) / static_cast<float>(cols));
+    tileW = std::max(tileW, fs * 4.0f);
+    const float tileH = fs * 4.2f;
+    const float windowW = 2.0f * pad + static_cast<float>(cols) * tileW + static_cast<float>(cols - 1) * gap;
+    const float headerH = fs * 1.8f;
+    const float footerH = fs * 2.4f;
+    const float windowH = pad + headerH + static_cast<float>(rows) * (tileH + gap) + footerH + pad;
+
+    if (!g_quickPanelWasVisible) {
+        ImGui::SetNextWindowFocus();
+    }
+    ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x * 0.5f, margin), ImGuiCond_Always, ImVec2(0.5f, 0.0f));
+    ImGui::SetNextWindowSize(ImVec2(windowW, windowH), ImGuiCond_Always);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, fs * 1.2f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(pad, pad));
+    constexpr ImGuiWindowFlags kFlags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
+                                         ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoCollapse |
+                                         ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoScrollbar;
+    const bool open = ImGui::Begin("Quick settings##Panel", nullptr, kFlags);
+    ImGui::PopStyleVar(2);
+    if (!open) {
+        ImGui::End();
+        return;
+    }
+
+    // Close: B or + on a controller, or a tap anywhere outside the panel.
+    bool close = false;
+    if (g_quickPanelWasVisible && !ImGui::IsAnyItemActive()) {
+        close |= ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false) || ImGui::IsKeyPressed(ImGuiKey_GamepadStart, false);
+    }
+    if (g_quickPanelWasVisible && ImGui::IsMouseClicked(ImGuiMouseButton_Left) &&
+        !ImGui::IsWindowHovered(ImGuiHoveredFlags_RootAndChildWindows | ImGuiHoveredFlags_AllowWhenBlockedByActiveItem)) {
+        close = true;
+    }
+
+    // Header: the title, and the frame rate at the right.
+    {
+        const ImVec2 min = ImGui::GetCursorScreenPos();
+        ImDrawList* draw = ImGui::GetWindowDrawList();
+        draw->AddText(ImVec2(min.x, min.y + fs * 0.1f), ImGui::GetColorU32(ui::kMuted), TR("Quick settings"));
+        AuroraPresentTiming timing{};
+        aurora_get_present_timing(&timing);
+        if (timing.sampleCount != 0) {
+            char fps[32];
+            std::snprintf(fps, sizeof(fps), "%.0f FPS", timing.framesPerSecond);
+            const ImVec2 size = ImGui::CalcTextSize(fps);
+            draw->AddText(ImVec2(min.x + windowW - 2.0f * pad - size.x, min.y + fs * 0.1f), ImGui::GetColorU32(ui::kMuted), fps);
+        }
+        ImGui::Dummy(ImVec2(0.0f, headerH));
+    }
+
+    // Tiles.
+    const ImVec2 gridOrigin = ImGui::GetCursorPos();
+    for (int i = 0; i < count; ++i) {
+        QuickTile& tile = tiles[static_cast<size_t>(i)];
+        const int row = i / cols;
+        const int col = i % cols;
+        ImGui::SetCursorPos(ImVec2(gridOrigin.x + static_cast<float>(col) * (tileW + gap),
+                                   gridOrigin.y + static_cast<float>(row) * (tileH + gap)));
+        ImGui::PushID(i);
+        ImGui::BeginDisabled(!tile.enabled);
+        const bool pressed = ImGui::InvisibleButton("tile", ImVec2(tileW, tileH), ImGuiButtonFlags_EnableNav);
+        ImGui::EndDisabled();
+        const ImVec2 min = ImGui::GetItemRectMin();
+        const ImVec2 max = ImGui::GetItemRectMax();
+        ImDrawList* draw = ImGui::GetWindowDrawList();
+        ImVec4 bg = tile.on ? ImVec4(0.133f, 0.220f, 0.110f, 1.0f) : ui::kRow;
+        if (ImGui::IsItemActive()) {
+            bg = ui::kRowActive;
+        } else if (ImGui::IsItemHovered() || ImGui::IsItemFocused()) {
+            bg = tile.on ? ImVec4(0.160f, 0.270f, 0.130f, 1.0f) : ui::kRowHover;
+        }
+        draw->AddRectFilled(min, max, ImGui::GetColorU32(bg), fs * 0.8f);
+        if (ImGui::IsItemFocused()) {
+            draw->AddRect(min, max, ImGui::GetColorU32(ui::kFocus), fs * 0.8f, 0, 2.5f);
+        }
+        const ImU32 labelColor = ImGui::GetColorU32(tile.enabled ? (tile.on ? ui::kText : ui::kMuted) : ImVec4(0.4f, 0.43f, 0.55f, 1.0f));
+        // A long translation shrinks to fit its tile (down to about half size) instead of running into the next one.
+        const auto drawCentered = [&](const char* text, float size, float y, ImU32 color) {
+            ImFont* font = ImGui::GetFont();
+            const float avail = tileW - fs * 0.7f;
+            float drawSize = size;
+            ImVec2 extent = font->CalcTextSizeA(drawSize, FLT_MAX, 0.0f, text);
+            if (extent.x > avail) {
+                drawSize = std::max(size * avail / extent.x, size * 0.5f);
+                extent = font->CalcTextSizeA(drawSize, FLT_MAX, 0.0f, text);
+            }
+            draw->AddText(font, drawSize, ImVec2(min.x + (tileW - extent.x) * 0.5f, y + (size - drawSize) * 0.5f), color, text);
+        };
+        drawCentered(TR(tile.label), fs, min.y + tileH * 0.28f, labelColor);
+        const std::string statusText = TR(tile.status.c_str());
+        drawCentered(statusText.c_str(), fs * 0.85f, min.y + tileH * 0.60f,
+                     ImGui::GetColorU32(tile.on ? ui::kAccent : ui::kMuted));
+        ImGui::PopID();
+        if (pressed && tile.enabled && tile.flip) {
+            tile.flip();
+            if (!g_quickPanelVisible) {
+                ImGui::End();
+                return;  // a tile closed the panel (All settings, Motion)
+            }
+        }
+    }
+    ImGui::SetCursorPos(ImVec2(gridOrigin.x, gridOrigin.y + static_cast<float>(rows) * (tileH + gap)));
+
+    // Footer: the volume slider, or the button hints on Switch.
+#if defined(__SWITCH__)
+    {
+        const auto hint = [&](const char* key, const char* text) {
+            HintBadge(key);
+            ImGui::SameLine(0.0f, fs * 0.4f);
+            ImGui::AlignTextToFramePadding();
+            ImGui::TextDisabled("%s", TR(text));
+            ImGui::SameLine(0.0f, fs * 1.4f);
+        };
+        hint("A", "Flip");
+        hint("B", "Close");
+        ImGui::NewLine();
+    }
+#else
+    if (ui::SliderInt("Volume", &g_audioVolumePercent, 0, 100, "%d%%")) {
+        const float volume = static_cast<float>(g_audioVolumePercent) / 100.0f;
+        AudioBackend::Instance().SetMasterVolume(volume);
+        RuntimeConfigFile::SetAudioVolume(volume);
+    }
+#endif
+    ImGui::End();
+    if (!g_quickPanelWasVisible) {
+        g_quickPanelWasVisible = true;
+    }
+    if (close) {
+        SetQuickPanelVisible(false);
+    }
+}
 
 void DrawTopBar() {
     if (!g_topBarVisible || !ImGui::BeginMainMenuBar()) {
@@ -1595,6 +2557,12 @@ void DrawTopBar() {
 
     if (ImGui::BeginMenu("Graphics")) {
         DrawGraphicsSettings();
+        ImGui::EndMenu();
+    }
+
+    if (ImGui::BeginMenu("Advanced")) {
+        ImGui::Dummy(ImVec2(420.0f, 0.0f));
+        DrawAdvancedSettings();
         ImGui::EndMenu();
     }
 
@@ -1632,7 +2600,57 @@ void DrawTopBar() {
 #if defined(__SWITCH__)
 void ForwardGamepadToImGui(const SDL_Event& event) {
     ImGuiIO& io = ImGui::GetIO();
+    // The user sees "a lot of delay sometimes" in the menu (2026-10-27): log presses that arrive
+    // late, to tell a slow event path from slow menu frames (logged in DrawSettingsDrawer).
+    if (g_topBarVisible && event.type == SDL_EVENT_GAMEPAD_BUTTON_DOWN) {
+        const Uint64 lateMs = (SDL_GetTicksNS() - event.gbutton.timestamp) / 1000000u;
+        if (lateMs >= 80) {
+            std::printf("[menu] button %d reached the menu %llu ms after it was pressed\n",
+                        static_cast<int>(event.gbutton.button), static_cast<unsigned long long>(lateMs));
+        }
+    }
     io.BackendFlags |= ImGuiBackendFlags_HasGamepad;
+    // Every controller drives the menu, merged: a key is down while any controller holds it, a
+    // stick direction is the furthest any controller pushes it. Passing each controller's events
+    // straight through let one controller's "released" cancel another's "held" (with two
+    // connected, ImGui then stopped reading its queue at every such clash and fell behind).
+    struct MenuPad {
+        SDL_JoystickID id = 0;
+        uint32_t buttons = 0;     // bit n = SDL button n
+        float stick[4] = {};      // left, right, up, down
+    };
+    static MenuPad pads[8];
+    const SDL_JoystickID id = event.type == SDL_EVENT_GAMEPAD_AXIS_MOTION ? event.gaxis.which : event.gbutton.which;
+    if (event.type != SDL_EVENT_GAMEPAD_BUTTON_DOWN && event.type != SDL_EVENT_GAMEPAD_BUTTON_UP &&
+        event.type != SDL_EVENT_GAMEPAD_AXIS_MOTION) {
+        if (event.type == SDL_EVENT_GAMEPAD_REMOVED) {
+            for (MenuPad& pad : pads) {
+                if (pad.id == event.gdevice.which) {
+                    pad = MenuPad{};  // its held keys are let go below on the next event
+                }
+            }
+        }
+        return;
+    }
+    MenuPad* pad = nullptr;
+    for (MenuPad& candidate : pads) {
+        if (candidate.id == id) {
+            pad = &candidate;
+            break;
+        }
+    }
+    if (pad == nullptr) {
+        for (MenuPad& candidate : pads) {
+            if (candidate.id == 0) {
+                candidate.id = id;
+                pad = &candidate;
+                break;
+            }
+        }
+    }
+    if (pad == nullptr) {
+        return;
+    }
     if (event.type == SDL_EVENT_GAMEPAD_BUTTON_DOWN || event.type == SDL_EVENT_GAMEPAD_BUTTON_UP) {
         ImGuiKey key = ImGuiKey_None;
         switch (event.gbutton.button) {
@@ -1646,23 +2664,41 @@ void ForwardGamepadToImGui(const SDL_Event& event) {
         case SDL_GAMEPAD_BUTTON_NORTH: key = ImGuiKey_GamepadFaceUp; break;
         case SDL_GAMEPAD_BUTTON_LEFT_SHOULDER: key = ImGuiKey_GamepadL1; break;
         case SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER: key = ImGuiKey_GamepadR1; break;
+        case SDL_GAMEPAD_BUTTON_START: key = ImGuiKey_GamepadStart; break;  // +: resume
         default: break;
         }
-        if (key != ImGuiKey_None) {
-            io.AddKeyEvent(key, event.type == SDL_EVENT_GAMEPAD_BUTTON_DOWN);
+        if (key == ImGuiKey_None || event.gbutton.button >= 32) {
+            return;
         }
-    } else if (event.type == SDL_EVENT_GAMEPAD_AXIS_MOTION &&
-               (event.gaxis.axis == SDL_GAMEPAD_AXIS_LEFTX || event.gaxis.axis == SDL_GAMEPAD_AXIS_LEFTY)) {
+        const uint32_t bit = 1u << event.gbutton.button;
+        if (event.type == SDL_EVENT_GAMEPAD_BUTTON_DOWN) {
+            pad->buttons |= bit;
+        } else {
+            pad->buttons &= ~bit;
+        }
+        bool down = false;
+        for (const MenuPad& other : pads) {
+            down |= other.id != 0 && (other.buttons & bit) != 0;
+        }
+        io.AddKeyEvent(key, down);  // ImGui drops it when nothing changed
+    } else if (event.gaxis.axis == SDL_GAMEPAD_AXIS_LEFTX || event.gaxis.axis == SDL_GAMEPAD_AXIS_LEFTY) {
         constexpr float kDeadZone = 8000.0f;
         const float v = static_cast<float>(event.gaxis.value);
         const float neg = v < -kDeadZone ? std::min(1.0f, (-v - kDeadZone) / (32767.0f - kDeadZone)) : 0.0f;
         const float pos = v > kDeadZone ? std::min(1.0f, (v - kDeadZone) / (32767.0f - kDeadZone)) : 0.0f;
-        if (event.gaxis.axis == SDL_GAMEPAD_AXIS_LEFTX) {
-            io.AddKeyAnalogEvent(ImGuiKey_GamepadLStickLeft, neg > 0.0f, neg);
-            io.AddKeyAnalogEvent(ImGuiKey_GamepadLStickRight, pos > 0.0f, pos);
-        } else {
-            io.AddKeyAnalogEvent(ImGuiKey_GamepadLStickUp, neg > 0.0f, neg);
-            io.AddKeyAnalogEvent(ImGuiKey_GamepadLStickDown, pos > 0.0f, pos);
+        const int first = event.gaxis.axis == SDL_GAMEPAD_AXIS_LEFTX ? 0 : 2;
+        pad->stick[first] = neg;
+        pad->stick[first + 1] = pos;
+        static constexpr ImGuiKey kKeys[4] = {ImGuiKey_GamepadLStickLeft, ImGuiKey_GamepadLStickRight,
+                                              ImGuiKey_GamepadLStickUp, ImGuiKey_GamepadLStickDown};
+        for (int i = first; i < first + 2; ++i) {
+            float merged = 0.0f;
+            for (const MenuPad& other : pads) {
+                if (other.id != 0) {
+                    merged = std::max(merged, other.stick[i]);
+                }
+            }
+            io.AddKeyAnalogEvent(kKeys[i], merged > 0.0f, merged);
         }
     }
 }
@@ -1727,6 +2763,9 @@ void PersistDisplayModeIfChanged() {
 } // namespace
 
 void InitializeRuntimeSettings() noexcept {
+    i18n::SetLanguage(i18n::SavedChoice());
+    LoadPictureSettings();  // saved picture settings apply without opening the menu
+    LoadRumbleSetting();
 #if defined(__SWITCH__)
     LoadMotionSteering();  // a saved "tilt to steer" applies without opening the menu
 #endif
@@ -1859,6 +2898,14 @@ void HandleEvents(const AuroraEvent* events) noexcept {
         if (IsToggleKey(ev->sdl, SDL_SCANCODE_F10)) {
             SetTopBarVisible(!g_topBarVisible);
         }
+        if (IsToggleKey(ev->sdl, SDL_SCANCODE_F9)) {
+            SetQuickPanelVisible(!g_quickPanelVisible);
+        }
+        // Minus opens the quick panel on a controller (the Switch has no function keys).
+        if (ev->sdl.type == SDL_EVENT_GAMEPAD_BUTTON_DOWN && ev->sdl.gbutton.button == SDL_GAMEPAD_BUTTON_BACK &&
+            !g_topBarVisible) {
+            SetQuickPanelVisible(!g_quickPanelVisible);
+        }
         // Controller shortcut (the Switch has no F10): click both sticks together.
         if (ev->sdl.type == SDL_EVENT_GAMEPAD_BUTTON_DOWN || ev->sdl.type == SDL_EVENT_GAMEPAD_BUTTON_UP) {
             static bool leftStickHeld = false;
@@ -1898,14 +2945,27 @@ void Draw() noexcept {
     DrawFpsOverlay();
     DrawBackendFallbackNotice();
 #if defined(__ANDROID__) || defined(__SWITCH__)
-    DrawAndroidSidebar();
+    DrawSettingsDrawer();
 #else
-    DrawTopBar();
+    // The PC keeps its menu bar; MKW_SETTINGS_DRAWER=1 shows the phone/Switch drawer instead.
+    static const bool drawer = std::getenv("MKW_SETTINGS_DRAWER") != nullptr;
+    // TEMP-DRAWER: MKW_TEST_SETTINGS_OPEN=<frame> opens it at that frame, for unattended captures.
+    static const long long openAt =
+        std::getenv("MKW_TEST_SETTINGS_OPEN") ? std::atoll(std::getenv("MKW_TEST_SETTINGS_OPEN")) : -1;
+    if (openAt >= 0 && static_cast<long long>(g_presentedFrame) == openAt) {
+        SetTopBarVisible(true);
+    }
+    if (drawer) {
+        DrawSettingsDrawer();
+    } else {
+        DrawTopBar();
+    }
 #endif
+    DrawQuickPanel();
     controller_mapping_wizard::Draw();
     // The wizard captures raw presses; keep them out of the game even when the
     // top bar is hidden mid-setup.
-    PADBlockInput(g_topBarVisible || controller_mapping_wizard::IsActive());
+    PADBlockInput(g_topBarVisible || g_quickPanelVisible || controller_mapping_wizard::IsActive());
     DrawStartupScreen();
 }
 
@@ -1917,6 +2977,12 @@ bool StartupScreenVisible() noexcept {
 
 void ToggleTopBar() noexcept {
     SetTopBarVisible(!g_topBarVisible);
+}
+
+bool OpenQuickPanel() noexcept {
+    const bool wasOpen = g_quickPanelVisible;
+    SetQuickPanelVisible(true);
+    return g_quickPanelVisible && !wasOpen;  // false when the full menu is open or the panel already was
 }
 
 void NotifyStrapInputAccepted() noexcept {

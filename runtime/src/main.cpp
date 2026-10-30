@@ -90,6 +90,10 @@ void StartAndroidPgoRecording();
 
 #include <tracy/Tracy.hpp>
 
+#if defined(__ANDROID__)
+void AndroidInitFonts(const AuroraWindowSize* size);  // android_imgui_fonts.cpp
+#endif
+
 // Defined in `runtime/src/hle/vi.cpp` (used by GX/VI HLE).
 extern std::atomic_bool g_auroraFrameActive;
 extern "C" int g_gxFrameCount;
@@ -251,6 +255,37 @@ extern "C" void SwitchConfigureAudioMixThread() {
         g_switchAudioMixCore.store(core, std::memory_order_relaxed);
     }
     RT_LOGF(RT_TAG_RUNTIME, "AX mix worker prefers core %d (rc 0x%x), priority 0x2D (rc 0x%x)\n", core,
+            static_cast<unsigned>(maskRc), static_cast<unsigned>(prioRc));
+}
+
+// One libnx per-thread slot holds the current guest CPU context (isa/ppc_isa_context.h).
+uint32_t MkwAllocCurrentCpuTlsSlot() noexcept {
+    const s32 slot = threadTlsAlloc(nullptr);
+    if (slot < 0) {
+        // No slot left: nothing sensible can run. The crash log gets this line.
+        SwitchCrashWrite("[switch-crash] no per-thread slot for the guest CPU context\n");
+        std::abort();
+    }
+    return 0x180u + 8u * static_cast<uint32_t>(slot);
+}
+
+// Called by the sound host thread when it starts (runtime/src/hle/audio/sound_core.cpp). The guest
+// thread waits for it between back-to-back audio blocks, so it gets the same treatment as the AX
+// mix worker: preferred on the helper core the GX worker is not pinned to, free to move, 0x2D.
+extern "C" void SwitchConfigureSoundThread() {
+    const int guestCore = g_switchGuestCore.load(std::memory_order_relaxed);
+    u64 processMask = 0;
+    if (guestCore < 0 || R_FAILED(svcGetInfo(&processMask, InfoType_CoreMask, CUR_PROCESS_HANDLE, 0))) {
+        return;
+    }
+    const u64 helperMask = processMask & ~(1ull << static_cast<unsigned>(guestCore));
+    if (helperMask == 0) {
+        return;
+    }
+    const int core = 63 - __builtin_clzll(helperMask);
+    const Result maskRc = svcSetThreadCoreMask(CUR_THREAD_HANDLE, core, helperMask);
+    const Result prioRc = svcSetThreadPriority(CUR_THREAD_HANDLE, 0x2D);
+    RT_LOGF(RT_TAG_RUNTIME, "sound thread prefers core %d (rc 0x%x), priority 0x2D (rc 0x%x)\n", core,
             static_cast<unsigned>(maskRc), static_cast<unsigned>(prioRc));
 }
 
@@ -2563,6 +2598,10 @@ int RuntimeMain(int argc, char** argv) {
 #if defined(__SWITCH__)
         // Switch system fonts for the launcher and the settings panel (runs inside aurora_initialize).
         auroraConfig.imGuiInitCallback = &SwitchLauncherInitFonts;
+#endif
+#if defined(__ANDROID__)
+        // The phone's system fonts for the settings menus (android_imgui_fonts.cpp).
+        auroraConfig.imGuiInitCallback = &AndroidInitFonts;
 #endif
         const AuroraInfo auroraInfo = aurora_initialize(0, nullptr, &auroraConfig);
 #if defined(ANDROID)

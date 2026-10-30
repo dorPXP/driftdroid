@@ -12,6 +12,9 @@
 #include <cstdio>
 #include <cstdlib>
 
+// vi.cpp; the retrace service for a caller in the middle of a translated function.
+void VI_HLE_ProcessRetracesDeferredNoSwitch(int maxToProcess);
+
 namespace {
 uint32_t CanonicalVtxAttr(uint32_t attr) {
     return attr == GX_VA_NBT ? GX_VA_NRM : attr;
@@ -287,7 +290,7 @@ void ServiceDeferredTimingDuringGxWork() {
             // PAL50 uses an OS alarm. Keep both clocks moving while a slow
             // host frame is still being submitted, but defer fiber switches
             // and Aurora work until the native GX call has unwound.
-            VI_HLE_ProcessRetracesDeferred(8);
+            VI_HLE_ProcessRetracesDeferredNoSwitch(8);
             OS_HLE_ProcessAlarmsDeferred(8);
             // Audio blocks come due every 3 ms. Without a pump in the drawing phase they pile up
             // and are then handled back to back at the next idle point, where each one waits for

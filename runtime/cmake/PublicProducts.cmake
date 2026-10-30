@@ -23,6 +23,15 @@ if(EXISTS "${DATA_INIT_BLOB_ASM}")
     set_source_files_properties("${DATA_INIT_BLOB_ASM}" PROPERTIES LANGUAGE ASM SKIP_UNITY_BUILD_INCLUSION ON)
     list(APPEND SOURCES "${DATA_INIT_BLOB_ASM}")
 endif()
+# Game-derived sources compile on their own, outside the runtime's unity batches and its
+# precompiled header: the PC builder (tools/pc-builder) ships the runtime prebuilt and compiles only
+# what the translator made from the player's disc.
+foreach(_mkw_game_source IN ITEMS "${DATA_INIT_FILE}" "${GUEST_SYMBOL_TABLE_FILE}")
+    if(EXISTS "${_mkw_game_source}")
+        set_source_files_properties("${_mkw_game_source}" PROPERTIES
+            SKIP_UNITY_BUILD_INCLUSION ON SKIP_PRECOMPILE_HEADERS ON)
+    endif()
+endforeach()
 list(REMOVE_DUPLICATES SOURCES)
 
 function(mkw_apply_common_compile_options target)

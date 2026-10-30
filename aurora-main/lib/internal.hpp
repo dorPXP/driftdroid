@@ -124,6 +124,8 @@ auto underlying(T value) -> std::underlying_type_t<T> {
 
 #define UNIMPLEMENTED() FATAL("UNIMPLEMENTED: {}", __FUNCTION__)
 
+namespace wgpu { class CommandBuffer; }
+
 namespace aurora {
 extern AuroraConfig g_config;
 extern uint32_t g_sdlCustomEventsStart;
@@ -140,6 +142,8 @@ void wait_for_frame_worker_sealed_quiet() noexcept;
 void service_producer_wait() noexcept;
 bool wait_for_frame_worker_for(std::chrono::microseconds timeout) noexcept;
 std::recursive_mutex& renderer_gpu_mutex() noexcept;
+// Submits under the queue submit lock, for one-off command buffers outside the frame worker.
+void submit_staging_commands(const wgpu::CommandBuffer& commands);
 
 // Pins the calling thread to one frequency tier of an asymmetric (big.LITTLE) SoC - Fast excludes
 // only the single slowest tier (mirrors runtime's PinCallingThreadToFastestCores), Slow is exactly

@@ -359,6 +359,7 @@ void ensure_frame_worker_started() noexcept {
   g_frameWorker.ready.store(true, std::memory_order_release);
   g_frameWorker.prepareAllowed = false;
   g_frameWorker.started = true;
+  webgpu::mark_device_shared();
   g_frameWorker.thread = std::thread(frame_worker_main);
   Log.info("Enabled bounded asynchronous frame submission worker");
 }
@@ -515,6 +516,29 @@ struct PendingFrameCapture {
 
 std::optional<PendingFrameCapture> encode_frame_capture(const wgpu::CommandEncoder& encoder,
                                                         const webgpu::PresentSource& source) {
+#if !defined(__SWITCH__) && !defined(__ANDROID__)
+  // Unattended desktop tests: MKW_TEST_CAPTURE_DIR=<folder> writes the presented frame there every
+  // MKW_TEST_CAPTURE_EVERY_MS (default 2000) as cap_<seconds>.bmp, read straight from the
+  // renderer, never from the screen.
+  {
+    static const char* const dir = std::getenv("MKW_TEST_CAPTURE_DIR");
+    if (dir != nullptr) {
+      static const long long everyMs = [] {
+        const char* value = std::getenv("MKW_TEST_CAPTURE_EVERY_MS");
+        return value != nullptr ? std::max(250ll, std::atoll(value)) : 2000ll;
+      }();
+      static const auto start = std::chrono::steady_clock::now();
+      static long long nextMs = everyMs;
+      const long long elapsed =
+          std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
+      if (elapsed >= nextMs && g_captureFrame.load(std::memory_order_acquire) == UINT32_MAX) {
+        nextMs = elapsed + everyMs;
+        g_captureOutputPath = std::string(dir) + "/cap_" + std::to_string(elapsed / 100) + ".bmp";
+        g_captureFrame.store(gfx::current_frame(), std::memory_order_release);
+      }
+    }
+  }
+#endif
   const uint32_t requestedFrame = g_captureFrame.load(std::memory_order_acquire);
   const uint32_t currentFrame = gfx::current_frame();
   if (requestedFrame == UINT32_MAX || currentFrame < requestedFrame) return std::nullopt;
@@ -527,17 +551,50 @@ std::optional<PendingFrameCapture> encode_frame_capture(const wgpu::CommandEncod
     Log.error("Frame {} capture has no present-source texture", currentFrame);
     return std::nullopt;
   }
-  const bool bgra = source.format == wgpu::TextureFormat::BGRA8Unorm ||
-                    source.format == wgpu::TextureFormat::BGRA8UnormSrgb;
-  const bool rgba = source.format == wgpu::TextureFormat::RGBA8Unorm ||
-                    source.format == wgpu::TextureFormat::RGBA8UnormSrgb;
+#if !defined(__SWITCH__) && !defined(__ANDROID__)
+  // MKW_TEST_CAPTURE_PRESENTED=1: capture after the final screen pass (picture adjustment), drawn
+  // into an offscreen texture, instead of the frame the renderer produced.
+  static const bool capturePresented = std::getenv("MKW_TEST_CAPTURE_PRESENTED") != nullptr;
+  webgpu::PresentSource presented;
+  if (capturePresented) {
+    const wgpu::TextureDescriptor textureDescriptor{
+        .label = "Presented frame capture",
+        .usage = wgpu::TextureUsage::RenderAttachment | wgpu::TextureUsage::CopySrc,
+        .size = source.size,
+        .format = webgpu::g_graphicsConfig.surfaceConfiguration.format,
+    };
+    presented = {source.bindGroup, g_device.CreateTexture(&textureDescriptor), source.size,
+                 webgpu::g_graphicsConfig.surfaceConfiguration.format};
+    const std::array attachments{wgpu::RenderPassColorAttachment{
+        .view = presented.texture.CreateView(),
+        .loadOp = wgpu::LoadOp::Clear,
+        .storeOp = wgpu::StoreOp::Store,
+    }};
+    const wgpu::RenderPassDescriptor passDescriptor{
+        .colorAttachmentCount = attachments.size(),
+        .colorAttachments = attachments.data(),
+    };
+    const auto pass = encoder.BeginRenderPass(&passDescriptor);
+    pass.SetPipeline(webgpu::present_pipeline());
+    pass.SetBindGroup(0, source.bindGroup, 0, nullptr);
+    pass.Draw(3);
+    pass.End();
+  }
+  const webgpu::PresentSource& captured = capturePresented ? presented : source;
+#else
+  const webgpu::PresentSource& captured = source;
+#endif
+  const bool bgra = captured.format == wgpu::TextureFormat::BGRA8Unorm ||
+                    captured.format == wgpu::TextureFormat::BGRA8UnormSrgb;
+  const bool rgba = captured.format == wgpu::TextureFormat::RGBA8Unorm ||
+                    captured.format == wgpu::TextureFormat::RGBA8UnormSrgb;
   if (!bgra && !rgba) {
     Log.error("Frame {} capture does not support texture format {}", currentFrame,
-              magic_enum::enum_name(source.format));
+              magic_enum::enum_name(captured.format));
     return std::nullopt;
   }
-  const uint32_t bytesPerRow = align_to(source.size.width * 4, 256);
-  const uint64_t bufferSize = static_cast<uint64_t>(bytesPerRow) * source.size.height;
+  const uint32_t bytesPerRow = align_to(captured.size.width * 4, 256);
+  const uint64_t bufferSize = static_cast<uint64_t>(bytesPerRow) * captured.size.height;
   const wgpu::BufferDescriptor descriptor{
       .label = "Visual validation frame capture",
       .usage = wgpu::BufferUsage::CopyDst | wgpu::BufferUsage::MapRead,
@@ -545,20 +602,20 @@ std::optional<PendingFrameCapture> encode_frame_capture(const wgpu::CommandEncod
   };
   auto buffer = g_device.CreateBuffer(&descriptor);
   const wgpu::TexelCopyTextureInfo sourceInfo{
-      .texture = source.texture,
+      .texture = captured.texture,
       .mipLevel = 0,
       .origin = {0, 0, 0},
       .aspect = wgpu::TextureAspect::All,
   };
   const wgpu::TexelCopyBufferInfo destinationInfo{
-      .layout = {.offset = 0, .bytesPerRow = bytesPerRow, .rowsPerImage = source.size.height},
+      .layout = {.offset = 0, .bytesPerRow = bytesPerRow, .rowsPerImage = captured.size.height},
       .buffer = buffer,
   };
-  encoder.CopyTextureToBuffer(&sourceInfo, &destinationInfo, &source.size);
+  encoder.CopyTextureToBuffer(&sourceInfo, &destinationInfo, &captured.size);
   return PendingFrameCapture{
       .buffer = std::move(buffer),
-      .width = source.size.width,
-      .height = source.size.height,
+      .width = captured.size.width,
+      .height = captured.size.height,
       .bytesPerRow = bytesPerRow,
       .bufferSize = bufferSize,
       .bgra = bgra,
@@ -962,7 +1019,7 @@ bool present_presentation_job(const PresentationJob& job) {
             .colorAttachments = attachments.data(),
         };
         const auto pass = encoder.BeginRenderPass(&renderPassDescriptor);
-        pass.SetPipeline(webgpu::g_CopyPipeline);
+        pass.SetPipeline(webgpu::present_pipeline());
         pass.SetBindGroup(0, job.image->bindGroup, 0, nullptr);
         pass.SetViewport(0.f, 0.f,
                          static_cast<float>(webgpu::g_graphicsConfig.surfaceConfiguration.width),
@@ -1121,6 +1178,7 @@ void ensure_presenter_started() {
   }
   g_presenter.stop = false;
   g_presenter.presenting = false;
+  webgpu::mark_device_shared();
   g_presenter.thread = std::thread(presenter_main);
   g_presenter.started = true;
   g_presenterStarted.store(true, std::memory_order_release);
@@ -1835,6 +1893,10 @@ void service_producer_wait() noexcept {
   }
 }
 std::recursive_mutex& renderer_gpu_mutex() noexcept { return g_rendererGpuMutex; }
+void submit_staging_commands(const wgpu::CommandBuffer& commands) {
+  std::lock_guard submitLock(g_queueSubmitMutex);
+  webgpu::g_queue.Submit(1, &commands);
+}
 } // namespace aurora
 
 // C API bindings
@@ -1990,4 +2052,7 @@ void aurora_set_background_input(bool value) {
   aurora::window::set_background_input(value);
 }
 void aurora_set_display_mode(AuroraDisplayMode mode) { aurora::window::set_display_mode(mode); }
+void aurora_set_picture_adjust(float brightness, float contrast, float saturation) {
+  aurora::webgpu::set_picture_adjust(brightness, contrast, saturation);
+}
 AuroraDisplayMode aurora_get_display_mode() { return aurora::window::get_display_mode(); }

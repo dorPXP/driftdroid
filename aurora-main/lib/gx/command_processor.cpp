@@ -96,10 +96,11 @@ using IndexBuffer = std::vector<u16>;
 static u32 prepare_idx_template(IndexBuffer& buf, GXPrimitive prim, u16 vtxCount) {
   size_t writePos = 0;
   if (prim == GX_QUADS) {
-    // Retain the existing incomplete-quad behavior: every started group emits a complete six-index quad.
-    buf.resize(((static_cast<u32>(vtxCount) + 3u) / 4u) * 6u);
+    // GX renders a three-vertex remainder as a triangle. One/two are ignored.
+    const u32 completeVertices = static_cast<u32>(vtxCount) & ~3u;
+    buf.resize((completeVertices / 4u) * 6u + (vtxCount % 4u == 3u ? 3u : 0u));
 
-    for (u32 v = 0; v < vtxCount; v += 4) {
+    for (u32 v = 0; v < completeVertices; v += 4) {
       const u16 idx0 = static_cast<u16>(v);
       const u16 idx1 = static_cast<u16>(v + 1);
       const u16 idx2 = static_cast<u16>(v + 2);
@@ -111,15 +112,21 @@ static u32 prepare_idx_template(IndexBuffer& buf, GXPrimitive prim, u16 vtxCount
       buf[writePos++] = idx3;
       buf[writePos++] = idx0;
     }
+    if (vtxCount % 4u == 3u) {
+      buf[writePos++] = static_cast<u16>(completeVertices);
+      buf[writePos++] = static_cast<u16>(completeVertices + 1u);
+      buf[writePos++] = static_cast<u16>(completeVertices + 2u);
+    }
   } else if (prim == GX_TRIANGLES) {
-    buf.resize(vtxCount);
-    for (u16 v = 0; v < vtxCount; ++v) {
+    const u32 completeVertices = (static_cast<u32>(vtxCount) / 3u) * 3u;
+    buf.resize(completeVertices);
+    for (u32 v = 0; v < completeVertices; ++v) {
       buf[writePos++] = v;
     }
   } else if (prim == GX_TRIANGLEFAN) {
-    const u32 indexCount = vtxCount <= 3 ? vtxCount : 3u + (static_cast<u32>(vtxCount) - 3u) * 3u;
+    const u32 indexCount = vtxCount < 3 ? 0u : (static_cast<u32>(vtxCount) - 2u) * 3u;
     buf.resize(indexCount);
-    for (u16 v = 0; v < vtxCount; ++v) {
+    for (u32 v = 0; indexCount != 0 && v < vtxCount; ++v) {
       if (v < 3) {
         buf[writePos++] = v;
         continue;
@@ -129,9 +136,9 @@ static u32 prepare_idx_template(IndexBuffer& buf, GXPrimitive prim, u16 vtxCount
       buf[writePos++] = v;
     }
   } else if (prim == GX_TRIANGLESTRIP) {
-    const u32 indexCount = vtxCount <= 3 ? vtxCount : 3u + (static_cast<u32>(vtxCount) - 3u) * 3u;
+    const u32 indexCount = vtxCount < 3 ? 0u : (static_cast<u32>(vtxCount) - 2u) * 3u;
     buf.resize(indexCount);
-    for (u16 v = 0; v < vtxCount; ++v) {
+    for (u32 v = 0; indexCount != 0 && v < vtxCount; ++v) {
       if (v < 3) {
         buf[writePos++] = v;
         continue;
@@ -152,6 +159,13 @@ static u32 prepare_idx_template(IndexBuffer& buf, GXPrimitive prim, u16 vtxCount
     UNLIKELY FATAL("unsupported primitive type {}", static_cast<u32>(prim));
   CHECK(writePos == buf.size(), "index template size mismatch ({} != {})", writePos, buf.size());
   return static_cast<u32>(writePos);
+}
+
+// Empty/incomplete draws consume FIFO bytes but cannot produce a primitive.
+static bool has_complete_primitive(GXPrimitive prim, u16 count) {
+  if (prim == GX_POINTS) return count >= 1;
+  if (prim == GX_LINES || prim == GX_LINESTRIP) return count >= 2;
+  return count >= 3;
 }
 
 // GX FIFO opcodes - use CP_ prefix to avoid clashing with GXCommandList.h macros
@@ -2245,6 +2259,8 @@ bool submit_raw_draw(GXPrimitive prim, GXVtxFmt fmt, const uint8_t* vertices, ui
     return false;
   }
 
+  if (!has_complete_primitive(prim, vtxCount)) return true;
+
   // This entry point bypasses process(), so it owns the renderer lock itself.
   std::lock_guard gpuLock(aurora::renderer_gpu_mutex());
   gfx::Range vertRange;
@@ -2321,6 +2337,11 @@ static bool handle_draw(u8 cmd, const u8* data, u32& pos, u32 size, bool bigEndi
   }
 
 
+  if (!has_complete_primitive(prim, vtxCount)) {
+    pos += totalVtxBytes;
+    return true;
+  }
+
   // Push raw vertex data to buffer
   const uint8_t* vertices = data + pos;
   gfx::Range vertRange;
@@ -2339,12 +2360,13 @@ static bool handle_draw(u8 cmd, const u8* data, u32& pos, u32 size, bool bigEndi
   // Try to merge with previous draw call
   if (!g_gxState.stateDirty) LIKELY {
     auto* lastDraw = gfx::get_last_draw_command<DrawData>();
-    // Only single-instance draws (no lines/points handling) whose offset indices still fit in
-    // uint16_t; an overflow would address earlier vertices instead of the appended geometry.
+    // Only single-instance draws whose offset indices still fit in uint16_t; an overflow would
+    // address earlier vertices instead of the appended geometry. Expanded lines/points interpret
+    // their vertices differently even with one instance. Triangle-list output has no restart
+    // index, so index 65535 is usable.
     if (lastDraw != nullptr && prim != GX_LINES && prim != GX_LINESTRIP && prim != GX_POINTS &&
-        lastDraw->instanceCount == 1 &&
-        uint64_t{lastDraw->vtxCount} + (prim == GX_QUADS ? ((uint32_t{vtxCount} + 3u) & ~3u) : vtxCount) <=
-            65536u) LIKELY {
+        !lastDraw->expandedPrimitive && lastDraw->instanceCount == 1 &&
+        uint64_t{lastDraw->vtxCount} + vtxCount <= 65536u) LIKELY {
       const auto& indexTemplate = cached_index_template(prim, vtxCount);
       const auto indices = offset_index_template(indexTemplate, lastDraw->vtxCount);
       const u32 numIndices = indexTemplate.indexCount;
@@ -2475,6 +2497,7 @@ static void handle_draw_unmerged(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount,
       .vtxCount = vtxCount,
       .indexCount = numIndices,
       .instanceCount = instanceCount,
+      .expandedPrimitive = prim == GX_LINES || prim == GX_LINESTRIP || prim == GX_POINTS,
       .bindGroups = bindGroups,
       .dstAlpha = pipelineState.dstAlpha,
   });

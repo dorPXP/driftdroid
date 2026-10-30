@@ -1,24 +1,25 @@
 package com.driftdroid.android.touch
 
+import com.driftdroid.android.T
 import android.app.Activity
-import android.app.AlertDialog
 import android.content.Context
 import android.content.Intent
 import android.content.SharedPreferences
 import android.graphics.Color
+import android.graphics.Typeface
+import android.graphics.drawable.GradientDrawable
 import android.net.Uri
 import android.text.InputType
 import android.util.TypedValue
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
-import android.widget.Button
-import android.widget.CheckBox
 import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.LinearLayout
-import android.widget.SeekBar
 import android.widget.TextView
+import com.driftdroid.android.ui.DriftSheet
+import com.driftdroid.android.ui.DriftUi
 import org.json.JSONObject
 
 /** One on-screen control's identity and default placement (fractions of the play area, 0..1).
@@ -55,8 +56,14 @@ private data class ControlSpec(
  */
 class TouchControlsOverlay private constructor(private val activity: Activity, parent: ViewGroup) {
 
-    private val prefs: SharedPreferences = activity.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+    // Vertical mode keeps its own layout, so neither orientation's edits move the other's buttons.
+    private val prefs: SharedPreferences =
+        activity.getSharedPreferences(if (portraitMode) PORTRAIT_PREFS_NAME else PREFS_NAME, Context.MODE_PRIVATE)
     private val library: SharedPreferences = activity.getSharedPreferences(LIBRARY_PREFS_NAME, Context.MODE_PRIVATE)
+    // Vertical and horizontal mode keep separate saved-layout lists in the same library file: a
+    // layout made for one puts the buttons in odd places on the other. Horizontal keeps the
+    // original key names, so nothing saved before the split moves unless it was made upright.
+    private val libraryNamesKey = if (portraitMode) KEY_LIBRARY_NAMES_PORTRAIT else KEY_LIBRARY_NAMES
     private val container = FrameLayout(activity)
     private val views = LinkedHashMap<String, View>()
     private var editMode = false
@@ -109,6 +116,7 @@ class TouchControlsOverlay private constructor(private val activity: Activity, p
             }
         }
 
+        splitLibraryOnce()
         buildToolbar()
 
         // Build the controls after the container has a real size - fractions need it to convert
@@ -117,42 +125,83 @@ class TouchControlsOverlay private constructor(private val activity: Activity, p
             for (spec in SPECS) {
                 addControl(spec)
             }
-            val toolbarParams =
-                FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT)
-            toolbarParams.gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
-            toolbarParams.topMargin = dp(70f)
-            container.addView(toolbar, toolbarParams)
+            addToolbar()
         }
     }
 
     private fun dp(value: Float): Int =
         TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, value, container.resources.displayMetrics).toInt()
 
-    private fun toolbarButton(text: String, onClick: () -> Unit): Button {
-        val button = Button(activity)
-        button.text = text
-        button.textSize = 12f
-        button.setOnClickListener { onClick() }
-        return button
-    }
-
     /** "Done editing" first and most prominent - the previous design (long-press the gear again
      * to exit) was confirmed confusing on-device ("i clicked on the gear it sent me to edit
-     * layout, but i couldn't exit out of it"). Entering edit mode is now the gear's 5-second-hold
-     * gesture (MainActivity.addSettingsButton) - exiting is always this explicit button. */
+     * layout, but i couldn't exit out of it"). Exiting is always this explicit button. A panel in
+     * the settings drawer's colours, with the four buttons sharing its width so they fit upright
+     * too (the old row of stock buttons ran off a vertical screen). */
     private fun buildToolbar() {
-        toolbar.orientation = LinearLayout.HORIZONTAL
+        toolbar.orientation = LinearLayout.VERTICAL
         toolbar.visibility = View.GONE
-        toolbar.setBackgroundColor(Color.argb(180, 30, 30, 30))
-        val pad = dp(6f)
-        toolbar.setPadding(pad, pad, pad, pad)
+        toolbar.background = GradientDrawable().apply {
+            setColor(0xEE141A33.toInt())
+            cornerRadius = dp(16f).toFloat()
+            setStroke(dp(1.5f), DriftUi.LINE)
+        }
+        toolbar.setPadding(dp(12f), dp(10f), dp(12f), dp(12f))
 
-        val doneButton = toolbarButton("Done") { setEditMode(false) }
-        doneButton.setBackgroundColor(Color.rgb(60, 130, 70))
-        toolbar.addView(doneButton)
-        toolbar.addView(toolbarButton("Reset layout") { resetLayout() })
-        toolbar.addView(toolbarButton("Save layout") { promptSaveLayout() })
-        toolbar.addView(toolbarButton("Layouts...") { showLayoutLibraryDialog() })
+        toolbar.addView(
+            TextView(activity).apply {
+                text = if (portraitMode) T("Editing the vertical layout") else T("Editing the horizontal layout")
+                setTextColor(DriftUi.TEXT)
+                textSize = 15f
+                typeface = Typeface.DEFAULT_BOLD
+            },
+        )
+        toolbar.addView(
+            TextView(activity).apply {
+                text = T("Drag to move · pinch to resize · tap a button to change it")
+                setTextColor(DriftUi.MUTED)
+                textSize = 13f
+                setPadding(0, dp(2f), 0, dp(10f))
+            },
+        )
+        val row = LinearLayout(activity)
+        row.orientation = LinearLayout.HORIZONTAL
+        // Auto-sized labels have different baselines; aligning on them pushes buttons out of line.
+        row.isBaselineAligned = false
+        fun add(text: String, style: DriftUi.Style, onClick: () -> Unit) {
+            val button = DriftUi.button(activity, text, style, onClick)
+            button.minWidth = if (portraitMode) 0 else dp(96f)
+            // Four buttons share the row: a long translation shrinks instead of being cut off.
+            // isSingleLine turns on horizontal scrolling, which makes auto-size see an unlimited
+            // width and never shrink, so use maxLines = 1 without it.
+            button.isSingleLine = false
+            button.maxLines = 1
+            button.setHorizontallyScrolling(false)
+            button.setAutoSizeTextTypeUniformWithConfiguration(9, 15, 1, android.util.TypedValue.COMPLEX_UNIT_SP)
+            row.addView(
+                button,
+                LinearLayout.LayoutParams(0, dp(46f), 1f).apply {
+                    if (row.childCount > 0) marginStart = dp(8f)
+                },
+            )
+        }
+        add("Done", DriftUi.Style.PRIMARY) { setEditMode(false) }
+        add("Reset", DriftUi.Style.SECONDARY) { confirmResetLayout() }
+        add("Save", DriftUi.Style.SECONDARY) { promptSaveLayout() }
+        add("Layouts", DriftUi.Style.SECONDARY) { showLayoutLibrary() }
+        toolbar.addView(row, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+    }
+
+    private fun addToolbar() {
+        val params =
+            FrameLayout.LayoutParams(
+                if (portraitMode) ViewGroup.LayoutParams.MATCH_PARENT else ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            )
+        params.gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
+        params.topMargin = dp(70f)
+        params.leftMargin = dp(12f)
+        params.rightMargin = dp(12f)
+        container.addView(toolbar, params)
     }
 
     private fun addControl(spec: ControlSpec) {
@@ -187,8 +236,8 @@ class TouchControlsOverlay private constructor(private val activity: Activity, p
         val containerWidth = container.width.takeIf { it > 0 } ?: container.resources.displayMetrics.widthPixels
         val containerHeight = container.height.takeIf { it > 0 } ?: container.resources.displayMetrics.heightPixels
 
-        val xFraction = prefs.getFloat(key(spec.id, "x"), spec.defaultXFraction)
-        val yFraction = prefs.getFloat(key(spec.id, "y"), spec.defaultYFraction)
+        val xFraction = prefs.getFloat(key(spec.id, "x"), defaultX(spec))
+        val yFraction = prefs.getFloat(key(spec.id, "y"), defaultY(spec))
         val scale = prefs.getFloat(key(spec.id, "scale"), 1f)
         val enabled = prefs.getBoolean(key(spec.id, "enabled"), spec.defaultEnabled)
         val opacity = prefs.getFloat(key(spec.id, "opacity"), 1f)
@@ -230,137 +279,75 @@ class TouchControlsOverlay private constructor(private val activity: Activity, p
         views[spec.id] = view
     }
 
+    private fun controlName(spec: ControlSpec): String =
+        when {
+            spec.isJoystick -> T("Steering stick")
+            spec.id.startsWith("dpad_") -> "D-pad ${spec.label}"
+            spec.id == "start" -> T("Start button")
+            else -> "${spec.label} button"
+        }
+
+    /** Opens on the side of the screen away from the control, so the change can be watched live
+     * while making it. */
     private fun showControlEditor(spec: ControlSpec, view: View) {
-        val activityContext = activity
-        val root = LinearLayout(activityContext)
-        root.orientation = LinearLayout.VERTICAL
-        val pad = dp(16f)
-        root.setPadding(pad, pad, pad, pad)
+        val centerX = view.x + view.width / 2f
+        val centerY = view.y + view.height / 2f
+        val dock =
+            if (portraitMode) {
+                if (centerY > container.height / 2f) DriftSheet.Dock.TOP else DriftSheet.Dock.BOTTOM
+            } else {
+                if (centerX > container.width / 2f) DriftSheet.Dock.START else DriftSheet.Dock.END
+            }
+        val sheet = DriftSheet(activity, controlName(spec), T("Changes show on the button as you make them"), dock)
 
-        val visibleCheckbox = CheckBox(activityContext)
-        visibleCheckbox.text = "Visible"
-        visibleCheckbox.isChecked = view.visibility == View.VISIBLE
-        root.addView(visibleCheckbox)
+        var visible = view.visibility == View.VISIBLE && prefs.getBoolean(key(spec.id, "enabled"), spec.defaultEnabled)
+        var opacity = prefs.getFloat(key(spec.id, "opacity"), 1f).coerceIn(0.1f, 1f)
+        fun applyLook() {
+            view.alpha = if (visible) opacity else 0.35f
+        }
 
-        // Color/outline customization - white/translucent by default for every control, this is
-        // purely an opt-in choice (requested directly: "the touchpad controls should just be
-        // white by default... there should be customizability for custom colors, outlines etc"),
-        // and covers the joystick too ("make it so the joystick can be colored").
+        sheet.toggle("Show on screen", "Off hides it while you play", visible) {
+            visible = it
+            applyLook()
+        }
+        // A floor of 10% keeps a control from becoming a truly invisible-but-still-there dead zone
+        // on screen - "Show on screen" off is the actual "hide it" action.
+        sheet.slider("Button opacity", 0.1f, 1f, opacity, 90, { "${(it * 100).toInt()}%" }) {
+            opacity = it
+            applyLook()
+        }
+        // Scale range mirrors EditGestureHelper's pinch-to-resize clamp (0.5x-2.5x) so the slider
+        // and pinching can never disagree about what's achievable.
+        sheet.slider("Size", 0.5f, 2.5f, view.scaleX, 200, { "${(it * 100).toInt()}%" }) {
+            view.scaleX = it
+            view.scaleY = it
+        }
+
+        // Color/outline customization - covers the joystick too ("make it so the joystick can be
+        // colored"). Each colour opens its picker in place.
+        sheet.section("Colours")
         when (view) {
             is TouchButtonView -> {
-                addColorPickerRow(root, "Color", view.fillColor) { view.fillColor = it }
-                addColorPickerRow(root, "Outline", view.outlineColor) { view.outlineColor = it }
+                addColorPicker(sheet, "Fill", view.fillColor) { view.fillColor = it }
+                addColorPicker(sheet, "Outline", view.outlineColor) { view.outlineColor = it }
             }
             is TouchJoystickView -> {
-                addColorPickerRow(root, "Base Color", view.baseColor) { view.baseColor = it }
-                addColorPickerRow(root, "Outline", view.outlineColor) { view.outlineColor = it }
-                addColorPickerRow(root, "Knob Color", view.knobColor) { view.knobColor = it }
+                addColorPicker(sheet, "Base", view.baseColor) { view.baseColor = it }
+                addColorPicker(sheet, "Outline", view.outlineColor) { view.outlineColor = it }
+                addColorPicker(sheet, "Knob", view.knobColor) { view.knobColor = it }
             }
         }
+        sheet.button("Done", DriftUi.Style.PRIMARY) { sheet.dismiss() }
 
-        val opacityLabel = TextView(activityContext)
-        opacityLabel.text = "Opacity"
-        opacityLabel.setPadding(0, dp(12f), 0, 0)
-        root.addView(opacityLabel)
-
-        val startingOpacity = prefs.getFloat(key(spec.id, "opacity"), 1f)
-        val opacitySeekBar = SeekBar(activityContext)
-        opacitySeekBar.max = 100
-        opacitySeekBar.progress = (startingOpacity * 100).toInt().coerceIn(10, 100)
-        opacitySeekBar.setOnSeekBarChangeListener(
-            object : SeekBar.OnSeekBarChangeListener {
-                override fun onProgressChanged(seek: SeekBar, progress: Int, fromUser: Boolean) {
-                    // A floor of 10% keeps a control from becoming a truly invisible-but-still-
-                    // there dead zone on screen - Visible unchecked is the actual "hide it" action.
-                    if (fromUser && visibleCheckbox.isChecked) {
-                        view.alpha = progress.coerceAtLeast(10) / 100f
-                    }
-                }
-
-                override fun onStartTrackingTouch(seek: SeekBar) {}
-
-                override fun onStopTrackingTouch(seek: SeekBar) {}
-            },
-        )
-        root.addView(opacitySeekBar)
-
-        val sizeLabel = TextView(activityContext)
-        sizeLabel.text = "Size"
-        sizeLabel.setPadding(0, dp(12f), 0, 0)
-        root.addView(sizeLabel)
-
-        val sizeRow = LinearLayout(activityContext)
-        sizeRow.orientation = LinearLayout.HORIZONTAL
-        sizeRow.gravity = Gravity.CENTER_VERTICAL
-
-        // Scale range mirrors EditGestureHelper's pinch-to-resize clamp (0.5x-2.5x) so typing a
-        // value and pinching can never disagree about what's achievable.
-        val seekBar = SeekBar(activityContext)
-        seekBar.max = 200
-        val currentScale = view.scaleX
-        seekBar.progress = (((currentScale - 0.5f) / 2.0f) * 200).toInt().coerceIn(0, 200)
-        val seekParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
-        sizeRow.addView(seekBar, seekParams)
-
-        val sizeInput = EditText(activityContext)
-        sizeInput.inputType = InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_FLAG_DECIMAL
-        sizeInput.setText(String.format("%.2f", currentScale))
-        val inputParams = LinearLayout.LayoutParams(dp(80f), ViewGroup.LayoutParams.WRAP_CONTENT)
-        inputParams.marginStart = dp(8f)
-        sizeInput.layoutParams = inputParams
-
-        var syncingFromSeek = false
-        var syncingFromText = false
-        seekBar.setOnSeekBarChangeListener(
-            object : SeekBar.OnSeekBarChangeListener {
-                override fun onProgressChanged(seek: SeekBar, progress: Int, fromUser: Boolean) {
-                    if (!fromUser) return
-                    val scale = 0.5f + (progress / 200f) * 2.0f
-                    view.scaleX = scale
-                    view.scaleY = scale
-                    if (!syncingFromText) {
-                        syncingFromSeek = true
-                        sizeInput.setText(String.format("%.2f", scale))
-                        syncingFromSeek = false
-                    }
-                }
-
-                override fun onStartTrackingTouch(seek: SeekBar) {}
-
-                override fun onStopTrackingTouch(seek: SeekBar) {}
-            },
-        )
-        sizeInput.setOnFocusChangeListener { _, hasFocus ->
-            if (hasFocus || syncingFromSeek) return@setOnFocusChangeListener
-            val typed = sizeInput.text.toString().toFloatOrNull()?.coerceIn(0.5f, 2.5f) ?: return@setOnFocusChangeListener
-            view.scaleX = typed
-            view.scaleY = typed
-            syncingFromText = true
-            seekBar.progress = (((typed - 0.5f) / 2.0f) * 200).toInt().coerceIn(0, 200)
-            syncingFromText = false
-        }
-
-        sizeRow.addView(sizeInput)
-        root.addView(sizeRow)
-
-        val scroll = android.widget.ScrollView(activityContext)
-        scroll.addView(root, ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
-
-        // Persists on ANY dismiss path (Close button, tapping outside the dialog, or the back
-        // button), not just an explicit "Close" tap - confirmed directly as a real loss: colors
-        // (and everything else here) apply live to the view immediately, so dismissing the dialog
-        // by tapping outside it - a completely natural thing to do - looked like it worked but
-        // silently discarded the change instead of saving it, since only the "Close" button used
-        // to persist anything. OnDismissListener fires for every one of those paths uniformly.
-        fun persist() {
-            val enabled = visibleCheckbox.isChecked
-            val opacity = opacitySeekBar.progress.coerceAtLeast(10) / 100f
-            view.visibility = if (enabled) View.VISIBLE else View.GONE
-            view.alpha = if (enabled) opacity else 0.35f
+        // Persists on ANY dismiss path (Done, tapping outside, the back button) - changes apply
+        // live, so a dismiss that didn't save looked like it worked but silently lost them.
+        sheet.onDismiss = {
+            view.visibility = if (visible) View.VISIBLE else View.GONE
+            applyLook()
             val editor =
                 prefs
                     .edit()
-                    .putBoolean(key(spec.id, "enabled"), enabled)
+                    .putBoolean(key(spec.id, "enabled"), visible)
                     .putFloat(key(spec.id, "scale"), view.scaleX)
                     .putFloat(key(spec.id, "opacity"), opacity)
             when (view) {
@@ -377,39 +364,43 @@ class TouchControlsOverlay private constructor(private val activity: Activity, p
             }
             editor.apply()
             saveTransform(spec.id, view)
-            // Edit mode keeps disabled controls visible-but-dimmed so they stay reachable -
-            // matches the pre-dialog behavior.
-            if (!enabled) {
+            // Edit mode keeps disabled controls visible-but-dimmed so they stay reachable.
+            if (!visible && editMode) {
                 view.visibility = View.VISIBLE
             }
         }
-
-        AlertDialog.Builder(activityContext)
-            .setTitle(spec.label.ifEmpty { "Joystick" })
-            .setView(scroll)
-            .setPositiveButton("Close", null)
-            .setOnDismissListener { persist() }
-            .show()
+        sheet.show()
     }
 
-    /** A label plus a horizontal row of tappable color swatches (including a "reset to white/
-     * translucent default" swatch first) - [onPick] fires immediately on tap for a live preview,
-     * same as the opacity/size controls above it. */
-    /** A standard SV-square + hue-strip + hex-field color picker (see SaturationValuePickerView's
-     * doc comment) rather than a fixed swatch list or plain sliders - "having a limited selection
-     * kinda sucks" led to sliders, then a reference screenshot asked for this specific layout.
-     * [onPick] fires live on every drag/edit for an immediate preview, same as the opacity/size
-     * controls elsewhere in this dialog. */
-    private fun addColorPickerRow(root: LinearLayout, label: String, initialColor: Int, onPick: (Int) -> Unit) {
+    /** A colour row with a swatch; tapping it opens a standard SV-square + hue-strip + hex-field
+     * picker under it (see SaturationValuePickerView's doc comment - "having a limited selection
+     * kinda sucks" led here). [onPick] fires live on every drag/edit for an immediate preview. */
+    private fun addColorPicker(sheet: DriftSheet, label: String, initialColor: Int, onPick: (Int) -> Unit) {
         val activityContext = activity
-        val rowLabel = TextView(activityContext)
-        rowLabel.text = label
-        rowLabel.setPadding(0, dp(12f), 0, dp(4f))
-        root.addView(rowLabel)
-
         val hsv = FloatArray(3)
         Color.colorToHSV(initialColor, hsv)
+        // How solid the colour is, kept with it. The shipped colours are only 43% solid (see-through
+        // over the race), so before this was shown the brightest red picked still came out a dim,
+        // see-through red ("why is the brightest red not.. the brightest").
         var alpha = Color.alpha(initialColor)
+
+        val swatchShape = GradientDrawable().apply {
+            shape = GradientDrawable.OVAL
+            setColor(initialColor)
+            setStroke(dp(2f), DriftUi.LINE)
+        }
+        val swatch = View(activityContext).apply {
+            background = swatchShape
+            layoutParams = LinearLayout.LayoutParams(dp(30f), dp(30f)).apply { marginStart = dp(12f) }
+        }
+        val picker = LinearLayout(activityContext)
+        picker.orientation = LinearLayout.VERTICAL
+        picker.visibility = View.GONE
+        picker.setPadding(dp(4f), dp(4f), dp(4f), dp(10f))
+        sheet.action(label, null, swatch) {
+            picker.visibility = if (picker.visibility == View.VISIBLE) View.GONE else View.VISIBLE
+        }
+        sheet.custom(picker)
 
         val preview = View(activityContext)
         val svPicker = SaturationValuePickerView(activityContext)
@@ -421,7 +412,11 @@ class TouchControlsOverlay private constructor(private val activity: Activity, p
         var syncingHexField = false
         fun refreshPreview() {
             val color = currentColor()
-            preview.setBackgroundColor(color)
+            preview.background = GradientDrawable().apply {
+                setColor(color)
+                cornerRadius = dp(10f).toFloat()
+            }
+            swatchShape.setColor(color)
             syncingHexField = true
             hexField.setText(String.format("#%06X", 0xFFFFFF and color))
             syncingHexField = false
@@ -430,25 +425,34 @@ class TouchControlsOverlay private constructor(private val activity: Activity, p
 
         val pickerRow = LinearLayout(activityContext)
         pickerRow.orientation = LinearLayout.HORIZONTAL
-        val previewParams = LinearLayout.LayoutParams(dp(56f), dp(140f))
-        pickerRow.addView(preview, previewParams)
+        pickerRow.addView(preview, LinearLayout.LayoutParams(dp(48f), dp(140f)))
         val svParams = LinearLayout.LayoutParams(0, dp(140f), 1f)
         svParams.marginStart = dp(8f)
         pickerRow.addView(svPicker, svParams)
-        root.addView(pickerRow)
+        picker.addView(pickerRow)
 
         val hueParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(36f))
         hueParams.topMargin = dp(8f)
-        root.addView(hueSlider, hueParams)
+        picker.addView(hueSlider, hueParams)
 
-        val hexLabel = TextView(activityContext)
-        hexLabel.text = "HEX"
-        hexLabel.textSize = 12f
-        hexLabel.setPadding(0, dp(10f), 0, dp(2f))
-        root.addView(hexLabel)
+        val (solidCard, _) =
+            sheet.buildSlider("Solid", 0.1f, 1f, alpha / 255f, 90, { "${(it * 100).toInt()}%" }) {
+                alpha = (it * 255).toInt().coerceIn(26, 255)
+                refreshPreview()
+            }
+        picker.addView(
+            solidCard,
+            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(8f) },
+        )
+
         hexField.inputType = InputType.TYPE_CLASS_TEXT
+        hexField.isSingleLine = true
         hexField.filters = arrayOf(android.text.InputFilter.LengthFilter(7))
-        root.addView(hexField)
+        DriftUi.styleField(hexField)
+        picker.addView(
+            hexField,
+            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(8f) },
+        )
 
         svPicker.hue = hsv[0]
         svPicker.setSaturationValue(hsv[1], hsv[2])
@@ -502,8 +506,8 @@ class TouchControlsOverlay private constructor(private val activity: Activity, p
         val specsById = SPECS.associateBy { it.id }
         for ((id, view) in views) {
             val spec = specsById[id] ?: continue
-            val xFraction = prefs.getFloat(key(id, "x"), spec.defaultXFraction)
-            val yFraction = prefs.getFloat(key(id, "y"), spec.defaultYFraction)
+            val xFraction = prefs.getFloat(key(id, "x"), defaultX(spec))
+            val yFraction = prefs.getFloat(key(id, "y"), defaultY(spec))
             view.x = xFraction * containerWidth - view.width / 2f
             view.y = yFraction * containerHeight - view.height / 2f
         }
@@ -590,6 +594,20 @@ class TouchControlsOverlay private constructor(private val activity: Activity, p
 
     fun isEditMode(): Boolean = editMode
 
+    private fun confirmResetLayout() {
+        val sheet = DriftSheet(activity, T("Reset this layout?"), compact = true)
+        sheet.note(
+            "Every button goes back to where it started, with its first size and colours. " +
+                "Saved layouts are kept.",
+        )
+        sheet.button("Cancel") { sheet.dismiss() }
+        sheet.button("Reset", DriftUi.Style.DANGER) {
+            sheet.dismiss()
+            resetLayout()
+        }
+        sheet.show()
+    }
+
     private fun resetLayout() {
         prefs.edit().clear().apply()
         rebuildControls()
@@ -603,11 +621,7 @@ class TouchControlsOverlay private constructor(private val activity: Activity, p
         for (spec in SPECS) {
             addControl(spec)
         }
-        val toolbarParams =
-            FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT)
-        toolbarParams.gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
-        toolbarParams.topMargin = dp(70f)
-        container.addView(toolbar, toolbarParams)
+        addToolbar()
         if (wasEditing) {
             setEditMode(true)
         }
@@ -621,8 +635,8 @@ class TouchControlsOverlay private constructor(private val activity: Activity, p
         val root = JSONObject()
         for (spec in SPECS) {
             val obj = JSONObject()
-            obj.put("x", prefs.getFloat(key(spec.id, "x"), spec.defaultXFraction).toDouble())
-            obj.put("y", prefs.getFloat(key(spec.id, "y"), spec.defaultYFraction).toDouble())
+            obj.put("x", prefs.getFloat(key(spec.id, "x"), defaultX(spec)).toDouble())
+            obj.put("y", prefs.getFloat(key(spec.id, "y"), defaultY(spec)).toDouble())
             obj.put("scale", prefs.getFloat(key(spec.id, "scale"), 1f).toDouble())
             obj.put("enabled", prefs.getBoolean(key(spec.id, "enabled"), spec.defaultEnabled))
             obj.put("opacity", prefs.getFloat(key(spec.id, "opacity"), 1f).toDouble())
@@ -639,6 +653,7 @@ class TouchControlsOverlay private constructor(private val activity: Activity, p
             }
             root.put(spec.id, obj)
         }
+        root.put(KEY_ORIENTATION, if (portraitMode) ORIENTATION_VERTICAL else ORIENTATION_HORIZONTAL)
         return root
     }
 
@@ -646,8 +661,8 @@ class TouchControlsOverlay private constructor(private val activity: Activity, p
         val editor = prefs.edit()
         for (spec in SPECS) {
             val obj = json.optJSONObject(spec.id) ?: continue
-            editor.putFloat(key(spec.id, "x"), obj.optDouble("x", spec.defaultXFraction.toDouble()).toFloat())
-            editor.putFloat(key(spec.id, "y"), obj.optDouble("y", spec.defaultYFraction.toDouble()).toFloat())
+            editor.putFloat(key(spec.id, "x"), obj.optDouble("x", defaultX(spec).toDouble()).toFloat())
+            editor.putFloat(key(spec.id, "y"), obj.optDouble("y", defaultY(spec).toDouble()).toFloat())
             editor.putFloat(key(spec.id, "scale"), obj.optDouble("scale", 1.0).toFloat())
             editor.putBoolean(key(spec.id, "enabled"), obj.optBoolean("enabled", spec.defaultEnabled))
             editor.putFloat(key(spec.id, "opacity"), obj.optDouble("opacity", 1.0).toFloat())
@@ -663,22 +678,73 @@ class TouchControlsOverlay private constructor(private val activity: Activity, p
         rebuildControls()
     }
 
-    private fun libraryNames(): MutableSet<String> = LinkedHashSet(library.getStringSet(KEY_LIBRARY_NAMES, emptySet()) ?: emptySet())
+    private fun libraryNames(): MutableSet<String> = LinkedHashSet(library.getStringSet(libraryNamesKey, emptySet()) ?: emptySet())
+
+    private fun libraryKey(name: String) = (if (portraitMode) PORTRAIT_LAYOUT_PREFIX else LAYOUT_PREFIX) + name
+
+    /** Layouts saved before the split all sit in the horizontal list. Sends each one that was made
+     * in vertical mode to the vertical list, once: tagged ones by their tag, older ones by whether
+     * their buttons sit nearer the vertical or the horizontal starting spots. */
+    private fun splitLibraryOnce() {
+        if (library.getBoolean(KEY_LIBRARY_SPLIT, false)) return
+        val horizontal = LinkedHashSet(library.getStringSet(KEY_LIBRARY_NAMES, emptySet()) ?: emptySet())
+        val vertical = LinkedHashSet(library.getStringSet(KEY_LIBRARY_NAMES_PORTRAIT, emptySet()) ?: emptySet())
+        val editor = library.edit()
+        for (name in horizontal.toList()) {
+            val text = library.getString(LAYOUT_PREFIX + name, null) ?: continue
+            val json = runCatching { JSONObject(text) }.getOrNull() ?: continue
+            if (!madeUpright(json)) continue
+            horizontal.remove(name)
+            vertical.add(name)
+            editor.remove(LAYOUT_PREFIX + name).putString(PORTRAIT_LAYOUT_PREFIX + name, text)
+        }
+        editor
+            .putStringSet(KEY_LIBRARY_NAMES, horizontal)
+            .putStringSet(KEY_LIBRARY_NAMES_PORTRAIT, vertical)
+            .putBoolean(KEY_LIBRARY_SPLIT, true)
+            .apply()
+    }
+
+    private fun madeUpright(json: JSONObject): Boolean {
+        when (json.optString(KEY_ORIENTATION)) {
+            ORIENTATION_VERTICAL -> return true
+            ORIENTATION_HORIZONTAL -> return false
+        }
+        var nearVertical = 0.0
+        var nearHorizontal = 0.0
+        for (spec in SPECS) {
+            val obj = json.optJSONObject(spec.id) ?: continue
+            val x = obj.optDouble("x", spec.defaultXFraction.toDouble())
+            val y = obj.optDouble("y", spec.defaultYFraction.toDouble())
+            val upright = PORTRAIT_DEFAULTS[spec.id] ?: continue
+            nearVertical += (x - upright.first) * (x - upright.first) + (y - upright.second) * (y - upright.second)
+            nearHorizontal +=
+                (x - spec.defaultXFraction) * (x - spec.defaultXFraction) + (y - spec.defaultYFraction) * (y - spec.defaultYFraction)
+        }
+        return nearVertical < nearHorizontal
+    }
+
+    private fun nextLayoutName(): String {
+        val names = libraryNames()
+        var n = names.size + 1
+        while ("Layout $n" in names) n++
+        return "Layout $n"
+    }
 
     private fun promptSaveLayout() {
-        val input = EditText(activity)
-        input.hint = "Layout name"
-        AlertDialog.Builder(activity)
-            .setTitle("Save layout")
-            .setView(input)
-            .setPositiveButton("Save") { _, _ ->
-                val name = input.text.toString().trim()
-                if (name.isNotEmpty()) {
-                    saveNamedLayout(name, currentLayoutJson())
-                }
+        val sheet = DriftSheet(activity, T("Save layout"), if (portraitMode) T("For vertical mode") else T("For horizontal mode"), compact = true)
+        sheet.note("Saves the buttons as they are now. A name that's already in the list gets replaced.")
+        val input = sheet.textField("Layout name", nextLayoutName())
+        sheet.button("Cancel") { sheet.dismiss() }
+        sheet.button("Save", DriftUi.Style.PRIMARY) {
+            val name = input.text.toString().trim()
+            if (name.isNotEmpty()) {
+                saveNamedLayout(name, currentLayoutJson())
+                sheet.dismiss()
             }
-            .setNegativeButton("Cancel", null)
-            .show()
+        }
+        sheet.show()
+        input.requestFocus()
     }
 
     private fun saveNamedLayout(name: String, json: JSONObject) {
@@ -687,91 +753,97 @@ class TouchControlsOverlay private constructor(private val activity: Activity, p
         library
             .edit()
             .putString(libraryKey(name), json.toString())
-            .putStringSet(KEY_LIBRARY_NAMES, names)
+            .putStringSet(libraryNamesKey, names)
             .apply()
     }
 
     private fun deleteNamedLayout(name: String) {
         val names = libraryNames()
         names.remove(name)
-        library.edit().remove(libraryKey(name)).putStringSet(KEY_LIBRARY_NAMES, names).apply()
+        library.edit().remove(libraryKey(name)).putStringSet(libraryNamesKey, names).apply()
     }
 
-    private fun libraryKey(name: String) = "layout_$name"
-
-    private fun showLayoutLibraryDialog() {
-        val names = libraryNames().toList()
-        val root = LinearLayout(activity)
-        root.orientation = LinearLayout.VERTICAL
-        val pad = dp(8f)
-        root.setPadding(pad, pad, pad, pad)
-
-        if (names.isEmpty()) {
-            val empty = TextView(activity)
-            empty.text = "No saved layouts yet."
-            empty.setPadding(pad, pad, pad, pad)
-            root.addView(empty)
-        }
-        for (name in names) {
-            val row = LinearLayout(activity)
-            row.orientation = LinearLayout.HORIZONTAL
-            row.gravity = Gravity.CENTER_VERTICAL
-
-            val nameButton = Button(activity)
-            nameButton.text = name
-            val nameParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
-            row.addView(nameButton, nameParams)
-
-            // Replaces this saved layout with whatever is currently live, rather than only being
-            // able to save a brand new named layout - requested directly ("there should also be
-            // an overwrite option to replace one of the saved ones with the current one you have").
-            val overwriteButton = toolbarButton("Overwrite") {
-                saveNamedLayout(name, currentLayoutJson())
-                showLayoutLibraryDialog()
+    /** Tap a layout to use it; its "⋯" opens Replace / Export / Delete under it. */
+    private fun showLayoutLibrary() {
+        val sheet = DriftSheet(activity, T("Saved layouts"), if (portraitMode) "Vertical mode" else T("Horizontal mode"))
+        fun render() {
+            sheet.clear()
+            val names = libraryNames().toList()
+            if (names.isEmpty()) {
+                sheet.note("Nothing saved yet. Save the layout on screen to keep it, then switch between layouts here.")
+            } else {
+                sheet.note("Tap a layout to use it. Vertical and horizontal mode each keep their own list.")
             }
-            row.addView(overwriteButton)
-
-            val exportButton = toolbarButton("Export") {
-                val json = library.getString(libraryKey(name), null) ?: return@toolbarButton
-                launchExportLayout(json)
-            }
-            row.addView(exportButton)
-
-            val deleteButton = toolbarButton("Delete") {
-                deleteNamedLayout(name)
-                showLayoutLibraryDialog()
-            }
-            row.addView(deleteButton)
-
-            root.addView(row)
-        }
-
-        val scroll = android.widget.ScrollView(activity)
-        scroll.addView(root, ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
-
-        val dialog =
-            AlertDialog.Builder(activity)
-                .setTitle("Layouts")
-                .setView(scroll)
-                .setPositiveButton("Import from file...") { _, _ -> launchImportLayout() }
-                .setNegativeButton("Close", null)
-                .create()
-
-        // Tapping a name applies it and closes - wired after dialog creation so the click
-        // listener can dismiss it (Builder's own buttons handle their own dismissal already).
-        for (i in 0 until root.childCount) {
-            val row = root.getChildAt(i) as? LinearLayout ?: continue
-            val nameButton = row.getChildAt(0) as? Button ?: continue
-            val name = nameButton.text.toString()
-            nameButton.setOnClickListener {
-                val json = library.getString(libraryKey(name), null)
-                if (json != null) {
-                    applyLayoutJson(JSONObject(json))
+            for (name in names) {
+                val actions = LinearLayout(activity)
+                actions.orientation = LinearLayout.HORIZONTAL
+                actions.visibility = View.GONE
+                actions.setPadding(0, 0, 0, dp(6f))
+                val more = TextView(activity).apply {
+                    text = "⋯"
+                    textSize = 22f
+                    gravity = Gravity.CENTER
+                    setTextColor(DriftUi.TEXT)
+                    background = DriftUi.pressable(activity, DriftUi.ROW_STRONG, 10f)
+                    contentDescription = T("More for %s").format(name)
+                    layoutParams = LinearLayout.LayoutParams(dp(48f), dp(42f)).apply { marginStart = dp(12f) }
+                    setOnClickListener { actions.visibility = if (actions.visibility == View.VISIBLE) View.GONE else View.VISIBLE }
                 }
-                dialog.dismiss()
+                sheet.action(name, "Tap to use", more) {
+                    val json = library.getString(libraryKey(name), null)
+                    if (json != null) {
+                        applyLayoutJson(JSONObject(json))
+                    }
+                    sheet.dismiss()
+                }
+                fun add(button: TextView) {
+                    actions.addView(
+                        button,
+                        LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
+                            if (actions.childCount > 0) marginStart = dp(6f)
+                        },
+                    )
+                }
+                // Replaces this saved layout with whatever is currently live - requested directly
+                // ("there should also be an overwrite option to replace one of the saved ones").
+                lateinit var replace: TextView
+                replace = DriftUi.button(activity, "Replace") {
+                    saveNamedLayout(name, currentLayoutJson())
+                    replace.text = T("Replaced ✓")
+                }
+                add(replace)
+                add(
+                    DriftUi.button(activity, "Export") {
+                        val json = library.getString(libraryKey(name), null) ?: return@button
+                        sheet.dismiss()
+                        launchExportLayout(json)
+                    },
+                )
+                lateinit var delete: TextView
+                var armed = false
+                delete = DriftUi.button(activity, "Delete", DriftUi.Style.DANGER) {
+                    if (!armed) {
+                        armed = true
+                        delete.text = T("Sure?")
+                    } else {
+                        deleteNamedLayout(name)
+                        render()
+                    }
+                }
+                add(delete)
+                sheet.custom(actions)
+            }
+            sheet.button("Import file") {
+                sheet.dismiss()
+                launchImportLayout()
+            }
+            sheet.button("Save current", DriftUi.Style.PRIMARY) {
+                sheet.dismiss()
+                promptSaveLayout()
             }
         }
-        dialog.show()
+        render()
+        sheet.show()
     }
 
     private fun launchExportLayout(json: String) {
@@ -821,28 +893,70 @@ class TouchControlsOverlay private constructor(private val activity: Activity, p
     }
 
     private fun promptImportedLayoutName(json: JSONObject) {
-        val input = EditText(activity)
-        input.hint = "Layout name"
-        input.setText("Imported layout")
-        AlertDialog.Builder(activity)
-            .setTitle("Import layout")
-            .setView(input)
-            .setPositiveButton("Import") { _, _ ->
-                val name = input.text.toString().trim().ifEmpty { "Imported layout" }
-                saveNamedLayout(name, json)
-                applyLayoutJson(json)
-            }
-            .setNegativeButton("Cancel", null)
-            .show()
+        val sheet = DriftSheet(activity, T("Import layout"), if (portraitMode) T("Into the vertical list") else T("Into the horizontal list"), compact = true)
+        if (madeUpright(json) != portraitMode) {
+            sheet.note(
+                if (portraitMode) {
+                    "This layout was made for horizontal mode, so some buttons may land in odd places."
+                } else {
+                    "This layout was made for vertical mode, so some buttons may land in odd places."
+                },
+            )
+        }
+        val input = sheet.textField("Layout name", "Imported layout")
+        sheet.button("Cancel") { sheet.dismiss() }
+        sheet.button("Import", DriftUi.Style.PRIMARY) {
+            val name = input.text.toString().trim().ifEmpty { "Imported layout" }
+            saveNamedLayout(name, json)
+            applyLayoutJson(json)
+            sheet.dismiss()
+        }
+        sheet.show()
     }
 
+    private fun defaultX(spec: ControlSpec): Float =
+        if (portraitMode) PORTRAIT_DEFAULTS[spec.id]?.first ?: spec.defaultXFraction else spec.defaultXFraction
+
+    private fun defaultY(spec: ControlSpec): Float =
+        if (portraitMode) PORTRAIT_DEFAULTS[spec.id]?.second ?: spec.defaultYFraction else spec.defaultYFraction
+
     companion object {
+        /** Set by MainActivity before attach() when the game runs in vertical mode. */
+        var portraitMode = false
+
         private const val PREFS_NAME = "touch_controls"
+        private const val PORTRAIT_PREFS_NAME = "touch_controls_portrait"
+
+        // Vertical mode defaults (x, y as fractions of the tall play area): everything in the
+        // lower half under the race, stick and D-pad on the left, face buttons on the right, L and
+        // R above them, Start at the bottom centre.
+        private val PORTRAIT_DEFAULTS =
+            mapOf(
+                "joystick" to (0.25f to 0.82f),
+                "dpad_up" to (0.18f to 0.585f),
+                "dpad_down" to (0.18f to 0.655f),
+                "dpad_left" to (0.08f to 0.62f),
+                "dpad_right" to (0.28f to 0.62f),
+                "x" to (0.88f to 0.66f),
+                "y" to (0.70f to 0.70f),
+                "a" to (0.84f to 0.78f),
+                "b" to (0.68f to 0.88f),
+                "l" to (0.18f to 0.50f),
+                "r" to (0.82f to 0.55f),
+                "start" to (0.50f to 0.955f),
+            )
         private const val LIBRARY_PREFS_NAME = "touch_controls_library"
         private const val KEY_MASTER_VISIBLE = "master_visible"
         private const val KEY_DOUBLE_TAP_AUTO_HOLD = "double_tap_auto_hold"
         private const val JOYSTICK_CONTROL_ID = "joystick"
         private const val KEY_LIBRARY_NAMES = "layout_names"
+        private const val KEY_LIBRARY_NAMES_PORTRAIT = "portrait_layout_names"
+        private const val KEY_LIBRARY_SPLIT = "split_by_orientation"
+        private const val LAYOUT_PREFIX = "layout_"
+        private const val PORTRAIT_LAYOUT_PREFIX = "portrait_layout_"
+        private const val KEY_ORIENTATION = "orientation"
+        private const val ORIENTATION_VERTICAL = "vertical"
+        private const val ORIENTATION_HORIZONTAL = "horizontal"
 
         const val REQUEST_CODE_EXPORT_LAYOUT = 0x544C4558 // "TLEX"
         const val REQUEST_CODE_IMPORT_LAYOUT = 0x544C494D // "TLIM"

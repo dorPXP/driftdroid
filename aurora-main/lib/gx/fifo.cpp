@@ -387,6 +387,7 @@ void set_threaded(bool enabled) {
       std::lock_guard lock(sMutex);
       sWorkerStop = false;
     }
+    webgpu::mark_device_shared();
     sWorker = std::thread(worker_main);
     sThreaded.store(true, std::memory_order_relaxed);
     Log.info("Enabled threaded GX command processing");

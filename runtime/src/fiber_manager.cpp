@@ -337,6 +337,11 @@ bool GuestFiberManager::CreateGuestFiber(uint32_t guestThreadAddr, uint32_t entr
     // heap chunk and surfaced later as data aborts inside _malloc_r. There is no guard page on a
     // libco stack here, so size generously.
     constexpr unsigned int kHostStackSize = 2 * 1024 * 1024;
+#elif defined(__ANDROID__)
+    // Same lack of a guard page (plain malloc), and guest threads now run native code with sizable
+    // frames - the THP decoder alone keeps ~10 KiB of tables on the stack. Untouched pages of a
+    // malloc this large are never committed, so the extra headroom costs no real memory.
+    constexpr unsigned int kHostStackSize = 1024 * 1024;
 #else
     constexpr unsigned int kHostStackSize = 64 * 1024;
 #endif

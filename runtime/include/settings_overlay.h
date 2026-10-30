@@ -12,6 +12,7 @@ void Draw() noexcept;
 bool StartupScreenVisible() noexcept;
 // Android only: there is no F10 key to press, so the touch UI calls this directly instead.
 void ToggleTopBar() noexcept;
+bool OpenQuickPanel() noexcept;  // the phone's pull-down gesture; true if it opened the panel
 void NotifyStrapInputAccepted() noexcept;
 // The game reported leaving a scene. The first one after the warning screen was accepted is the
 // warning screen itself going away, which is when the startup cover can lift.
