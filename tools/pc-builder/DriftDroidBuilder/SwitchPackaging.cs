@@ -20,6 +20,11 @@ public static class SwitchPackaging
         Directory.CreateDirectory(outDir);
         // A RetroRewind.nro left from an earlier build would not match this one.
         File.Delete(Path.Combine(outDir, "RetroRewind.nro"));
+        var icon = SwitchIcon.Resolve(Path.Combine(assets, "icon.jpg"));
+        if (SwitchIcon.HasCustom)
+        {
+            Log.Info("  using your own Switch icon");
+        }
         var made = new List<string>();
         foreach (var (elf, nro, nacp) in Products.Where(p => retroRewind || p.Nro != "RetroRewind.nro"))
         {
@@ -32,7 +37,7 @@ public static class SwitchPackaging
             Proc.RunChecked($"Packing {nro}", elf2nro, new[]
             {
                 elfPath, target,
-                $"--icon={Path.Combine(assets, "icon.jpg")}",
+                $"--icon={icon}",
                 $"--nacp={Path.Combine(assets, nacp)}",
                 $"--romfsdir={Path.Combine(assets, "romfs")}",
             }, work);

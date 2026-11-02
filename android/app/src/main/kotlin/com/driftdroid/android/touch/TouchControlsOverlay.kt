@@ -86,6 +86,8 @@ class TouchControlsOverlay private constructor(private val activity: Activity, p
     /** Lets MainActivity keep the settings gear's dimmed/highlighted state in sync when edit mode
      * exits via the toolbar's "Done" button rather than however it was entered. */
     var onEditModeChanged: ((Boolean) -> Unit)? = null
+    /** Called after Reset puts every touch control back, so the settings gear (which lives outside this overlay) can go back too. */
+    var onLayoutReset: (() -> Unit)? = null
 
     init {
         userVisible = prefs.getBoolean(KEY_MASTER_VISIBLE, true)
@@ -611,6 +613,7 @@ class TouchControlsOverlay private constructor(private val activity: Activity, p
     private fun resetLayout() {
         prefs.edit().clear().apply()
         rebuildControls()
+        onLayoutReset?.invoke()
     }
 
     private fun rebuildControls() {

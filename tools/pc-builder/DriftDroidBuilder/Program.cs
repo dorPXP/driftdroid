@@ -104,7 +104,20 @@ public static class Program
         try
         {
             Builder.CheckInstall();
-            var disc = args.FirstOrDefault(File.Exists) ?? AskForDisc();
+            var iconAt = Array.IndexOf(args, "--switch-icon");
+            if (args.Contains("--default-switch-icon"))
+            {
+                SwitchIcon.UseDefault();
+            }
+            else if (iconAt >= 0)
+            {
+                var problem = iconAt + 1 < args.Length ? SwitchIcon.Set(args[iconAt + 1]) : "--switch-icon needs a picture file.";
+                if (problem != null)
+                {
+                    throw new BuildException(problem);
+                }
+            }
+            var disc = args.Where((a, i) => !(iconAt >= 0 && i == iconAt + 1)).FirstOrDefault(File.Exists) ?? AskForDisc();
             var (android, nswitch) = AskTargets(args);
             await Builder.RunAsync(new BuildRequest(disc, android, nswitch, !args.Contains("--no-retro-rewind"),
                 PinnedRetroRewind(args)));

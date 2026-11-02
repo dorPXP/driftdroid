@@ -391,6 +391,8 @@ class MainActivity : SDLActivity() {
             layoutEditing = editing
             gearButton.alpha = if (editing) 1f else 0.55f
         }
+        // Reset in the layout editor also puts the gear back where it started.
+        touchControls?.onLayoutReset = { resetGearPosition(gearButton) }
         // No floating button (pulled per direct request: "remove steering with motion the button
         // pls for now") - Motion Steering now lives in the settings sidebar's Controller page
         // instead, matching KartPad's own menu placement and dialog exactly.
@@ -707,6 +709,14 @@ class MainActivity : SDLActivity() {
 
         // Reported refresh rates are floats like 59.94 or 120.00021.
         private const val REFRESH_RATE_EPSILON = 1.0f
+    }
+
+    private fun resetGearPosition(button: Button) {
+        getSharedPreferences(GEAR_PREFS_NAME, Context.MODE_PRIVATE).edit().clear().apply()
+        val parentWidth = mLayout.width.takeIf { it > 0 } ?: resources.displayMetrics.widthPixels
+        val parentHeight = mLayout.height.takeIf { it > 0 } ?: resources.displayMetrics.heightPixels
+        button.x = GEAR_DEFAULT_X_FRACTION * parentWidth - button.width / 2f
+        button.y = GEAR_DEFAULT_Y_FRACTION * parentHeight - button.height / 2f
     }
 
     // Desktop opens the (already fully built) in-game settings overlay with F10 - there is no

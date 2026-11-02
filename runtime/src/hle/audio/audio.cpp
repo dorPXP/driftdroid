@@ -518,23 +518,26 @@ int64_t ConsumeAudioPollDeltaMicros()
     using Clock = std::chrono::steady_clock;
     static thread_local Clock::time_point lastPoll = Clock::now();
 
-    const Clock::time_point now = Clock::now();
-    auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(now - lastPoll).count();
-    lastPoll = now;
-
-    if (elapsed < 0) {
-        elapsed = 0;
-    }
-
     // Cap the catch-up interval after a debugger pause or host stall; backlog drains via
     // kMaxBlocksPerTick per pass. Never return early on a zero delta: two scheduler passes
     // can land in the same microsecond and the backlog still needs servicing.
     constexpr int64_t kMaxPollDeltaMicros = 100'000;
-    // std::chrono::microseconds::rep is a distinct type from int64_t on some platforms (e.g.
-    // NDK libc++: `long long` vs int64_t's `long`) even though both are 64-bit - std::min<T>
-    // requires an exact type match between its two arguments, not just equal width, so this
-    // needs an explicit cast rather than relying on implicit conversion.
-    return std::min(static_cast<int64_t>(elapsed), kMaxPollDeltaMicros);
+
+    const Clock::time_point now = Clock::now();
+    // int64_t cast: std::chrono::microseconds::rep is a distinct type from int64_t on some
+    // platforms (e.g. NDK libc++: `long long` vs `long`), so std::min needs an exact match.
+    const auto elapsed = static_cast<int64_t>(
+        std::chrono::duration_cast<std::chrono::microseconds>(now - lastPoll).count());
+    if (elapsed < 0 || elapsed > kMaxPollDeltaMicros) {
+        // A stall or clock oddity: drop the backlog beyond the cap and restart from now.
+        lastPoll = now;
+        return elapsed < 0 ? 0 : kMaxPollDeltaMicros;
+    }
+    // Advance by the whole microseconds handed out, not to "now": the sub-microsecond
+    // remainder stays for the next poll. Truncating it on every poll made the audio clock
+    // run about 0.5% slow, so the sound queue slowly emptied and crackled (upstream #360).
+    lastPoll += std::chrono::microseconds(elapsed);
+    return elapsed;
 }
 
 } // namespace

@@ -185,14 +185,21 @@ public sealed class MainWindow : Window
         start.Place(_page, left + width - 360, 576, 360, 62);
         start.Click += StartBuild;
 
-        Footer("Nothing is uploaded. Everything happens on this computer.",
+        var footer = new List<(string Text, Tone Tone, Action Action)>
+        {
             ("Help", Tone.Grey, () => Ui.Open(Path.Combine(Builder.BaseDir, "README.txt"))),
             ("Language", Tone.Grey, ShowLanguageDialog),
             ("Output folder", Tone.Grey, () =>
             {
                 Directory.CreateDirectory(Builder.OutputDir);
                 Ui.Reveal(Builder.OutputDir);
-            }));
+            }),
+        };
+        if (_switch)
+        {
+            footer.Add(("Switch icon", SwitchIcon.HasCustom ? Tone.Primary : Tone.Grey, ShowSwitchIconDialog));
+        }
+        Footer("Nothing is uploaded. Everything happens on this computer.", footer.ToArray());
     }
 
     private void SectionHeading(int number, string text, double x, double y)
@@ -848,15 +855,22 @@ public sealed class MainWindow : Window
 
     private void Footer(string note, params (string Text, Tone Tone, Action Action)[] buttons)
     {
-        var label = Ui.Label(note, 18, Palette.Muted);
+        // Four buttons (a Switch build adds "Switch icon") would run into the right-aligned note, so
+        // they get narrower and the note wraps onto two lines in the space that is left.
+        var crowded = buttons.Length > 3;
+        var buttonWidth = crowded ? 170.0 : 200.0;
+        var step = crowded ? 182.0 : 214.0;
+        var noteWidth = crowded ? 340.0 : 600.0;
+        var label = Ui.Label(note, crowded ? 16 : 18, Palette.Muted, FontWeight.Normal, noteWidth);
         label.HorizontalAlignment = HorizontalAlignment.Right;
-        new Border { Child = label }.Place(_page, W - 64 - 600, 674, 600);
+        label.TextAlignment = TextAlignment.Right;
+        new Border { Child = label }.Place(_page, W - 64 - noteWidth, crowded ? 664 : 674, noteWidth);
         FooterLine();
         var x = 64.0;
         foreach (var (text, tone, action) in buttons)
         {
-            FooterButton(text, tone, x, 200, action);
-            x += 214;
+            FooterButton(text, tone, x, buttonWidth, action);
+            x += step;
         }
     }
 
@@ -944,6 +958,97 @@ public sealed class MainWindow : Window
         close.Click += CloseDialog;
         _overlay.IsVisible = true;
         close.Focus();
+    }
+
+    /// <summary>The picture the Switch menu shows for the .nro: DriftDroid's own, or one the player picks.</summary>
+    private void ShowSwitchIconDialog()
+    {
+        _overlay.Children.Clear();
+        _overlay.Children.Add(new Border { Background = Palette.Solid(0, 0, 0, 170) });
+        var canvas = new Canvas { Width = W, Height = H };
+        _overlay.Children.Add(canvas);
+        const double x = 200, y = 110, w = 880, h = 500;
+        new Border
+        {
+            Background = Palette.Panel,
+            BorderBrush = Palette.Border,
+            BorderThickness = new Thickness(1),
+            CornerRadius = new CornerRadius(22),
+        }.Place(canvas, x, y, w, h);
+        Ui.Label("Switch icon", 34, Palette.Text, FontWeight.Bold).Place(canvas, x + 44, y + 30);
+        Ui.Label("The picture the Switch menu shows for DriftDroid. Use DriftDroid's own, or choose any picture of your own, " +
+                 "for example your copy of the game's cover. It stays on this computer.",
+            21, Palette.Muted, FontWeight.Normal, w - 88 - 230).Place(canvas, x + 44, y + 90);
+
+        Avalonia.Media.IImage preview;
+        try
+        {
+            preview = SwitchIcon.HasCustom
+                ? new Avalonia.Media.Imaging.Bitmap(SwitchIcon.CustomPath)
+                : DefaultSwitchIcon();
+        }
+        catch (Exception)
+        {
+            preview = Ui.Art("icon.png");
+        }
+        new Border
+        {
+            CornerRadius = new CornerRadius(18),
+            ClipToBounds = true,
+            BorderBrush = Palette.Border,
+            BorderThickness = new Thickness(2),
+            Child = new Image { Source = preview, Stretch = Stretch.UniformToFill },
+        }.Place(canvas, x + w - 44 - 190, y + 90, 190, 190);
+        Ui.Label(SwitchIcon.HasCustom ? "Your picture" : "DriftDroid's picture", 19, Palette.Muted)
+            .Place(canvas, x + w - 44 - 190, y + 288, 190);
+
+        _dialogNote = Ui.Label("", 19, Palette.Warn, FontWeight.SemiBold, w - 88).Place(canvas, x + 44, y + h - 150);
+        var bw = (w - 88 - 32) / 3;
+        var choose = Tile.Text(Tone.Primary, "Choose a picture...", 21);
+        choose.Place(canvas, x + 44, y + h - 104, bw, 68);
+        choose.Click += PickSwitchIconAsync;
+        var reset = Tile.Text(Tone.Grey, "Use DriftDroid's picture", 21);
+        reset.IsEnabled = SwitchIcon.HasCustom;
+        reset.Place(canvas, x + 44 + bw + 16, y + h - 104, bw, 68);
+        reset.Click += () =>
+        {
+            SwitchIcon.UseDefault();
+            ShowSwitchIconDialog();
+        };
+        var close = Tile.Text(Tone.Normal, "Close", 21);
+        close.Place(canvas, x + 44 + 2 * (bw + 16), y + h - 104, bw, 68);
+        close.Click += () =>
+        {
+            CloseDialog();
+            ShowHome();
+        };
+        _overlay.IsVisible = true;
+        choose.Focus();
+    }
+
+    private static Avalonia.Media.IImage DefaultSwitchIcon() => Ui.Art("switch-icon.jpg");
+
+    private async void PickSwitchIconAsync()
+    {
+        var files = await StorageProvider.OpenFilePickerAsync(new FilePickerOpenOptions
+        {
+            Title = "Choose a picture for the Switch icon",
+            AllowMultiple = false,
+            FileTypeFilter = new[]
+            {
+                new FilePickerFileType("Picture (.png, .jpg)") { Patterns = new[] { "*.png", "*.jpg", "*.jpeg", "*.webp", "*.bmp",
+                    "*.PNG", "*.JPG", "*.JPEG", "*.WEBP", "*.BMP" } },
+                FilePickerFileTypes.All,
+            },
+        });
+        var path = files.FirstOrDefault()?.TryGetLocalPath();
+        if (path == null)
+        {
+            return;
+        }
+        var problem = SwitchIcon.Set(path);
+        ShowSwitchIconDialog();
+        DialogNote(problem ?? "Saved. It is used the next time you build for Switch.");
     }
 
     private void DialogNote(string text)
