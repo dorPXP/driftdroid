@@ -161,7 +161,7 @@ a phone, and the honest summary is:
   extraction step.
 - A clean, unmodified **PAL `RMCP01`** disc image of Mario Kart Wii (.iso or .wbfs), dumped by you.
   Only the clean PAL revision is supported; other regions or modified executables are rejected.
-- **A Windows 10/11 or Linux (x86-64) PC, once**, to run DriftDroid Builder (about 25 GB of free space while it works).
+- **A Windows 10/11 or Linux (x86-64) PC, once**, to run DriftDroid Builder (about 10 GB of free space while it works for Android, 16 GB if you also build for Switch).
 
 > [!NOTE]
 > Nobody here will tell you where to get the game. Dumping your own disc is on you, and links to

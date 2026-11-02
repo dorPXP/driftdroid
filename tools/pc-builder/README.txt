@@ -5,7 +5,7 @@ DriftDroid's downloads do not contain any of Mario Kart Wii's code. This program
 on your own computer, from your own disc.
 
 You need:
-  - A 64-bit PC running Windows 10 or 11, or Linux (x86-64), about 25 GB of free disk space and an
+  - A 64-bit PC running Windows 10 or 11, or Linux (x86-64), about 10 GB of free disk space (16 GB for Android and Switch together) and an
     internet connection.
   - Your Mario Kart Wii disc as an .iso or .wbfs file. It must be the PAL (European) version,
     game ID RMCP01. Split .wbfs files (.wbfs + .wbf1) work too.
