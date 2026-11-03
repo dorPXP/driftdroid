@@ -798,7 +798,12 @@ void DrawRumbleSetting() {
 extern "C" const char* AuroraSwitchPlayerController(int player);  // aurora lib/switch/input_switch.cpp
 extern "C" int AuroraSwitchPlayerPressing(int player);
 extern "C" int AuroraSwitchShowControllerApplet();
+} // namespace
+} // namespace settings_overlay
+// Global scope: GCC 15 gives an extern "C" variable declared in an unnamed namespace that namespace.
 extern "C" const unsigned char kAuroraSwitchPlayerColors[4][3];
+namespace settings_overlay {
+namespace {
 
 ImVec4 SwitchPlayerColor(int player) {
     return ImVec4(kAuroraSwitchPlayerColors[player][0] / 255.0f, kAuroraSwitchPlayerColors[player][1] / 255.0f,
