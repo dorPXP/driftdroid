@@ -63,6 +63,62 @@ Sint16 clamp_axis(s32 value) {
   return static_cast<Sint16>(value);
 }
 
+// One Joy-Con held sideways, one per player (paired on the controller screen with SL+SR). HID
+// reports its buttons, stick and motion sensor as if it were upright, like devkitPro's SDL2 port
+// assumes (SDL_sysjoystick.c), so they are turned here: the left Joy-Con is held turned a quarter
+// anticlockwise (stick on the left), the right one a quarter clockwise (stick on the right).
+enum class SingleJoyCon { None, Left, Right };
+
+SingleJoyCon single_joycon(u32 style) {
+  // A pair, a Pro Controller or the console itself is never a sideways Joy-Con, even when the
+  // player's pad also covers a slot a single Joy-Con is in.
+  if ((style & (HidNpadStyleTag_NpadJoyDual | HidNpadStyleTag_NpadFullKey | HidNpadStyleTag_NpadHandheld)) != 0) {
+    return SingleJoyCon::None;
+  }
+  if ((style & HidNpadStyleTag_NpadJoyLeft) != 0) {
+    return SingleJoyCon::Left;
+  }
+  if ((style & HidNpadStyleTag_NpadJoyRight) != 0) {
+    return SingleJoyCon::Right;
+  }
+  return SingleJoyCon::None;
+}
+
+struct SidewaysButton {
+  u64 physical;  // the button's own name, as HID reports it
+  u64 as;        // the full-controller button it stands for, held sideways
+};
+
+// The four face buttons by position (A east, B south, X north, Y west, as on a full controller);
+// SL/SR are the shoulders, used as ZL/ZR so they reach the game's L (item) and R (drift) as on
+// Mario Kart 8; the stick click is the D-pad's Up (trick and wheelie); the one +/- is Start.
+constexpr SidewaysButton kLeftSideways[] = {
+    {HidNpadButton_Down, HidNpadButton_A},       {HidNpadButton_Left, HidNpadButton_B},
+    {HidNpadButton_Right, HidNpadButton_X},      {HidNpadButton_Up, HidNpadButton_Y},
+    {HidNpadButton_LeftSL, HidNpadButton_ZL},    {HidNpadButton_LeftSR, HidNpadButton_ZR},
+    {HidNpadButton_StickL, HidNpadButton_Up},    {HidNpadButton_Minus, HidNpadButton_Plus},
+};
+constexpr SidewaysButton kRightSideways[] = {
+    {HidNpadButton_X, HidNpadButton_A},          {HidNpadButton_A, HidNpadButton_B},
+    {HidNpadButton_Y, HidNpadButton_X},          {HidNpadButton_B, HidNpadButton_Y},
+    {HidNpadButton_RightSL, HidNpadButton_ZL},   {HidNpadButton_RightSR, HidNpadButton_ZR},
+    {HidNpadButton_StickR, HidNpadButton_Up},    {HidNpadButton_Plus, HidNpadButton_Plus},
+};
+
+u64 sideways_buttons(SingleJoyCon joycon, u64 held) {
+  u64 out = 0;
+  if (joycon == SingleJoyCon::Left) {
+    for (const SidewaysButton& b : kLeftSideways) {
+      out |= (held & b.physical) != 0 ? b.as : 0;
+    }
+  } else {
+    for (const SidewaysButton& b : kRightSideways) {
+      out |= (held & b.physical) != 0 ? b.as : 0;
+    }
+  }
+  return out;
+}
+
 // SDL's virtual joystick keeps the last value it was given, and every SDL_SetJoystickVirtual*
 // call looks the joystick up under SDL's object rwlock. Sending all 21 inputs on every update was
 // ~0.9% of a race frame in lock traffic, so only send the ones that changed.
@@ -155,7 +211,8 @@ std::atomic<unsigned> g_motionSeen{0};       // players whose sensor has answere
 std::atomic<float> g_motionValue[kPlayers]{}; // last reading, for the settings menu's tilt bar
 
 struct MotionSensors {
-  HidSixAxisSensorHandle handles[4]{};  // handheld (player 1 only), full controller, Joy-Con pair (left, right)
+  // handheld (player 1 only), full controller, Joy-Con pair (left, right), single left, single right
+  HidSixAxisSensorHandle handles[6]{};
   bool started = false;
   u64 styles = 0;  // the controller styles when the sensors were last started
   float center = 0.0f;
@@ -191,6 +248,8 @@ void start_motion_sensors(size_t index) {
   }
   hidGetSixAxisSensorHandles(&motion.handles[1], 1, id, HidNpadStyleTag_NpadFullKey);
   hidGetSixAxisSensorHandles(&motion.handles[2], 2, id, HidNpadStyleTag_NpadJoyDual);
+  hidGetSixAxisSensorHandles(&motion.handles[4], 1, id, HidNpadStyleTag_NpadJoyLeft);
+  hidGetSixAxisSensorHandles(&motion.handles[5], 1, id, HidNpadStyleTag_NpadJoyRight);
   for (size_t i = index == 0 ? 0 : 1; i < std::size(motion.handles); ++i) {
     hidStartSixAxisSensor(motion.handles[i]);
   }
@@ -203,7 +262,12 @@ bool read_acceleration(size_t index, const PadState& pad, HidVector& out) {
   const u32 style = padGetStyleSet(&pad);
   // A Joy-Con pair is read from the right Joy-Con, or the left one if the right gives nothing.
   int which[2] = {-1, -1};
-  if (index == 0 && (style & HidNpadStyleTag_NpadHandheld) != 0) {
+  const SingleJoyCon single = single_joycon(style);
+  if (single == SingleJoyCon::Left) {
+    which[0] = 4;
+  } else if (single == SingleJoyCon::Right) {
+    which[0] = 5;
+  } else if (index == 0 && (style & HidNpadStyleTag_NpadHandheld) != 0) {
     which[0] = 0;
   } else if ((style & HidNpadStyleTag_NpadFullKey) != 0) {
     which[0] = 1;
@@ -228,6 +292,14 @@ bool read_acceleration(size_t index, const PadState& pad, HidVector& out) {
     return false;
   }
   out = state.acceleration;
+  // Sideways, the Joy-Con's long axis (y) is the player's left-right: its top (the stick end of
+  // the left Joy-Con) points left, the right Joy-Con's top points right. Tilt and shake then read
+  // a sideways Joy-Con turned like a wheel the way they read an upright controller rolled.
+  if (single == SingleJoyCon::Left) {
+    out = {-state.acceleration.y, state.acceleration.x, state.acceleration.z};
+  } else if (single == SingleJoyCon::Right) {
+    out = {state.acceleration.y, -state.acceleration.x, state.acceleration.z};
+  }
   return true;
 }
 
@@ -443,8 +515,10 @@ void SDLCALL update(void* userdata) {
     return;
   }
   padUpdate(&player.pad);
-  const u64 held = padGetButtons(&player.pad);
-  player.pressing.store(held != 0, std::memory_order_relaxed);
+  const SingleJoyCon single = single_joycon(padGetStyleSet(&player.pad));
+  const u64 raw = padGetButtons(&player.pad);
+  const u64 held = single == SingleJoyCon::None ? raw : sideways_buttons(single, raw);
+  player.pressing.store(raw != 0, std::memory_order_relaxed);
   const size_t index = static_cast<size_t>(&player - g_players);
   const bool driving = g_motionDriving.load(std::memory_order_relaxed);
   const bool menuOpen = g_motionMenuOpen.load(std::memory_order_relaxed);
@@ -459,8 +533,16 @@ void SDLCALL update(void* userdata) {
       SDL_SetJoystickVirtualButton(player.joystick, kButtons[i].sdl, down);
     }
   }
-  const HidAnalogStickState left = padGetStickPos(&player.pad, 0);
-  const HidAnalogStickState right = padGetStickPos(&player.pad, 1);
+  HidAnalogStickState left = padGetStickPos(&player.pad, 0);
+  HidAnalogStickState right = padGetStickPos(&player.pad, 1);
+  // A sideways Joy-Con's one stick, turned with the Joy-Con, is the player's left stick.
+  if (single == SingleJoyCon::Left) {
+    left = {-left.y, left.x};
+    right = {};
+  } else if (single == SingleJoyCon::Right) {
+    left = {right.y, -right.x};
+    right = {};
+  }
   // libnx sticks are +Y up; SDL gamepad axes are +Y down.
   s32 steerX = left.x;
   // Tilt steers a player who has it on, unless the stick itself is pushed sideways (menus stay
@@ -494,6 +576,8 @@ void attach() noexcept {
   // Accept every player slot: supporting only No1+Handheld makes HID disconnect any other
   // controller at launch. Slots 5-8 have no port in the game, so they steer player 1 as before.
   padConfigureInput(8, HidNpadStyleSet_NpadStandard);
+  // Single Joy-Cons are held sideways; the controller screen then offers "press SL and SR".
+  hidSetNpadJoyHoldType(HidNpadJoyHoldType_Horizontal);
   padInitialize(&g_players[0].pad, HidNpadIdType_No1, HidNpadIdType_Handheld, HidNpadIdType_No5, HidNpadIdType_No6,
                 HidNpadIdType_No7, HidNpadIdType_No8);
   padInitialize(&g_players[1].pad, HidNpadIdType_No2);
@@ -630,8 +714,10 @@ extern "C" const unsigned char kAuroraSwitchPlayerColors[4][3] = {
 
 // The console's own controller screen, the one games show before multiplayer ("press L and R"):
 // players join, swap or leave there, and each controller's lights show its player number.
-// Blocks until it closes. Handheld is not allowed with more than one player, as in games.
+// Blocks until it closes. Handheld is not allowed with more than one player, as in games. A
+// Joy-Con held sideways can join as its own player (SL and SR), one Joy-Con per player.
 extern "C" int AuroraSwitchShowControllerApplet() {
+  hidSetNpadJoyHoldType(HidNpadJoyHoldType_Horizontal);
   HidLaControllerSupportArg arg;
   hidLaCreateControllerSupportArg(&arg);
   arg.hdr.player_count_min = 1;
