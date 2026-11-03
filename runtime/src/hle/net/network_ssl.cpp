@@ -215,6 +215,7 @@ NasSslWriteAction PreparePlainNasTcpWrite(WiiSocket& socket, const uint8_t* data
     if (!StartsNasAuthRequest(data, size) && socket.nasWriteBuffer.empty()) {
         return NasSslWriteAction::PassThrough;
     }
+    socket.nasLoginRequest = true;
     return AccumulateNasRequest(socket.nasWriteBuffer, data, size, patched);
 }
 

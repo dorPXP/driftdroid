@@ -134,6 +134,9 @@ struct WiiSocket {
     bool hasPeerAddr = false;
     sockaddr_in peerAddr{};
     std::vector<uint8_t> nasWriteBuffer;
+    // Set when the guest sent the NAS "POST /ac" login on this socket; it identifies the login
+    // connection even if the DNS bookkeeping (IsNasAddress) did not see the address.
+    bool nasLoginRequest = false;
     uint64_t generation = 0;
     // Failure-report one-shots: a failing send/recv repeats every retry, so only
     // a change of error is reported. Reset with the rest of the struct when the

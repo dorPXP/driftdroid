@@ -554,20 +554,34 @@ int32_t HandleIpTopIoctlv(uint32_t cmd, const std::vector<IoVector>& in, const s
         // arrives, so a fast connection pays nothing.
         constexpr int kNasRecvWaitMs = 5000;
         const bool isPlainHttpSocket = s->type == SOCK_STREAM && s->peerPort == 80;
-        const bool isNasLoginSocket = isPlainHttpSocket && IsNasAddress(s->peerAddr.sin_addr.s_addr);
+        const bool isNasLoginSocket =
+            isPlainHttpSocket && (s->nasLoginRequest || IsNasAddress(s->peerAddr.sin_addr.s_addr));
         // The NAS server gets the long wait; any other port-80 connection (rwfc.net, behind
         // Cloudflare) keeps the 250 ms of 1.4.0, so a reply that never comes cannot freeze the game.
         const bool isNasPayloadSocket = isPlainHttpSocket;
         const int streamWaitMs =
-            (forceNonBlock || s->nonblocking)
-                ? (isNasLoginSocket ? kNasRecvWaitMs : (isNasPayloadSocket ? kStreamRecvWaitMs : 0))
-                : kStreamRecvWaitMs;
+            isNasLoginSocket
+                ? kNasRecvWaitMs
+                : ((forceNonBlock || s->nonblocking) ? (isNasPayloadSocket ? kStreamRecvWaitMs : 0)
+                                                     : kStreamRecvWaitMs);
         // The NAS/payload exception also has to bypass !fromPtr: the guest's recvfrom call here
         // supplies an address-out buffer (numOut==2) even though the socket is a connected TCP
         // stream, so fromPtr is never null for this call site - it would otherwise silently skip
         // the wait added above regardless of streamWaitMs. See the comment above kStreamRecvWaitMs.
         const bool waitReady = ret < 0 && (!fromPtr || isNasPayloadSocket) && s->type == SOCK_STREAM &&
             IsWouldBlockError(nativeErr) && WaitForReadable(s->native, streamWaitMs);
+        if (isPlainHttpSocket && ret < 0) {
+            // Diagnostics: shows which wait this socket got and whether the reply arrived in time.
+            static std::atomic<uint32_t> httpWaitLogs{0};
+            if (httpWaitLogs.fetch_add(1, std::memory_order_relaxed) < 40) {
+                char ip[INET_ADDRSTRLEN]{};
+                inet_ntop(AF_INET, &s->peerAddr.sin_addr, ip, sizeof(ip));
+                NetFail("login-wait v2: fd=%u peer=%s nas=%d (request=%d addr=%d) nonblock=%d wait=%d ms ready=%d",
+                        fd, ip, isNasLoginSocket ? 1 : 0, s->nasLoginRequest ? 1 : 0,
+                        IsNasAddress(s->peerAddr.sin_addr.s_addr) ? 1 : 0,
+                        (forceNonBlock || s->nonblocking) ? 1 : 0, streamWaitMs, waitReady ? 1 : 0);
+            }
+        }
         if (waitReady) {
             ret = recvfrom(s->native, data, static_cast<int>(out[0].size), static_cast<int>(flags),
                            fromPtr, fromPtr ? &fromLen : nullptr);
