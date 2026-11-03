@@ -548,10 +548,20 @@ int32_t HandleIpTopIoctlv(uint32_t cmd, const std::vector<IoVector>& in, const s
         // land. Give this one known call site a real, bounded wait even though it's nonblocking.
         // Every other nonblocking socket keeps the original instant-EAGAIN behavior.
         constexpr int kStreamRecvWaitMs = 250;
-        const bool isNasPayloadSocket = s->type == SOCK_STREAM && s->peerPort == 80;
+        // The NAS reply can take well over 250 ms on a long route (a Galaxy S25 in Japan lost
+        // all three login attempts at exactly 250 ms and showed 20100). KartPad parks the
+        // receive for up to five seconds; wait as long here. The wait ends the moment data
+        // arrives, so a fast connection pays nothing.
+        constexpr int kNasRecvWaitMs = 5000;
+        const bool isPlainHttpSocket = s->type == SOCK_STREAM && s->peerPort == 80;
+        const bool isNasLoginSocket = isPlainHttpSocket && IsNasAddress(s->peerAddr.sin_addr.s_addr);
+        // The NAS server gets the long wait; any other port-80 connection (rwfc.net, behind
+        // Cloudflare) keeps the 250 ms of 1.4.0, so a reply that never comes cannot freeze the game.
+        const bool isNasPayloadSocket = isPlainHttpSocket;
         const int streamWaitMs =
-            (forceNonBlock || s->nonblocking) ? (isNasPayloadSocket ? kStreamRecvWaitMs : 0)
-                                               : kStreamRecvWaitMs;
+            (forceNonBlock || s->nonblocking)
+                ? (isNasLoginSocket ? kNasRecvWaitMs : (isNasPayloadSocket ? kStreamRecvWaitMs : 0))
+                : kStreamRecvWaitMs;
         // The NAS/payload exception also has to bypass !fromPtr: the guest's recvfrom call here
         // supplies an address-out buffer (numOut==2) even though the socket is a connected TCP
         // stream, so fromPtr is never null for this call site - it would otherwise silently skip

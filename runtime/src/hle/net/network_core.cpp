@@ -6,6 +6,8 @@
 #include "runtime_log.h"
 #include "runtime_product.h"
 
+#include <vector>
+
 namespace NetworkHle {
 
 bool RetroRewindProfileActive();
@@ -350,6 +352,22 @@ static int32_t FinishNonBlockingConnect(NativeSocket socket, int timeoutMs) {
         return pollRet == 0 ? -SO_ENETUNREACH : TranslateSocketError(hostError, false);
     }
     return ClassifySettledConnect(socket);
+}
+
+static std::mutex g_nasAddressMutex;
+static std::vector<uint32_t> g_nasAddresses;
+
+void NoteNasAddress(uint32_t ipv4NetworkOrder) {
+    std::lock_guard<std::mutex> lock(g_nasAddressMutex);
+    if (std::find(g_nasAddresses.begin(), g_nasAddresses.end(), ipv4NetworkOrder) == g_nasAddresses.end() &&
+        g_nasAddresses.size() < 16) {
+        g_nasAddresses.push_back(ipv4NetworkOrder);
+    }
+}
+
+bool IsNasAddress(uint32_t ipv4NetworkOrder) {
+    std::lock_guard<std::mutex> lock(g_nasAddressMutex);
+    return std::find(g_nasAddresses.begin(), g_nasAddresses.end(), ipv4NetworkOrder) != g_nasAddresses.end();
 }
 
 bool WaitForReadable(NativeSocket socket, int timeoutMs) {

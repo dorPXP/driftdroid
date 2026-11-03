@@ -216,6 +216,10 @@ bool IsWouldBlockError(int err);
 int ProbeConnectSettled(NativeSocket socket, int timeoutMs);
 int32_t ClassifySettledConnect(NativeSocket socket);
 bool WaitForReadable(NativeSocket socket, int timeoutMs);
+// Addresses the guest resolved for the Nintendo/Retro WFC login host (nas.*, naswii.*), so the
+// long login-reply wait applies to that server only and not to any other port-80 connection.
+void NoteNasAddress(uint32_t ipv4NetworkOrder);
+bool IsNasAddress(uint32_t ipv4NetworkOrder);
 void CloseNativeSocket(NativeSocket socket);
 void SetNonBlocking(NativeSocket socket, bool enabled);
 int32_t ReconnectWiiSocket(WiiSocket& socket, uint16_t port);

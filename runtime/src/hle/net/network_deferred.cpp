@@ -297,6 +297,13 @@ static DeferredDnsCompletion ResolveDeferredDns(DeferredDnsWork work) {
     }
 
     NetFail("dns %s '%s' ok", DeferredDnsKindName(completion.work.kind), completion.work.node.c_str());
+    if (completion.work.node.rfind("nas.", 0) == 0 || completion.work.node.rfind("naswii.", 0) == 0) {
+        for (addrinfo* it = nativeResults; it; it = it->ai_next) {
+            if (it->ai_family == AF_INET && it->ai_addr) {
+                NoteNasAddress(reinterpret_cast<const sockaddr_in*>(it->ai_addr)->sin_addr.s_addr);
+            }
+        }
+    }
     // The host resolver's linked list and sockaddr pointers are owned by its
     // allocator. Normalize everything to POD before leaving the worker.
     const size_t maxAddresses = completion.work.kind == DeferredDnsKind::GetHostByName
