@@ -1,8 +1,10 @@
 # PC builder: how it works
 
-From 1.4.0 the downloads (Android APK, Switch NROs) contain no Mario Kart Wii code. Players run
-DriftDroid Builder (`tools/pc-builder`) on a Windows or Linux PC: it reads their own PAL disc,
-translates the game code and compiles it. The player-facing instructions are in
+DriftDroid Builder (`tools/pc-builder`) runs on a Windows or Linux PC: it reads the player's own PAL disc,
+translates the game code and compiles it. It makes the **Switch** files (`DriftDroid.nro`,
+`RetroRewind.nro`, which are never shipped) and, optionally, an Android **game pack** that carries the newest
+Retro Rewind code. The Android APK of 1.4.0 already includes translated game code (see "The app side"), so
+Android players do not need the Builder. The player-facing instructions are in
 `tools/pc-builder/README.txt`; this page is for people maintaining it.
 
 ## Pieces
@@ -68,12 +70,38 @@ get devkitPro when it is missing), a checklist of the build's stages with a prog
 - **Switch**: devkitPro's devkitA64 + libnx, from its own installer (devkitPro asks that its tools
   are not redistributed or auto-downloaded). `DEVKITPRO` or the default install path.
 
+## The Switch icon
+
+With Switch ticked the window shows a **Switch icon** button (`SwitchIcon.cs`, `ShowSwitchIconDialog` in
+`Gui/MainWindow.cs`). The player picks any PNG/JPG/WebP/BMP; it is cropped to the centre square, scaled to
+256x256 and saved as a JPEG in `%APPDATA%/DriftDroidBuilder/switch-icon.jpg` (Linux:
+`~/.config/DriftDroidBuilder/`). `SwitchPackaging` passes it to `elf2nro --icon` for both `.nro` files, and the
+image never leaves the computer. Without a custom icon the builder uses `Assets/switch-icon.jpg`, which is
+**embedded in the builder program, not in the toolkit**, so changing it does not change the toolkit id. Terminal:
+`--switch-icon <picture>` (saved for later builds) and `--default-switch-icon`. The footer shrinks its buttons
+when this fourth button is shown so the note beside them does not overlap.
+
+## Disk space
+
+`Builder.NeededGb` is the figure the window and the README use: 8 GB per Android build, 6 GB for Switch, plus 2
+(so about 10 GB for Android and 16 GB for both). Measured leftovers after a finished Android build: about
+1.3 GB `work`, 2.2 GB of downloads (the compiler), 330 MB toolkit. The peak while compiling was not measured.
+
 ## The app side
 
-The release APK is built without `libWiiCompiled.so`/`libGameCombined.so` and with
-`assets/toolkit-id.txt` (a hash of everything the builder links against). The app imports a pack
-only when its `toolkit` matches, so a pack always fits the app's own native glue: a new app release
-needs a new pack.
+The release APK carries both game libraries (`libWiiCompiled.so`, `libGameCombined.so`) **and**
+`assets/toolkit-id.txt` (a hash of everything the builder links against):
+
+- `GamePack.hasBundledCode()` looks for `lib/arm64-v8a/libWiiCompiled.so` inside the APK. With bundled code the
+  game starts without a pack.
+- A pack whose `toolkit` matches the id is imported and then **takes over** the bundled code
+  (`GamePack.state() == Ready` makes `MainActivity` load the pack's libraries), for example for a newer Retro
+  Rewind. A pack for another id is refused, so a pack always fits the app's own native glue.
+- Without bundled code (a code-free build) the launcher asks for a pack instead.
+
+The libraries inside the release APK are the ones a Builder pack contains (profile-optimised, stripped, build
+paths already neutral), so the APK and a Builder pack run the same code. `tools/release/` has the scripts that
+assemble the APK either way (see [releasing.md](releasing.md)).
 
 ## Testing
 
@@ -81,7 +109,12 @@ needs a new pack.
   `DRIFTDROID_NDK=<ndk> ./DriftDroidBuilder <disc> --android` (add `--switch` with devkitPro
   installed). `DRIFTDROID_SKIP_SPACE_CHECK=1` and `DRIFTDROID_JOBS=<n>` help on small machines.
 - Windows: run the `win-x64` folder under Wine. Single-file publishing does not start under Wine,
-  so the Windows build ships as a folder.
+  so the Windows build ships as a folder. In terminal mode (`--android <disc>`) Wine builds the Android pack
+  end to end; the Switch half needs a Windows devkitPro install, which Wine cannot provide, so check the Switch
+  step with the Linux build.
+- Looking at the window from a script: capture only its window (`import -window <id>` on X11), never the whole
+  desktop. Scripted clicks reached the tiles but not the footer buttons (Help, Language, Switch icon), so open
+  those by hand when checking a dialog.
 - `--check-disc <image>` and `--check-retro-rewind [--retro-rewind <version>]` check the inputs
   without building.
 - Screens in every state without running a build: a small program using `Avalonia.Headless` +

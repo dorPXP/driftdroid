@@ -61,6 +61,20 @@ built for. See "Supporting a new Retro Rewind release" in [CONTRIBUTING.md](../C
   Switch both vibration bands play at about 150 Hz with the game's strength, the signal SDL sends
   the same controllers on PC.
 
+## Starting DriftDroid
+
+Start it from its own Home tile (a forwarder or title override that takes over a game's process), not from
+the Album or an applet-mode hbmenu. Opened as an applet the program gets far too little memory and the game
+aborts while starting (the log ends at `[selftest] begin`, and Atmosphere writes a `User Break` crash report
+with result `2359-0003` for `hbloader`, followed by a `qlaunch` crash). The launcher checks this
+(`InAppletMode()` in `switch_launcher.cpp`, using `appletGetAppletType()`): in applet mode it shows a red
+status line, "Opened from the Album: too little memory for the game. Start DriftDroid from its Home tile.",
+and refuses to start a game instead of crashing. The Home tile icon is separate from the `.nro` icon: it
+belongs to the forwarder, which the player makes themselves.
+
+The icon the `.nro` shows in the homebrew menu is chosen when DriftDroid Builder packs it (see
+[pc-builder.md](pc-builder.md), "The Switch icon"): DriftDroid's own, or any picture the player picks.
+
 ## Optional flags
 
 Empty files in `/switch/WiiCompiled/`:
