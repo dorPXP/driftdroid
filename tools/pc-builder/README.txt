@@ -1,8 +1,9 @@
 DriftDroid Builder 1.4.0
 ========================
 
-DriftDroid's downloads do not contain any of Mario Kart Wii's code. This program makes that code
-on your own computer, from your own disc.
+This program makes DriftDroid's Switch files, and an optional Android game pack with the newest
+Retro Rewind code, on your own computer from your own disc. (The Android APK already includes the game
+code; you only need this for Switch or for a newer Retro Rewind.)
 
 You need:
   - A 64-bit PC running Windows 10 or 11, or Linux (x86-64), about 10 GB of free disk space (16 GB for Android and Switch together) and an

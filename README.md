@@ -3,9 +3,10 @@
 
 A native Android port of [WiiCompiled](https://github.com/patchzyy/Wiicompiled), a static
 recompilation of Mario Kart Wii to native code. This fork adds everything the game needs to be a
-phone app: touch controls, motion steering, a mobile settings menu and a launcher. The game
-code itself is made from your own disc by **DriftDroid Builder**, a Windows and Linux program, so neither the
-app nor anything else in this project carries any of the game.
+phone app: touch controls, motion steering, a mobile settings menu and a launcher. The Android
+APK includes the translated game code but none of the game's files (courses, music, textures): those
+always come from your own disc. **DriftDroid Builder**, a Windows and Linux program, makes the Switch
+version, and an optional Android game pack with the newest Retro Rewind code, from your own disc.
 
 There's no emulator in the loop, no interpreter, no JIT, no PowerPC anywhere at runtime - the game
 runs as translated native ARM64 code, same as the original desktop project.
@@ -19,16 +20,17 @@ runs as translated native ARM64 code, same as the original desktop project.
 
 ## Status
 
-DriftDroid is playable end to end: run DriftDroid Builder once on a Windows or Linux PC
-with your own disc image, import the game pack it makes into the app, and pick
-the same disc image on the phone for the game's data.
+DriftDroid is playable end to end: install the APK and pick your own disc image on the phone for
+the game's data. No PC is needed on Android. (A PC with DriftDroid Builder is needed for Switch, and
+optional on Android for the newest Retro Rewind code.)
 
 - **Races, menus, audio, saves and online play work**, with touch controls or a
   physical controller.
 - **Both Original Mario Kart Wii and Retro Rewind** are supported, chosen from
   the launcher screen. Retro Rewind 6.13.4 is the version this release runs.
-- **The game code comes from your disc, on your PC**: DriftDroid Builder
-  translates and compiles it into a game pack (one zip) that the app imports.
+- **The game code is in the APK.** DriftDroid Builder can also translate and compile it on your PC
+  from your own disc into a game pack (one zip) that the app imports and prefers: that is how a
+  newer Retro Rewind is supported before a new DriftDroid release.
 - **The game data comes from your disc, on the phone**: pick your disc image
   and DriftDroid verifies it's a clean PAL `RMCP01` disc and extracts it.
 
@@ -161,7 +163,7 @@ a phone, and the honest summary is:
   extraction step.
 - A clean, unmodified **PAL `RMCP01`** disc image of Mario Kart Wii (.iso or .wbfs), dumped by you.
   Only the clean PAL revision is supported; other regions or modified executables are rejected.
-- **A Windows 10/11 or Linux (x86-64) PC, once**, to run DriftDroid Builder (about 10 GB of free space while it works for Android, 16 GB if you also build for Switch).
+- **Optional, and needed for Switch:** a Windows 10/11 or Linux (x86-64) PC, once, to run DriftDroid Builder (about 10 GB of free space while it works for Android, 16 GB if you also build for Switch).
 
 > [!NOTE]
 > Nobody here will tell you where to get the game. Dumping your own disc is on you, and links to
@@ -169,19 +171,23 @@ a phone, and the honest summary is:
 
 ## Installing
 
-From this repo's [Releases](https://github.com/dorPXP/driftdroid/releases) page, get both the APK
-and **DriftDroid Builder** (a zip) of the same version. The app isn't on the Play Store.
+From this repo's [Releases](https://github.com/dorPXP/driftdroid/releases) page, get the APK (and
+**DriftDroid Builder**, a zip of the same version, if you want the Switch version or a game pack).
+The app isn't on the Play Store.
 
-1. On your PC, unpack DriftDroid Builder and open `DriftDroidBuilder.exe` (Linux: `DriftDroidBuilder`).
-   In its window, choose your disc image, pick Android and press **Start**. It takes 30 minutes to a
-   couple of hours and makes `output/DriftDroid-GamePack-<version>.zip`.
-2. Install the APK on your phone, copy the game pack zip over, and tap **Import Game Pack...** in
-   the launcher.
-3. Start the game. The first time, it asks for your disc image again and extracts the game's data
-   on the phone.
+1. Install the APK on your phone.
+2. Open it, tap **Install with ISO/WBFS** and pick your disc image. The first time, DriftDroid
+   extracts the game's data on the phone.
+3. For Retro Rewind, tap **Install** on its card.
 
 To update, install the new APK over the old one - saves, the extracted game data and Retro Rewind
-all stay. A game pack fits one app version, so make a new one with the matching builder.
+all stay.
+
+**Optional: a game pack.** On your PC, unpack DriftDroid Builder, open `DriftDroidBuilder.exe`
+(Linux: `DriftDroidBuilder`), choose your disc image, pick Android and press **Start**. It takes 30
+minutes to a couple of hours and makes `output/DriftDroid-GamePack-<version>.zip`. Copy it to the
+phone and tap **Import Game Pack...**: the app then uses that game code, for example a newer Retro
+Rewind. A game pack fits one app version, so make a new one with the matching builder.
 
 DriftDroid Builder also makes the **Switch** version (`DriftDroid.nro` and `RetroRewind.nro`); that
 needs devkitPro's "Switch Development" tools installed on the PC.
@@ -208,9 +214,9 @@ cmake --build <your-android-build-dir>
 cd android && ./gradlew assembleRelease
 ```
 
-A build made this way carries the game code inside the APK, for your own use. Release APKs don't:
-they carry a toolkit id (`assets/toolkit-id.txt`) and load the game code from an imported game
-pack instead. DriftDroid Builder is made from a finished build by `tools/pc-builder/extract_plan.py`
+A build made this way carries the game code inside the APK. Release APKs do too, and also carry a
+toolkit id (`assets/toolkit-id.txt`), so a game pack made by DriftDroid Builder with the same id takes
+over the code in the APK. DriftDroid Builder is made from a finished build by `tools/pc-builder/extract_plan.py`
 and `tools/pc-builder/make_toolkit.sh`; how it works is in [`docs/pc-builder.md`](docs/pc-builder.md).
 Switch files, controls and log messages are in [`docs/switch.md`](docs/switch.md).
 
