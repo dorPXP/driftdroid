@@ -43,10 +43,21 @@ internal object GamePack {
         return if (installedToolkitId(context) == expected) State.Ready else State.WrongVersion
     }
 
-    /** False when the installed pack was built without Retro Rewind. A development build (no
-     * toolkit id) carries both libraries in the APK. */
+    /** Whether the game code is inside the APK itself (a release that bundles it, or a development
+     * build). Then the game starts without a pack, and a matching pack made by DriftDroid Builder still
+     * takes over (it can carry a newer Retro Rewind). */
+    fun hasBundledCode(context: Context): Boolean =
+        runCatching {
+            java.util.zip.ZipFile(context.applicationInfo.sourceDir).use {
+                it.getEntry("lib/arm64-v8a/$BASE_LIBRARY") != null
+            }
+        }.getOrDefault(false)
+
+    /** False when the pack in use was built without Retro Rewind. Without a usable pack the game code
+     * in the APK is used, and that carries both libraries. */
     fun hasRetroRewind(context: Context): Boolean =
-        expectedToolkitId(context) == null || File(directory(context), RETRO_REWIND_LIBRARY).isFile
+        if (state(context) == State.Ready) File(directory(context), RETRO_REWIND_LIBRARY).isFile
+        else hasBundledCode(context)
 
     /** Copies the picked zip in. Returns null on success, otherwise what went wrong. Slow (a few
      * hundred MB): call from a background thread. */

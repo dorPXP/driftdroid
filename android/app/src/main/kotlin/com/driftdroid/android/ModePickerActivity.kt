@@ -546,9 +546,11 @@ class ModePickerActivity : Activity() {
     }
 
     private fun launchProduct(product: String) {
-        // The game code is not in the APK: it is made on a PC from the player's disc (GamePack.kt).
-        // A development build (no toolkit id) still carries it.
-        if (GamePack.expectedToolkitId(this) != null && GamePack.state(this) != GamePack.State.Ready) {
+        // The game code is either inside the APK or comes from a game pack made on a PC from the
+        // player's disc (GamePack.kt). Without either, the player is told how to get one.
+        if (GamePack.expectedToolkitId(this) != null && !GamePack.hasBundledCode(this) &&
+            GamePack.state(this) != GamePack.State.Ready
+        ) {
             showGamePackNeededDialog(GamePack.state(this) == GamePack.State.WrongVersion)
             return
         }
