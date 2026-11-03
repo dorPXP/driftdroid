@@ -593,6 +593,7 @@
   "Switch icon": "Switch 아이콘",
   "The picture the Switch menu shows for DriftDroid. Use DriftDroid's own, or choose any picture of your own, for example your copy of the game's cover. It stays on this computer.": "Switch 메뉴에서 DriftDroid에 표시되는 그림입니다. DriftDroid 기본 그림을 쓰거나, 게임 커버 같은 원하는 그림을 직접 고를 수 있습니다. 그림은 이 컴퓨터 밖으로 나가지 않습니다.",
   "Use DriftDroid's picture": "DriftDroid 기본 그림 사용",
-  "Your picture": "내 그림"
+  "Your picture": "내 그림",
+  "Opened from the Album: too little memory for the game. Start DriftDroid from its Home tile.": "앨범에서 실행되어 게임에 쓸 메모리가 부족합니다. HOME 메뉴의 DriftDroid 아이콘으로 실행하세요."
  }
 }

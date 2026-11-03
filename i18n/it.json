@@ -593,6 +593,7 @@
   "Switch icon": "Icona di Switch",
   "The picture the Switch menu shows for DriftDroid. Use DriftDroid's own, or choose any picture of your own, for example your copy of the game's cover. It stays on this computer.": "L'immagine che il menu di Switch mostra per DriftDroid. Usa quella di DriftDroid o scegli un'immagine tua, per esempio la tua copia della copertina del gioco. Resta su questo computer.",
   "Use DriftDroid's picture": "Usa l'immagine di DriftDroid",
-  "Your picture": "La tua immagine"
+  "Your picture": "La tua immagine",
+  "Opened from the Album: too little memory for the game. Start DriftDroid from its Home tile.": "Aperto dall'Album: memoria insufficiente per il gioco. Avvia DriftDroid dalla sua icona nel menu HOME."
  }
 }

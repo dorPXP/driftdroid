@@ -593,6 +593,7 @@
   "Switch icon": "Switch 图标",
   "The picture the Switch menu shows for DriftDroid. Use DriftDroid's own, or choose any picture of your own, for example your copy of the game's cover. It stays on this computer.": "Switch 菜单中为 DriftDroid 显示的图片。可以使用 DriftDroid 自带的，也可以选择你自己的图片，例如你的游戏封面。图片只保存在这台电脑上。",
   "Use DriftDroid's picture": "使用 DriftDroid 的图片",
-  "Your picture": "你的图片"
+  "Your picture": "你的图片",
+  "Opened from the Album: too little memory for the game. Start DriftDroid from its Home tile.": "从相册启动：游戏可用内存不足。请从 HOME 菜单中的 DriftDroid 图标启动。"
  }
 }

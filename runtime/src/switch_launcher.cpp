@@ -713,11 +713,23 @@ bool QueueRetroRewind() {
 // Home
 // ---------------------------------------------------------------------------------------------
 
+// True when the launcher was opened as an applet (for example from the Album) and not by taking over a
+// game's title. The game then gets far too little memory and aborts while starting, so the launcher says
+// so instead of letting it crash.
+bool InAppletMode() {
+    const AppletType type = appletGetAppletType();
+    return type != AppletType_Application && type != AppletType_SystemApplication;
+}
+
+constexpr const char* kAppletModeNotice =
+    "Opened from the Album: too little memory for the game. Start DriftDroid from its Home tile.";
+
 // Laid out like the Android launcher: logo, "Kart Channel", the game banners, then the small grey
 // buttons and a status line.
 void DrawHome(Ui& ui) {
     const bool retroRewind = RuntimeProduct::IsRetroRewind();
     const bool installed = ui.dataState == DataState::Ready;
+    static const bool appletMode = InAppletMode();
 
     g.dl->AddImage(ArtTexture(g_logo), g.P(640 - 215, 22), g.P(640 + 215, 22 + 80));
     TextCentered(640, 98, 20, IM_COL32(0xDD, 0xDD, 0xDD, 230), "Kart Channel");
@@ -746,6 +758,10 @@ void DrawHome(Ui& ui) {
             dot = kWarn;
         }
     }
+    if (appletMode) {
+        status = kAppletModeNotice;
+        dot = kBad;
+    }
 
     const auto openImport = [&ui] {
         ui.images = SwitchImport::FindDiscImages();
@@ -759,7 +775,9 @@ void DrawHome(Ui& ui) {
     float y = 138;
     if (!retroRewind) {
         if (BannerButton("##play", g_baseBanner, bx, y, bw, bh, installed ? nullptr : "Install with ISO/WBFS")) {
-            if (installed) {
+            if (installed && appletMode) {
+                Notify(ui, kAppletModeNotice, kBad, 8);
+            } else if (installed) {
                 ui.starting = true;
             } else {
                 openImport();
@@ -783,6 +801,8 @@ void DrawHome(Ui& ui) {
                 } else {
                     Notify(ui, "Install Mario Kart Wii first.");
                 }
+            } else if (appletMode) {
+                Notify(ui, kAppletModeNotice, kBad, 8);
             } else if (QueueRetroRewind()) {
                 ui.quit = true;
             } else {
@@ -801,7 +821,9 @@ void DrawHome(Ui& ui) {
             locked = kRetroRewindDownloadLabel;
         }
         if (BannerButton("##play", g_retroBanner, bx, y, bw, bh, locked)) {
-            if (locked == nullptr) {
+            if (locked == nullptr && appletMode) {
+                Notify(ui, kAppletModeNotice, kBad, 8);
+            } else if (locked == nullptr) {
                 ui.starting = true;
             } else if (!installed) {
                 openImport();

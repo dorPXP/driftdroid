@@ -593,6 +593,7 @@
   "Switch icon": "Значок Switch",
   "The picture the Switch menu shows for DriftDroid. Use DriftDroid's own, or choose any picture of your own, for example your copy of the game's cover. It stays on this computer.": "Картинка, которую меню Switch показывает для DriftDroid. Оставьте картинку DriftDroid или выберите свою, например вашу копию обложки игры. Она остаётся на этом компьютере.",
   "Use DriftDroid's picture": "Использовать картинку DriftDroid",
-  "Your picture": "Ваша картинка"
+  "Your picture": "Ваша картинка",
+  "Opened from the Album: too little memory for the game. Start DriftDroid from its Home tile.": "Запущено из Альбома: игре не хватает памяти. Запустите DriftDroid с его значка в меню HOME."
  }
 }
