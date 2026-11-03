@@ -57,3 +57,12 @@ The GX graphics library under the whole renderer, by Luke Street and contributor
 | 1024-texel texture dimensions decode correctly | Luke Street | [a906fc2](https://github.com/encounter/aurora/commit/a906fc2) |
 | `SET_REG_FIELD` masks the field it writes | Jasper St. Pierre | [afa388d](https://github.com/encounter/aurora/commit/afa388d) |
 | `GXLoadPosMtxIndx` | Luke Street | [9381cc4](https://github.com/encounter/aurora/commit/9381cc4) |
+
+### From patchzyy/aurora-wiicompiled (WiiCompiled 0.9's renderer)
+
+[github.com/patchzyy/aurora-wiicompiled](https://github.com/patchzyy/aurora-wiicompiled)
+
+| Change | Author | Source |
+|---|---|---|
+| GX matrix indices use only their low six bits | patchzyy | [4aa0141](https://github.com/patchzyy/aurora-wiicompiled/commit/4aa0141) |
+| Invalid TEV constant-color and constant-alpha selections read as zero instead of stopping the game | patchzyy | [368c604](https://github.com/patchzyy/aurora-wiicompiled/commit/368c604) |

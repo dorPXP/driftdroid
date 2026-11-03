@@ -2053,7 +2053,8 @@ static PnMtxUsage pn_mtx_usage(const uint8_t* vertices, uint16_t vtxCount,
   uint16_t mask = 0;
   for (uint16_t vertex = 0; vertex < vtxCount; ++vertex) {
     // GX matrix-index attributes precede every other vertex attribute and are always one byte.
-    const uint8_t rawMatrixIndex = vertices[static_cast<size_t>(vertex) * vtxStride];
+    // Only the low 6 bits select a matrix row; a stray high bit would pick the wrong matrix.
+    const uint8_t rawMatrixIndex = vertices[static_cast<size_t>(vertex) * vtxStride] & 0x3fu;
     topologyHasher.update(rawMatrixIndex);
     const uint32_t matrixIndex = rawMatrixIndex / 3u;
     if (matrixIndex < MaxPnMtx) {

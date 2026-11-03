@@ -207,12 +207,8 @@ static std::string color_arg_reg(GXTevColorArg arg, size_t stageIdx, const Shade
     return "vec3f(0.5)";
   case GX_CC_KONST: {
     switch (stage.kcSel) {
-      DEFAULT_FATAL("invalid kcSel {}", underlying(stage.kcSel));
-    // Unsourced encodings evaluate to zero in hardware.
-    case static_cast<GXTevKColorSel>(0x08):
-    case static_cast<GXTevKColorSel>(0x09):
-    case static_cast<GXTevKColorSel>(0x0A):
-    case static_cast<GXTevKColorSel>(0x0B):
+    // Unsourced or invalid encodings (0x08-0x0B and anything else a bad guest writes) evaluate to zero in hardware.
+    default:
       return "vec3f(0.0)";
     case GX_TEV_KCSEL_8_8:
       return "vec3f(1.0)";
@@ -314,16 +310,8 @@ static std::string alpha_arg_reg(GXTevAlphaArg arg, size_t stageIdx, const Shade
   }
   case GX_CA_KONST: {
     switch (stage.kaSel) {
-      DEFAULT_FATAL("invalid kaSel {}", underlying(stage.kaSel));
-    // Unsourced encodings evaluate to zero in hardware.
-    case static_cast<GXTevKAlphaSel>(0x08):
-    case static_cast<GXTevKAlphaSel>(0x09):
-    case static_cast<GXTevKAlphaSel>(0x0A):
-    case static_cast<GXTevKAlphaSel>(0x0B):
-    case static_cast<GXTevKAlphaSel>(0x0C):
-    case static_cast<GXTevKAlphaSel>(0x0D):
-    case static_cast<GXTevKAlphaSel>(0x0E):
-    case static_cast<GXTevKAlphaSel>(0x0F):
+    // Unsourced or invalid encodings (0x08-0x0F and anything else a bad guest writes) evaluate to zero in hardware.
+    default:
       return "0.0";
     case GX_TEV_KASEL_8_8:
       return "1.0";
@@ -785,7 +773,8 @@ auto attr_load(const ShaderConfig& config, GXAttr attr, std::string_view vidx) -
   }
   switch (attr) {
   case GX_VA_PNMTXIDX:
-    return fmt::format("(raw_fetch_u8_1(&{}, {}) / 3u)", buf, offs);
+    // Matrix indices use only the low 6 bits of the byte (matches the CPU-side usage scan).
+    return fmt::format("((raw_fetch_u8_1(&{}, {}) & 0x3fu) / 3u)", buf, offs);
   case GX_VA_TEX0MTXIDX:
   case GX_VA_TEX1MTXIDX:
   case GX_VA_TEX2MTXIDX:
@@ -794,7 +783,7 @@ auto attr_load(const ShaderConfig& config, GXAttr attr, std::string_view vidx) -
   case GX_VA_TEX5MTXIDX:
   case GX_VA_TEX6MTXIDX:
   case GX_VA_TEX7MTXIDX:
-    return fmt::format("raw_fetch_u8_1(&{}, {})", buf, offs);
+    return fmt::format("(raw_fetch_u8_1(&{}, {}) & 0x3fu)", buf, offs);
   case GX_VA_POS: {
     const auto posLoad = fetch_attr(mapping, buf, offs, le);
     if (mapping.cnt == 2) {
