@@ -1,6 +1,6 @@
 --- a/sqlite3.c
 +++ b/sqlite3.c
-@@ -173,6 +173,13 @@
+@@ -176,6 +176,13 @@
  #define HAVE_FCHOWN 1
  #define HAVE_READLINK 1
  #define HAVE_LSTAT 1
@@ -12,27 +12,9 @@
 +#undef HAVE_FCHOWN
 +#endif
  #endif /* defined(_WRS_KERNEL) */
---- a/sqlite3.c
-+++ b/sqlite3.c
-@@ -46226,6 +46226,15 @@
-   path.nSymlink = 0;
-   path.nOut = nOut;
-   path.zOut = zOut;
-+#if defined(__SWITCH__)
-+  /* libnx paths name their device ("sdmc:/dir/file"): already absolute, and rebuilding them
-+  ** element-by-element below would prefix a '/' (or the cwd) and break the device lookup. */
-+  if( strchr(zPath, ':')!=0 ){
-+    if( (int)strlen(zPath)+1>nOut ) return SQLITE_CANTOPEN_BKPT;
-+    memcpy(zOut, zPath, strlen(zPath)+1);
-+    return SQLITE_OK;
-+  }
-+#endif
-   if( zPath[0]!='/' ){
-     char zPwd[SQLITE_MAX_PATHLEN+2];
-     if( osGetcwd(zPwd, sizeof(zPwd)-2)==0 ){
---- a/sqlite3.c
-+++ b/sqlite3.c
-@@ -42694,6 +42694,15 @@
+ 
+ /************** End of vxworks.h *********************************************/
+@@ -42687,6 +42694,15 @@
      got = osRead(id->h, pBuf, cnt);
  #endif
      if( got==cnt ) break;
@@ -48,3 +30,19 @@
      if( got<0 ){
        if( errno==EINTR ){ got = 1; continue; }
        prior = 0;
+@@ -46219,6 +46235,15 @@
+   path.nSymlink = 0;
+   path.nOut = nOut;
+   path.zOut = zOut;
++#if defined(__SWITCH__)
++  /* libnx paths name their device ("sdmc:/dir/file"): already absolute, and rebuilding them
++  ** element-by-element below would prefix a '/' (or the cwd) and break the device lookup. */
++  if( strchr(zPath, ':')!=0 ){
++    if( (int)strlen(zPath)+1>nOut ) return SQLITE_CANTOPEN_BKPT;
++    memcpy(zOut, zPath, strlen(zPath)+1);
++    return SQLITE_OK;
++  }
++#endif
+   if( zPath[0]!='/' ){
+     char zPwd[SQLITE_MAX_PATHLEN+2];
+     if( osGetcwd(zPwd, sizeof(zPwd)-2)==0 ){
