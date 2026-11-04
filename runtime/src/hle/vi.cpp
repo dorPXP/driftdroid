@@ -692,6 +692,36 @@ void VI_HLE_PresentFrame(bool presentedXfb, bool paceToRetrace) {
     }
 }
 
+// The startup cover (the game disc's banner on the Switch, settings_overlay.cpp) is presented by the
+// retrace path once VIInit has run. Before that the game is still in host-side setup - on Switch the
+// DVD disc scan, which for Retro Rewind walks thousands of overlay files while the shader prewarm
+// reads its cache from the same SD card - and nothing presented at all: the launcher's last splash
+// frame sat still for close to a minute (54.6 s measured with Retro Rewind). Those loops call this
+// to present the cover through the same unpaced path as the retrace-context black frames, at most
+// once per display period, and only while the frame the launcher handed over is still empty.
+void VI_HLE_PresentBootFrame() {
+#if defined(__SWITCH__)
+    static Clock::time_point s_lastBootPresent{};
+    const Clock::time_point now = Clock::now();
+    if (now - s_lastBootPresent < std::chrono::milliseconds(16) || !settings_overlay::StartupScreenVisible()) {
+        return;
+    }
+    if (!g_auroraFrameActive.load(std::memory_order_acquire) || g_auroraFrameHadWork.load(std::memory_order_acquire) ||
+        s_inAdvanceRetrace.load(std::memory_order_acquire) || s_presentSequenceActive.load(std::memory_order_acquire)) {
+        return;
+    }
+    {
+        std::lock_guard<std::mutex> lock(g_viMutex);
+        if (g_vi.initialized) {
+            return;
+        }
+    }
+    s_lastBootPresent = now;
+    settings_overlay::Draw();
+    VI_HLE_PresentFrame(false, false);
+#endif
+}
+
 // -----------------------------------------------------------------------------
 // VI_HLE_SetXfbReady - Called by GXCopyDisp to signal EFB->XFB copy completed.
 // This marks that we now have valid framebuffer data to present.

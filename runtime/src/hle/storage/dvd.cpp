@@ -501,6 +501,8 @@ template <typename Visit>
 static void WalkDirectory(const fs::path& root, bool recursive, bool announceErrors, Visit&& visit) {
     std::error_code ec;
 
+    // Each entry is a few SD card reads, and the boot-time scans run to thousands of entries:
+    // keep the startup cover on screen moving meanwhile.
     if (!recursive) {
         for (const auto& entry : fs::directory_iterator(
                  root, fs::directory_options::skip_permission_denied, ec)) {
@@ -508,6 +510,7 @@ static void WalkDirectory(const fs::path& root, bool recursive, bool announceErr
                 break;
             }
             visit(entry);
+            VI_HLE_PresentBootFrame();
         }
         return;
     }
@@ -537,6 +540,7 @@ static void WalkDirectory(const fs::path& root, bool recursive, bool announceErr
         }
 
         visit(entry);
+        VI_HLE_PresentBootFrame();
     }
 }
 
@@ -662,6 +666,7 @@ static void ScanOverlayRoot(const RuntimeRiivolution::Overlay& overlay) {
             if (!ec) {
                 RegisterFileEntry(mapping.discPath, mapping.hostPath, static_cast<uint32_t>(size));
             }
+            VI_HLE_PresentBootFrame();
             break;
         }
         case RuntimeRiivolution::Mapping::Kind::Folder:
@@ -891,6 +896,7 @@ extern "C" void DVDInit_8015EA1C()
     Memory::Write16(diskHeader + 0x04, 0x3031);     // '01' (Maker)
     Memory::Write8(diskHeader + 0x06, 0x01);        // Disk #1
     // 4. Scan Files
+    const auto scanStarted = std::chrono::steady_clock::now();
     fs::path rootPath(GetDvdRoot());
     
     // Map "<dvd_root>/files" -> "/"
@@ -917,7 +923,10 @@ extern "C" void DVDInit_8015EA1C()
     }
     RT_LOG(RT_TAG_DVD) << "disc index: " << vanillaEntryCount << " disc file(s), "
               << (g_fileEntries.size() - vanillaEntryCount) << " overlay registration(s) from "
-              << overlays.size() << " root(s)" << std::endl;
+              << overlays.size() << " root(s) in "
+              << std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() -
+                                                                        scanStarted).count()
+              << " ms" << std::endl;
 
     // Load FST mapping so real files keep their physical disc extents.
     LoadFstIndex();

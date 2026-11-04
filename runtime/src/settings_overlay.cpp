@@ -3,6 +3,7 @@
 #include "android_touch_overlay_bridge.h"
 #endif
 #include "audio_backend.h"
+#include "boot_banner.h"
 #include "controller_mapping_wizard.h"
 #include "game_graphics_options.h"
 #include "music_attenuation.h"
@@ -1881,6 +1882,9 @@ void DrawBackendFallbackNotice() {
 
 void DrawStartupScreen() {
     if (!StartupScreenVisible()) {
+#if defined(__SWITCH__)
+        BootBanner::Finish();
+#endif
         return;
     }
 
@@ -1898,6 +1902,16 @@ void DrawStartupScreen() {
                                         ImGuiWindowFlags_NoSavedSettings |
                                         ImGuiWindowFlags_NoBringToFrontOnFocus;
     if (ImGui::Begin("Wiicompiled Startup", nullptr, kFlags)) {
+#if defined(__SWITCH__)
+        // The disc's own Wii Menu banner, carried on from the launcher's splash (switch_launcher.cpp).
+        if (BootBanner::Draw(ImGui::GetWindowDrawList(), viewport->Pos.x, viewport->Pos.y, viewport->Size.x,
+                             viewport->Size.y)) {
+            ImGui::End();
+            ImGui::PopStyleVar();
+            ImGui::PopStyleColor();
+            return;
+        }
+#endif
         ImGui::SetWindowFontScale(1.25f);
         // The shipped app branding is "DriftDroid" on both device ports (the Switch NRO carries
         // the DriftDroid name, icon and NACP too); desktop stays "WiiCompiled", the underlying
