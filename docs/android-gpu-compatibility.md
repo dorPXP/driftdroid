@@ -89,7 +89,9 @@ answer most questions in one go.
 ## For developers
 
 - Release builds use Dawn built from source with the patches in `aurora-main/cmake/patches/`
-  (`dawn-android-vulkan-library-override.patch`, `dawn-android-imgtec-interstage-floor.patch`);
+  (`dawn-android-vulkan-library-override.patch`, `dawn-android-imgtec-interstage-floor.patch`,
+  `dawn-android-optional-debug-utils.patch`, which lets drivers that advertise `VK_EXT_debug_utils`
+  without its functions, such as the Mangmi Air X, start Vulkan);
   see the build traps in [android-performance.md](android-performance.md).
 - The Adreno model is parsed from the adapter name (`webgpu::g_adapterAdrenoModel`); workarounds
   key on it. Turnip reports the same chip name with a `Turnip` prefix and gets model 0, so the
