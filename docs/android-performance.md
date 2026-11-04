@@ -95,11 +95,13 @@ Things to know:
   run `ninja -t cleandead` if objects were removed from the build, or the link fails on
   duplicate symbols.
 - **Custom GPU drivers and PowerVR.** Release builds use Dawn built from source (commit
-  13abc3bc, the same one as the prebuilt package) with two patches from
+  13abc3bc, the same one as the prebuilt package) with three patches from
   `aurora-main/cmake/patches/`: `dawn-android-vulkan-library-override.patch` (lets the launcher's
   GPU driver picker load a custom Adreno driver through libadrenotools) and
   `dawn-android-imgtec-interstage-floor.patch` (from KartPad: accepts older PowerVR drivers that
-  report 64 inter-stage components). Build it for Android with a host `protoc`, install it, and
+  report 64 inter-stage components) and `dawn-android-optional-debug-utils.patch` (loads the
+  `VK_EXT_debug_utils` functions as optional: some drivers, e.g. the Mangmi Air X, advertise the
+  extension without them). Build it for Android with a host `protoc`, install it, and
   configure with `-DFETCHCONTENT_SOURCE_DIR_DAWN_PREBUILT=<install dir>` and
   `-DDawn_DIR=<install dir>/lib/cmake/Dawn`. With the stock prebuilt Dawn the picker has no effect
   and PowerVR BXM phones on the old driver get no Vulkan adapter.
