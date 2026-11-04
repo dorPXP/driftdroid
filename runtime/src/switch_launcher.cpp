@@ -33,6 +33,7 @@
 #include <thread>
 #include <vector>
 
+#include "boot_banner.h"
 extern "C" void AuroraSwitchRestoreControllers();  // aurora-main/lib/switch/input_switch.cpp
 #include "retro_rewind_download.h"
 #include "runtime_config.h"
@@ -1779,6 +1780,11 @@ void HandleEvents(const AuroraEvent* events) {
 // Full-screen splash shown from Play until the game draws its first frame (the game takes several
 // seconds to start, and this stays on screen the whole time).
 void DrawStarting() {
+    // The disc's own Wii Menu banner when the game data has one. The game's startup screen draws
+    // the same banner and carries the animation on from here.
+    if (BootBanner::Draw(g.dl, 0.0f, 0.0f, g.display.x, g.display.y)) {
+        return;
+    }
     // Same look as the game's own startup screen, which takes over from here.
     g.dl->AddRectFilled(ImVec2(0, 0), g.display, IM_COL32(0, 0, 0, 255));
     TextCentered(640, 340, 40, IM_COL32(255, 255, 255, 255), "DriftDroid");
@@ -1938,14 +1944,12 @@ bool SwitchRunLauncher() {
         ui.images = SwitchImport::FindDiscImages();
     }
     // Started from the base game's launcher: go straight in, as long as everything is in place.
+    // Straight in still goes through the splash below, the same as pressing Play, so the banner
+    // is up while Retro Rewind starts instead of a black screen.
     if (FileExists(kSkipLauncherFlag)) {
         std::remove(kSkipLauncherFlag);
         if (RuntimeProduct::IsRetroRewind() && ui.dataState == DataState::Ready && ui.retroRewindPack) {
-            while (!aurora_begin_frame()) {
-                aurora_update();
-                std::this_thread::sleep_for(std::chrono::milliseconds(1));
-            }
-            return true;
+            ui.starting = true;
         }
     }
 
