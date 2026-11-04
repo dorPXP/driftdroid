@@ -163,7 +163,7 @@ a phone, and the honest summary is:
   extraction step.
 - A clean, unmodified **PAL `RMCP01`** disc image of Mario Kart Wii (.iso or .wbfs), dumped by you.
   Only the clean PAL revision is supported; other regions or modified executables are rejected.
-- **Optional, and needed for Switch:** a Windows 10/11 or Linux (x86-64) PC, once, to run DriftDroid Builder (about 10 GB of free space while it works for Android, 16 GB if you also build for Switch).
+- **Optional, and needed for Switch:** a Windows 10/11 or Linux (x86-64) PC, once, to run DriftDroid Builder (about 10 GB of free space while it works for Android, 16 GB if you also build for Switch). There is no macOS version of the Builder yet.
 
 > [!NOTE]
 > Nobody here will tell you where to get the game. Dumping your own disc is on you, and links to
@@ -191,6 +191,17 @@ Rewind. A game pack fits one app version, so make a new one with the matching bu
 
 DriftDroid Builder also makes the **Switch** version (`DriftDroid.nro` and `RetroRewind.nro`); that
 needs devkitPro's "Switch Development" tools installed on the PC.
+
+**Installing on the Switch.** Copy the files to the SD card one by one; don't drag the whole `switch`
+output folder over, or the files end up in the wrong place.
+
+1. Put `DriftDroid.nro` directly in `/switch/`, not inside `WiiCompiled`.
+2. Create a folder named exactly `WiiCompiled` inside `/switch/` and put your PAL disc image (.iso or
+   .wbfs) in it. For Retro Rewind, put `RetroRewind.nro` in that same folder.
+3. Start DriftDroid from its Home tile, or from hbmenu opened by holding R while launching a game.
+   Don't start it from the Album: it gets too little memory there and can crash Atmosphere.
+
+The settings menu opens by clicking both sticks together. More in [`docs/switch.md`](docs/switch.md).
 
 > [!CAUTION]
 > Only take builds from this repository's own Releases page. Don't install an APK someone shared
@@ -272,11 +283,10 @@ up on your phone at runtime. So:
 
 - A Retro Rewind update that changes **tracks, characters or other assets** works immediately, with
   no app update at all.
-- A Retro Rewind update that changes **game code** needs a new DriftDroid build (and a new game
-  pack made with its builder). The app detects this before downloading anything large, tells you,
-  and leaves your working install alone rather than replacing it with something that would crash.
-  When that new DriftDroid build is out, run its DriftDroid Builder on your PC to make the new
-  game pack.
+- A Retro Rewind update that changes **game code** needs new game code: either a new DriftDroid
+  build, or a game pack made on your PC with DriftDroid Builder, which always takes the newest
+  Retro Rewind. The app detects this before downloading anything large, tells you, and leaves your
+  working install alone rather than replacing it with something that would crash.
 - After DriftDroid itself has been updated for a newer Retro Rewind, an install still on the old
   one is brought up to date when you tap Retro Rewind, before the game starts.
 
@@ -310,12 +320,16 @@ a DriftDroid update first; the app will say so instead of installing something b
 [Retro Rewind versions](#retro-rewind-versions).
 
 **How do I update DriftDroid?**
-Install the new APK over the old one and import the game pack made by the same version of
-DriftDroid Builder. Saves, settings and Retro Rewind stay.
+On Android, install the new APK over the old one. Saves, settings and Retro Rewind stay, and no
+game pack is needed (it only matters for a newer Retro Rewind than the APK includes). On Switch,
+make new `.nro` files with the matching DriftDroid Builder and replace the old ones; back up your
+`switch/WiiCompiled` folder first, since it holds your saves.
 
 **Is there gonna be a Switch version?**
-There is one: [DriftDroid for Nintendo Switch - Beta 1](https://github.com/dorPXP/driftdroid/releases/tag/switch-beta1)
-(a pre-release, original game only). Retro Rewind on Switch is being worked on.
+Yes. DriftDroid for Nintendo Switch is built on your PC with DriftDroid Builder from your own disc
+(see "Installing on the Switch" above). The old Beta 1 download was removed because it contained game
+code. It runs the original game and Retro Rewind; Retro Rewind's online play still has issues.
+There is no macOS version of the Builder yet.
 
 **Is it done?**
 No - this is an active, personal work-in-progress fork. It's playable start to finish, but
