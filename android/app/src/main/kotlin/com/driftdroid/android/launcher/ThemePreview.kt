@@ -30,6 +30,7 @@ internal class ThemePreview(
     private val texture: Texture = Texture.NONE,
     private val backdropOnly: Boolean = false,
     private val backdrop: android.graphics.Bitmap? = null,
+    private val pattern: String = "none",
 ) : View(context) {
     var picked = false
         set(value) {
@@ -62,6 +63,27 @@ internal class ThemePreview(
             val dw = backdrop.width * cover
             val dh = backdrop.height * cover
             canvas.drawBitmap(backdrop, null, RectF((w - dw) / 2, (h - dh) / 2, (w + dw) / 2, (h + dh) / 2), paint)
+            return
+        }
+        if (pattern == "checker") {
+            // The launcher's checkerboard in miniature, in the original greys or tones of this backdrop.
+            val original = top == 0xFF0C0E11.toInt() && bottom == top
+            val dark = if (original) 0xFF222222.toInt() else LookDrawable.darken(average(top, bottom), 0.18f)
+            val light = if (original) 0xFF3A3A3A.toInt() else LookDrawable.lighten(average(top, bottom), 0.10f)
+            canvas.drawColor(dark)
+            paint.color = light
+            val tile = 11 * density
+            var row = 0
+            var y = 0f
+            while (y < h) {
+                var x = if (row and 1 != 0) tile else 0f
+                while (x < w) {
+                    canvas.drawRect(x, y, x + tile, y + tile, paint)
+                    x += tile * 2
+                }
+                y += tile
+                row++
+            }
             return
         }
         paint.shader = LinearGradient(0f, 0f, 0f, h, top, bottom, Shader.TileMode.CLAMP)

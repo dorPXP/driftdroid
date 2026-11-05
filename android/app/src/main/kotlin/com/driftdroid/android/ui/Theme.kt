@@ -28,14 +28,16 @@ internal object Theme {
         val bottom: Int,
         val accent: Int,
         val texture: Texture = Texture.NONE,
+        /** "checker" draws the launcher's drifting checkerboard behind everything; "none" is the plain backdrop. */
+        val pattern: String = "none",
     )
 
-    private fun flat(id: String, name: String, top: Long, bottom: Long, accent: Long) =
-        Preset(id, name, Look.FLAT, top.toInt(), bottom.toInt(), accent.toInt())
+    private fun flat(id: String, name: String, top: Long, bottom: Long, accent: Long, pattern: String = "none") =
+        Preset(id, name, Look.FLAT, top.toInt(), bottom.toInt(), accent.toInt(), Texture.NONE, pattern)
 
     val PRESETS =
         listOf(
-            flat("pit_lane", "Pit lane", 0xFF0C0E11, 0xFF0C0E11, 0xFF3DDC84),
+            flat("pit_lane", "Pit lane", 0xFF0C0E11, 0xFF0C0E11, 0xFF3DDC84, "checker"),
             Preset("aqua_glass", "Aqua glass", Look.GLASS, 0xFF1FA6E8.toInt(), 0xFF08407F.toInt(), 0xFF3DF2E0.toInt()),
             Preset("frutiger", "Frutiger Aero", Look.AERO, 0xFF42B0F5.toInt(), 0xFFD4F3FF.toInt(), 0xFF1E8FF0.toInt()),
             Preset("deep_glass", "Deep sea", Look.GLASS, 0xFF053457.toInt(), 0xFF020F22.toInt(), 0xFF5CE1E6.toInt()),
@@ -80,6 +82,12 @@ internal object Theme {
     @Volatile var look: Look = Look.FLAT
         private set
     @Volatile var texture: Texture = Texture.NONE
+        private set
+    /** "checker" or "none": the drifting checkerboard behind the launcher. */
+    @Volatile var pattern: String = "checker"
+        private set
+    /** Whether the checkerboard drifts (it stands still when off, in battery saver, or off screen). */
+    @Volatile var drift: Boolean = true
         private set
     /** How see-through the neutral surfaces are in the glass looks (0.12 - 0.85). */
     @Volatile var panelAlpha: Float = 0.30f
@@ -190,6 +198,11 @@ internal object Theme {
         return mix(base, if (isLight) Color.BLACK else Color.WHITE, if (isLight) amount * 0.8f else amount)
     }
 
+    /** The checkerboard's two tones: the original dark greys, or tones taken from the backdrop. */
+    val checkerDark: Int get() = if (isOriginal) 0xFF222222.toInt() else mix(average(top, bottom), Color.BLACK, 0.18f)
+
+    val checkerLight: Int get() = if (isOriginal) 0xFF3A3A3A.toInt() else mix(average(top, bottom), Color.WHITE, 0.10f)
+
     fun load(context: Context) {
         val p = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
         val id = p.getString("theme_preset", "pit_lane") ?: "pit_lane"
@@ -203,6 +216,8 @@ internal object Theme {
         dim = p.getFloat("theme_dim", 0.35f).coerceIn(0f, MAX_DIM)
         look = Look.of(p.getString("theme_look", base.look.id))
         texture = Texture.of(p.getString("theme_texture", base.texture.id))
+        pattern = p.getString("theme_pattern", base.pattern)?.takeIf { it == "checker" || it == "none" } ?: base.pattern
+        drift = p.getBoolean("theme_drift", true)
         panelAlpha = p.getFloat("theme_panel_alpha", 0.30f).coerceIn(0.12f, 0.85f)
         cornerScale = p.getFloat("theme_corner_scale", 1f).coerceIn(0.5f, 1.8f)
         textScale = p.getFloat("theme_text_scale", 1f).coerceIn(0.85f, 1.4f)
@@ -217,6 +232,7 @@ internal object Theme {
         presetId = preset.id
         look = preset.look
         texture = preset.texture
+        pattern = preset.pattern
         top = preset.top
         bottom = preset.bottom
         accentColor = preset.accent
@@ -224,10 +240,12 @@ internal object Theme {
     }
 
     /** Switches to custom colours (backdrop colours are kept dark enough for the text). */
-    fun useCustom(context: Context, top: Int, bottom: Int, accent: Int, angle: Float, look: Look, texture: Texture) {
+    fun useCustom(context: Context, top: Int, bottom: Int, accent: Int, angle: Float, look: Look, texture: Texture, pattern: String, drift: Boolean) {
         presetId = CUSTOM
         this.look = look
         this.texture = texture
+        this.pattern = pattern
+        this.drift = drift
         this.top = top or 0xFF000000.toInt()
         this.bottom = bottom or 0xFF000000.toInt()
         accentColor = accent or 0xFF000000.toInt()
@@ -238,11 +256,12 @@ internal object Theme {
     /** Applies a saved theme's values as the current (custom) theme. */
     fun applyValues(
         context: Context, look: Look, texture: Texture, top: Int, bottom: Int, accent: Int, angle: Float,
-        panelAlpha: Float, cornerScale: Float, dim: Float, portrait: Framing, landscape: Framing,
+        panelAlpha: Float, cornerScale: Float, dim: Float, portrait: Framing, landscape: Framing, pattern: String = "none",
     ) {
         presetId = CUSTOM
         this.look = look
         this.texture = texture
+        this.pattern = pattern
         this.top = top
         this.bottom = bottom
         this.accentColor = accent
@@ -278,6 +297,8 @@ internal object Theme {
             .putFloat("theme_dim", dim)
             .putString("theme_look", look.id)
             .putString("theme_texture", texture.id)
+            .putString("theme_pattern", pattern)
+            .putBoolean("theme_drift", drift)
             .putFloat("theme_panel_alpha", panelAlpha)
             .putFloat("theme_corner_scale", cornerScale)
             .putFloat("theme_text_scale", textScale)
@@ -295,6 +316,7 @@ internal object Theme {
         panelAlpha = 0.30f
         cornerScale = 1f
         textScale = 1f
+        drift = true
         save(context)
     }
 

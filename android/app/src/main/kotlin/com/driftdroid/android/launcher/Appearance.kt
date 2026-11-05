@@ -75,6 +75,8 @@ internal object Appearance {
         // Pending choices, applied together by the Apply button.
         var look = Theme.look
         var texture = Theme.texture
+        var pattern = Theme.pattern
+        var drift = Theme.drift
         var accent = Theme.accentColor
         var top = Theme.top
         var bottom = Theme.bottom
@@ -86,7 +88,7 @@ internal object Appearance {
         sheet.section(T("Themes"))
         val themeCards =
             Theme.PRESETS.map { preset ->
-                val card = ThemePreview(host, preset.look, preset.top, preset.bottom, preset.accent, preset.texture)
+                val card = ThemePreview(host, preset.look, preset.top, preset.bottom, preset.accent, preset.texture, pattern = preset.pattern)
                 card.picked = Theme.presetId == preset.id
                 card.setOnClickListener {
                     sheet.dismiss()
@@ -103,7 +105,7 @@ internal object Appearance {
             val cards =
                 mine.map { saved ->
                     val thumb = if (saved.media != null) com.driftdroid.android.ui.BackgroundMedia.thumbnail(ThemeStore.mediaFile(host, saved), saved.mediaKind) else null
-                    val card = ThemePreview(host, saved.look, saved.top, saved.bottom, saved.accent, saved.texture, backdrop = thumb)
+                    val card = ThemePreview(host, saved.look, saved.top, saved.bottom, saved.accent, saved.texture, backdrop = thumb, pattern = saved.pattern)
                     card.setOnClickListener {
                         sheet.dismiss()
                         ThemeStore.apply(host, saved)
@@ -150,6 +152,8 @@ internal object Appearance {
         sheet.choice(T("Material"), T("For the skeuomorphic look"), textures.map { textureName(it) }, textures.indexOf(texture)) { texture = textures[it] }
 
         sheet.section(T("Background"))
+        sheet.toggle(T("Checkerboard"), T("The drifting dark squares behind everything"), pattern == "checker") { pattern = if (it) "checker" else "none" }
+        sheet.toggle(T("Let it drift"), T("Off, or in battery saver, the squares stand still"), drift) { drift = it }
         sheet.action(T("Choose a picture, GIF or video"), T("Copied into the app. GIF and MP4 play muted and loop")) {
             sheet.dismiss()
             host.openDocument { uri ->
@@ -214,7 +218,7 @@ internal object Appearance {
         sheet.button(T("Apply"), DriftUi.Style.PRIMARY) {
             sheet.dismiss()
             Theme.setFeel(host, panelAlpha, corner, textScale)
-            Theme.useCustom(host, top = top, bottom = bottom, accent = accent, angle = angle, look = look, texture = texture)
+            Theme.useCustom(host, top = top, bottom = bottom, accent = accent, angle = angle, look = look, texture = texture, pattern = pattern, drift = drift)
             host.recreate()
         }
         sheet.button(T("Reset"), DriftUi.Style.SECONDARY) {

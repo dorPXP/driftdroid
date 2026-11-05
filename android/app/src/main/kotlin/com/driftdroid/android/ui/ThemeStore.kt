@@ -32,6 +32,8 @@ internal object ThemeStore {
         val media: String? = null,
         /** Brightness of that background (for the text colour), when known. */
         val luma: Float? = null,
+        /** "checker" or "none". */
+        val pattern: String = "none",
     ) {
         val mediaKind: BackgroundMedia.Kind
             get() =
@@ -78,7 +80,7 @@ internal object ThemeStore {
     }
 
     /** Saves what is on screen (or these pending values) under [name]. */
-    fun save(context: Context, name: String, look: Look, texture: Texture, top: Int, bottom: Int, accent: Int, angle: Float, panelAlpha: Float, cornerScale: Float): Saved {
+    fun save(context: Context, name: String, look: Look, texture: Texture, top: Int, bottom: Int, accent: Int, angle: Float, panelAlpha: Float, cornerScale: Float, pattern: String = Theme.pattern): Saved {
         val all = list(context)
         if (all.size >= MAX_THEMES) throw IOException("that is the most themes you can keep ($MAX_THEMES) - delete one first")
         val id = UUID.randomUUID().toString()
@@ -99,7 +101,7 @@ internal object ThemeStore {
         val saved =
             Saved(
                 id, cleanName(name), look, texture, top, bottom, accent, angle, panelAlpha, cornerScale, Theme.dim,
-                Theme.portrait.copy(), Theme.landscape.copy(), media, if (keep) BackgroundMedia.storedBrightness(context) else null,
+                Theme.portrait.copy(), Theme.landscape.copy(), media, if (keep) BackgroundMedia.storedBrightness(context) else null, pattern,
             )
         if (keep && current != null) current.copyTo(mediaFile(context, saved), overwrite = true)
         write(context, all + saved)
@@ -120,7 +122,7 @@ internal object ThemeStore {
         } else {
             BackgroundMedia.remove(context)
         }
-        Theme.applyValues(context, saved.look, saved.texture, saved.top, saved.bottom, saved.accent, saved.angle, saved.panelAlpha, saved.cornerScale, saved.dim, saved.portrait, saved.landscape)
+        Theme.applyValues(context, saved.look, saved.texture, saved.top, saved.bottom, saved.accent, saved.angle, saved.panelAlpha, saved.cornerScale, saved.dim, saved.portrait, saved.landscape, saved.pattern)
     }
 
     // --- Files ---
@@ -166,12 +168,12 @@ internal object ThemeStore {
             val bounds = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
             android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
             if (bounds.outWidth <= 0 || bounds.outHeight <= 0) throw IOException("the picture in that theme can't be read")
-            theme = Saved(theme.id, theme.name, theme.look, theme.texture, theme.top, theme.bottom, theme.accent, theme.angle, theme.panelAlpha, theme.cornerScale, theme.dim, theme.portrait, theme.landscape, "image", theme.luma)
+            theme = Saved(theme.id, theme.name, theme.look, theme.texture, theme.top, theme.bottom, theme.accent, theme.angle, theme.panelAlpha, theme.cornerScale, theme.dim, theme.portrait, theme.landscape, "image", theme.luma, theme.pattern)
             mediaFile(context, theme).writeBytes(bytes)
         }
         // A file cannot claim a background it does not carry.
         if (parsed.image.isEmpty() && theme.media != null) {
-            theme = Saved(theme.id, theme.name, theme.look, theme.texture, theme.top, theme.bottom, theme.accent, theme.angle, theme.panelAlpha, theme.cornerScale, theme.dim, theme.portrait, theme.landscape, null, null)
+            theme = Saved(theme.id, theme.name, theme.look, theme.texture, theme.top, theme.bottom, theme.accent, theme.angle, theme.panelAlpha, theme.cornerScale, theme.dim, theme.portrait, theme.landscape, null, null, theme.pattern)
         }
         write(context, all + theme)
         return theme
@@ -222,6 +224,7 @@ internal object ThemeStore {
             .put("dim", r3(s.dim))
             .put("portrait", framing(s.portrait))
             .put("landscape", framing(s.landscape))
+            .put("pattern", s.pattern)
             .also { j ->
                 if (s.media != null) j.put("media", s.media)
                 if (s.luma != null) j.put("luma", r3(s.luma))
@@ -244,6 +247,7 @@ internal object ThemeStore {
             landscape = framingOf(j.optJSONArray("landscape")),
             media = j.optString("media", "").takeIf { it == "image" || it == "anim" || it == "video" },
             luma = if (j.has("luma")) j.optDouble("luma", 0.3).toFloat().coerceIn(0f, 1f) else null,
+            pattern = j.optString("pattern", "none").takeIf { it == "checker" } ?: "none",
         )
 
     private fun cleanName(name: String): String {

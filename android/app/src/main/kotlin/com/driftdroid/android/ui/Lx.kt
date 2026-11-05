@@ -937,9 +937,40 @@ internal class LauncherBackground(private val context: Context, private val comp
     private var scrimHeight = -1
     private var shaderKey = 0L
 
+    // The drifting checkerboard of the original launcher: 28 dp tiles that creep down and to the right.
+    private val tilePaint = Paint()
+    private val start = android.os.SystemClock.uptimeMillis()
+    private val frame = Runnable { invalidateSelf() }
+
+    private fun drawChecker(canvas: Canvas, b: android.graphics.Rect) {
+        val tile = Lx.dp(context, 28f).toFloat()
+        val period = tile * 2f
+        val drifting = Theme.drift && BackgroundMedia.resumed && BackgroundMedia.mayAnimate(context)
+        val seconds = if (drifting) (android.os.SystemClock.uptimeMillis() - start) / 1000f else 0f
+        val offX = (seconds * 0.1f * tile) % period
+        val offY = (seconds * 0.1f * tile * 0.6f) % period
+        canvas.drawColor(Theme.checkerDark)
+        tilePaint.color = Theme.checkerLight
+        tilePaint.isAntiAlias = true
+        var row = 0
+        var y = b.top + offY - period
+        while (y < b.bottom) {
+            var x = b.left + offX - period + (if (row and 1 != 0) tile else 0f)
+            while (x < b.right) {
+                canvas.drawRect(x, y, x + tile, y + tile, tilePaint)
+                x += period
+            }
+            y += tile
+            row++
+        }
+        if (drifting) scheduleSelf(frame, android.os.SystemClock.uptimeMillis() + 40)
+    }
+
     override fun draw(canvas: Canvas) {
         val b = bounds
-        if (Theme.top == Theme.bottom && Theme.presetId == "pit_lane") {
+        if (Theme.pattern == "checker") {
+            drawChecker(canvas, b)
+        } else if (Theme.top == Theme.bottom && Theme.presetId == "pit_lane") {
             canvas.drawColor(Lx.BG)
         } else {
             val rad = Math.toRadians(Theme.angle.toDouble())
@@ -980,7 +1011,7 @@ internal class LauncherBackground(private val context: Context, private val comp
             canvas.drawColor(Lx.alpha(0xFF000000.toInt(), Theme.dim))
             canvas.restore()
         }
-        if (Theme.look != Look.FLAT) return
+        if (Theme.look != Look.FLAT || Theme.pattern == "checker") return
         val unit = (if (compact) b.width() else b.height()) * 0.09f
         val lean = unit * 2.2f
         for (i in 0 until 3) {
