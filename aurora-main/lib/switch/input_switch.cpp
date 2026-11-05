@@ -91,19 +91,26 @@ struct SidewaysButton {
 
 // The four face buttons by position (A east, B south, X north, Y west, as on a full controller);
 // SL/SR are the shoulders, used as ZL/ZR so they reach the game's L (item) and R (drift) as on
-// Mario Kart 8; the stick click is the D-pad's Up (trick and wheelie); the one +/- is Start.
+// Mario Kart 8; the stick click is the D-pad's Up (trick and wheelie). The one +/- button is not
+// in these tables: a tap is Start (pause) and holding it opens the quick panel, see update().
 constexpr SidewaysButton kLeftSideways[] = {
     {HidNpadButton_Down, HidNpadButton_A},       {HidNpadButton_Left, HidNpadButton_B},
     {HidNpadButton_Right, HidNpadButton_X},      {HidNpadButton_Up, HidNpadButton_Y},
     {HidNpadButton_LeftSL, HidNpadButton_ZL},    {HidNpadButton_LeftSR, HidNpadButton_ZR},
-    {HidNpadButton_StickL, HidNpadButton_Up},    {HidNpadButton_Minus, HidNpadButton_Plus},
+    {HidNpadButton_StickL, HidNpadButton_Up},
 };
 constexpr SidewaysButton kRightSideways[] = {
     {HidNpadButton_X, HidNpadButton_A},          {HidNpadButton_A, HidNpadButton_B},
     {HidNpadButton_Y, HidNpadButton_X},          {HidNpadButton_B, HidNpadButton_Y},
     {HidNpadButton_RightSL, HidNpadButton_ZL},   {HidNpadButton_RightSR, HidNpadButton_ZR},
-    {HidNpadButton_StickR, HidNpadButton_Up},    {HidNpadButton_Plus, HidNpadButton_Plus},
+    {HidNpadButton_StickR, HidNpadButton_Up},
 };
+
+// A sideways Joy-Con has neither two sticks to click nor a Minus on the right one, so its +/- button
+// also opens the settings: held this long it presses Back (the quick panel, which leads to all
+// settings); a shorter press is Start, sent when the button is released.
+constexpr std::chrono::milliseconds kMenuHold{700};
+constexpr std::chrono::milliseconds kMenuPulse{100};  // how long the Start or Back press lasts
 
 u64 sideways_buttons(SingleJoyCon joycon, u64 held) {
   u64 out = 0;
@@ -136,6 +143,13 @@ struct Player {
   bool sentAny = false;
   // Any button held, for the settings menu's player list (read on another thread).
   std::atomic<bool> pressing{false};
+  // A sideways Joy-Con's +/- button: when it went down, whether the long press already fired, and
+  // until when the Start tap or the Back press it caused is held.
+  bool menuHeld = false;
+  bool menuLongFired = false;
+  std::chrono::steady_clock::time_point menuSince{};
+  std::chrono::steady_clock::time_point tapUntil{};
+  std::chrono::steady_clock::time_point panelUntil{};
 };
 
 Player g_players[kPlayers];
@@ -517,11 +531,69 @@ void SDLCALL update(void* userdata) {
   padUpdate(&player.pad);
   const SingleJoyCon single = single_joycon(padGetStyleSet(&player.pad));
   const u64 raw = padGetButtons(&player.pad);
-  const u64 held = single == SingleJoyCon::None ? raw : sideways_buttons(single, raw);
+  u64 held = single == SingleJoyCon::None ? raw : sideways_buttons(single, raw);
+  if (single != SingleJoyCon::None) {
+    // The +/- button: a tap is Start (sent on release, once it is known not to be a long press),
+    // holding it presses Back, which opens the quick panel as Minus does on a full controller.
+    const u64 menuButton = single == SingleJoyCon::Left ? HidNpadButton_Minus : HidNpadButton_Plus;
+    const auto now = std::chrono::steady_clock::now();
+    if ((raw & menuButton) != 0) {
+      if (!player.menuHeld) {
+        player.menuHeld = true;
+        player.menuLongFired = false;
+        player.menuSince = now;
+      } else if (!player.menuLongFired && now - player.menuSince >= kMenuHold) {
+        player.menuLongFired = true;
+        player.panelUntil = now + kMenuPulse;
+      }
+    } else if (player.menuHeld) {
+      if (!player.menuLongFired) {
+        player.tapUntil = now + kMenuPulse;
+      }
+      player.menuHeld = false;
+      player.menuLongFired = false;
+    }
+    if (now < player.tapUntil) {
+      held |= HidNpadButton_Plus;  // Start
+    }
+    if (now < player.panelUntil) {
+      held |= HidNpadButton_Minus;  // Back
+    }
+  } else {
+    player.menuHeld = false;
+  }
   player.pressing.store(raw != 0, std::memory_order_relaxed);
   const size_t index = static_cast<size_t>(&player - g_players);
   const bool driving = g_motionDriving.load(std::memory_order_relaxed);
   const bool menuOpen = g_motionMenuOpen.load(std::memory_order_relaxed);
+  if (single != SingleJoyCon::None && menuOpen) {
+    // A sideways Joy-Con has no D-pad (its four buttons are A/B/X/Y), so while a settings menu is
+    // open its stick, turned the way the Joy-Con is held, also presses the D-pad: the menu is
+    // navigated with those. One direction at a time, the larger of the two.
+    const HidAnalogStickState stick = padGetStickPos(&player.pad, single == SingleJoyCon::Left ? 0 : 1);
+    const s32 sx = single == SingleJoyCon::Left ? -stick.y : stick.y;
+    const s32 sy = single == SingleJoyCon::Left ? stick.x : -stick.x;
+    constexpr s32 kMenuStick = SDL_JOYSTICK_AXIS_MAX / 2;
+    // SL and SR are the shoulder buttons (the game sees them as ZL and ZR); the menu switches pages
+    // with L and R, so they press those too while it is open.
+    if ((held & HidNpadButton_ZL) != 0) {
+      held |= HidNpadButton_L;
+    }
+    if ((held & HidNpadButton_ZR) != 0) {
+      held |= HidNpadButton_R;
+    }
+    if (std::abs(sx) >= std::abs(sy)) {
+      if (sx <= -kMenuStick) {
+        held |= HidNpadButton_Left;
+      } else if (sx >= kMenuStick) {
+        held |= HidNpadButton_Right;
+      }
+    } else if (sy >= kMenuStick) {
+      held |= HidNpadButton_Up;
+    } else if (sy <= -kMenuStick) {
+      held |= HidNpadButton_Down;
+    }
+  }
   SDL_GamepadButton shakePress = SDL_GAMEPAD_BUTTON_INVALID;
   if ((g_shakePlayers.load(std::memory_order_relaxed) & (1u << index)) != 0) {
     shakePress = update_shake(index, player.pad, driving && !menuOpen);
