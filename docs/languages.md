@@ -14,7 +14,7 @@ menus and text) comes from the disc and is not changed by this setting.
 By default DriftDroid follows the language of the device (Android system language, Switch system
 language, or `LANG` on the PC). To pick one yourself:
 
-- **Android:** the **Language...** button on the launcher screen.
+- **Android:** **Settings > Language** in the launcher.
 - **Switch:** **Settings → Display → Language** in the in-game menu (open it with Minus, then
   **All settings**). It applies the next time the game starts.
 - **PC builder:** the **Language** button at the bottom of the window.

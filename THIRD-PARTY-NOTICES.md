@@ -143,6 +143,12 @@ load time, at `android/app/src/main/java/org/libsdl/app/`. Taken unmodified from
 source tree pinned below (`android-project/app/src/main/java/org/libsdl/app/`).
 Source: <https://github.com/libsdl-org/SDL>.
 
+### Material Design icons - Apache-2.0
+
+The launcher's icons (`android/app/src/main/kotlin/com/driftdroid/android/ui/Icons.kt`) are path data
+from Google's Material Design icons, Copyright Google LLC, licensed under the Apache License 2.0.
+Source: <https://github.com/google/material-design-icons>.
+
 ### libarchive-android 1.1.4 - Apache-2.0, with libarchive - BSD
 
 The Android app's mod installer unpacks `.7z` and `.rar` archives with libarchive, through the

@@ -6,7 +6,7 @@ driver bugs, and how to try a different GPU driver on a Snapdragon phone.
 ## How the game picks a renderer
 
 The game renders through [Dawn](https://dawn.googlesource.com/dawn) on top of the phone's
-Vulkan driver. With **Graphics... -> Automatic** (the default) it tries, in order:
+Vulkan driver. With **Settings > Graphics -> Automatic** (the default) it tries, in order:
 
 1. **Vulkan, full feature level.** The normal case on most phones from the last several years.
 2. **Vulkan, Compatibility level.** For budget GPUs whose Vulkan driver works but stops short of
@@ -66,7 +66,7 @@ DriftDroid does not ship any drivers. Packages are published by their authors, f
 To install and use one:
 
 1. Download the `.zip` on the phone.
-2. Launcher: **Graphics...** -> **GPU driver...** -> **Install .zip...**, pick the file.
+2. Launcher: **Settings > Graphics** -> **GPU driver...** -> **Install .zip...**, pick the file.
 3. Select the driver in the list and tap **Save**.
 4. Keep the graphics API on **Vulkan** (or Automatic) and start the game.
 5. Check the bottom of the in-game settings: with Turnip loaded it reads `GPU: Turnip Adreno (TM) ...`.

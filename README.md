@@ -45,7 +45,7 @@ rough edges, and expect performance to vary a lot between devices - see
 compatibility layer, running on Vulkan through Google's Dawn.
 
 **An OpenGL ES fallback.** Some phones ship a Vulkan driver too broken to start
-the game at all. The launcher's **Graphics...** screen can switch the renderer
+the game at all. The launcher's **Settings > Graphics** can switch the renderer
 to OpenGL ES for those devices. It is slower than Vulkan by nature - OpenGL only
 lets one thread talk to the GPU, so shaders compile on the render thread and the
 multithreaded graphics path is unavailable - so leave it on Automatic unless
@@ -75,10 +75,40 @@ restart, which the menu does for you.
 
 **Vertical mode (experimental).** Play upright like Mario Kart Tour: the race
 fills the tall screen, the race HUD moves to the corners and the touch controls
-get their own layout. Launcher > Graphics > Vertical mode.
+get their own layout. Launcher > Settings > Graphics > Vertical mode.
 
 **Save import and export.** Bring your profile over from a Wii NAND backup or
-Dolphin (`rksys.dat`), or copy it out, from the launcher's **Save data**.
+Dolphin (`rksys.dat`), or copy it out, from the launcher's **Settings > Save data**.
+
+**A launcher built around the game.** Home, Mods, Rooms, Ranks, Profile and
+Settings pages, upright with a tab bar on a phone and sideways with a navigation
+rail on tablets and handhelds. **Settings > Launcher orientation** picks Automatic,
+Portrait or Landscape. Long jobs (installing Retro Rewind, downloading a mod,
+importing a game pack) show their progress in a task bar that follows you from
+page to page.
+
+**Mods from inside the app.** Browse GameBanana's Mario Kart Wii mods and install
+one with a tap (`.zip`, `.7z` and `.rar`, including RAR5), or import an archive you
+already have. Turn mods on and off and drag them into priority order: the higher
+mod wins when two change the same file. Turned-on mods load when you press Play (a
+game that's already running restarts so the change takes) and apply to both Mario
+Kart Wii and Retro Rewind. For Retro Rewind they're also laid out in its own
+`Patches` folder the way the Wheel Wizard PC tool does it, so mods built on its
+loose archive overrides (files like `Name.race.szs`) work too.
+
+**Rooms and Ranks.** Every public Retro WFC room, live: the track being raced,
+who's in it with their Miis and VR, the room's average VR and whether it's open.
+Ranks has the top 100 players by VR, and each player has a page with their rank and
+a 7-day VR chart. Tap anyone to copy their friend code or add them as a friend.
+Joining a room still happens inside the game.
+
+**Profile and Mii editor.** Licenses from your saves (Mii, friend code, VR and BR,
+races and wins, friends), and an editor for every part of every Mii where each shape
+is picked from pictures of your own Mii wearing it. Make, duplicate and delete Miis,
+and import or export single Miis (`.rcd`) or the whole Mii file. Every change is
+checked, written with the correct checksum, and the previous file is kept next to it
+as a `.bak`. The pictures come from Nintendo's online Mii renderer; **Settings > Mii
+pictures** turns that off and draws simple offline ones instead.
 
 **Picture settings.** Brightness, contrast and saturation in the Display
 settings.
@@ -158,7 +188,7 @@ a phone, and the honest summary is:
 - **Android 10 (API 29) or newer**, on a 64-bit ARM (`arm64-v8a`) chip. There is no 32-bit or
   x86 build.
 - A working Vulkan driver for the best experience. Devices without one can fall back to OpenGL ES
-  from the launcher's **Graphics...** screen.
+  from the launcher's **Settings > Graphics**.
 - Enough free storage for the extracted game data (a few GB) plus headroom during the one-time
   extraction step.
 - A clean, unmodified **PAL `RMCP01`** disc image of Mario Kart Wii (.iso or .wbfs), dumped by you.
@@ -186,7 +216,7 @@ all stay.
 **Optional: a game pack.** On your PC, unpack DriftDroid Builder, open `DriftDroidBuilder.exe`
 (Linux: `DriftDroidBuilder`), choose your disc image, pick Android and press **Start**. It takes 30
 minutes to a couple of hours and makes `output/DriftDroid-GamePack-<version>.zip`. Copy it to the
-phone and tap **Import Game Pack...**: the app then uses that game code, for example a newer Retro
+phone and open **Settings > Import game pack**: the app then uses that game code, for example a newer Retro
 Rewind. A game pack fits one app version, so make a new one with the matching builder.
 
 DriftDroid Builder also makes the **Switch** version (`DriftDroid.nro` and `RetroRewind.nro`); that
@@ -336,8 +366,8 @@ No - this is an active, personal work-in-progress fork. It's playable start to f
 performance work, device compatibility and bug fixing are ongoing.
 
 **It won't start / the screen stays black.**
-Most often a Vulkan driver the device can't actually deliver on. Open the launcher, tap
-**Graphics...**, choose **OpenGL ES**, and try again. Report it either way - which renderer worked
+Most often a Vulkan driver the device can't actually deliver on. Open the launcher, go to
+**Settings > Graphics**, choose **OpenGL ES**, and try again. Report it either way - which renderer worked
 is exactly the information that's useful.
 
 **It runs at 60 fps and then gets slower.**
@@ -351,7 +381,7 @@ the frames. It applies from the next race.
 
 **Retro Rewind crashes when I open Retro WFC or a menu after updating.**
 Most likely a mod that replaces Retro Rewind's own files and was made for an older Retro Rewind.
-Turn your mods off in **Mods...** and try again; if that fixes it, the mod needs a version made
+Turn your mods off on the **Mods** page and try again; if that fixes it, the mod needs a version made
 for the Retro Rewind you have now.
 
 **Characters or menu icons are stretched across the screen.**
@@ -360,7 +390,7 @@ GPUs; if you still see it, set **Fix stretched graphics (Snapdragon)** in the se
 **Everything**, or try a different GPU driver (next question).
 
 **Can I use a different GPU driver?**
-On Snapdragon phones, yes: **Graphics...** -> **GPU driver...** installs an AdrenoTools driver
+On Snapdragon phones, yes: **Settings > Graphics** -> **GPU driver...** installs an AdrenoTools driver
 package such as Turnip. DriftDroid does not ship drivers; where to get them and how to check which
 one is active is in [`docs/android-gpu-compatibility.md`](docs/android-gpu-compatibility.md).
 
@@ -421,6 +451,17 @@ position-tracked).
   steering calibration curve were directly modeled on, and the source of several GX command
   processor fixes, the in-app updater, and the phone vibration fallback and vibration strength
   setting this fork carries.
+- **[Wheel Wizard](https://github.com/TeamWheelWizard/WheelWizard)** by Team Wheel Wizard - the PC
+  tool whose features the launcher brings to Android, and the reference for its Retro WFC and
+  GameBanana API use, the Mii renderer encoding, the save-file and Mii-file layouts, and friend-code
+  math.
+- **Retro WFC**, whose public API powers Rooms and Ranks, and
+  **[GameBanana](https://gamebanana.com/games/5896)** and the mod authors whose work the Mods page
+  lists.
+- **[libarchive](https://www.libarchive.org/)** (BSD) through
+  **[libarchive-android](https://github.com/zhanghai/libarchive-android)** (Apache 2.0) - unpacking
+  `.7z` and `.rar` mods.
+- **Material Design icons** by Google (Apache 2.0) in the launcher.
 - **App icon**: a 3D render made for this project in Blender. The kart is
   **"Kart" by [absence_art](https://sketchfab.com/absence_art)** on Sketchfab
   (<https://sketchfab.com/3d-models/kart-1eef98f88e804e3481d8b1bfb311ee06>), licensed
