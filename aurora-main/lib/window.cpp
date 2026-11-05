@@ -64,6 +64,9 @@ std::atomic_bool g_backgrounded = false;
 // Set from pump_events() when Horizon asks the title to quit; turned into an AURORA_EXIT event.
 std::atomic_bool g_appletExitRequested = false;
 #endif
+#if defined(__SWITCH__)
+extern "C" void AuroraSwitchRestoreControllers();  // lib/switch/input_switch.cpp
+#endif
 std::atomic_bool g_nativeResizePending = false;
 #if defined(__ANDROID__)
 int g_androidRealGamepadCount = 0;
@@ -691,6 +694,9 @@ void pump_events() noexcept {
   if (!appletMainLoop()) {
     // The system asked the title to exit (HOME close, sleep-related teardown).
     Log.info("applet requested exit");
+    // The process is ended from outside after this (no atexit, no clean return), so put the
+    // Joy-Con hold type back to normal here. Safe to repeat.
+    AuroraSwitchRestoreControllers();
     g_appletExitRequested.store(true, std::memory_order_release);
   }
 #endif

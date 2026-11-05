@@ -90,6 +90,10 @@ void StartAndroidPgoRecording();
 
 #include <tracy/Tracy.hpp>
 
+#if defined(__SWITCH__)
+extern "C" void AuroraSwitchRestoreControllers();  // aurora-main/lib/switch/input_switch.cpp
+#endif
+
 #if defined(__ANDROID__)
 void AndroidInitFonts(const AuroraWindowSize* size);  // android_imgui_fonts.cpp
 #endif
@@ -2357,6 +2361,9 @@ void AbortSignalHandler(int signum) {
 
     std::fflush(stderr);
     std::fflush(stdout);
+#if defined(__SWITCH__)
+    AuroraSwitchRestoreControllers();  // _Exit skips atexit: reset the Joy-Con hold type
+#endif
     std::_Exit(EXIT_FAILURE);
 }
 

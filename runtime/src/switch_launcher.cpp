@@ -33,6 +33,7 @@
 #include <thread>
 #include <vector>
 
+extern "C" void AuroraSwitchRestoreControllers();  // aurora-main/lib/switch/input_switch.cpp
 #include "retro_rewind_download.h"
 #include "runtime_config.h"
 #include "runtime_product.h"
@@ -1766,6 +1767,7 @@ void HandleEvents(const AuroraEvent* events) {
     for (const AuroraEvent* ev = events; ev->type != AURORA_NONE; ++ev) {
         if (ev->type == AURORA_EXIT) {
             // Closed from the home menu: end the process directly, as the in-game exit does.
+            AuroraSwitchRestoreControllers();
             std::_Exit(EXIT_SUCCESS);
         }
         if (ev->type == AURORA_SDL_EVENT) {
