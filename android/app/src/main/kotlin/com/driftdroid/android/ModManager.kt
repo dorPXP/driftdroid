@@ -4,6 +4,8 @@ import android.content.Context
 import android.net.Uri
 import android.provider.OpenableColumns
 import com.driftdroid.android.mods.ArchiveExtractor
+import com.driftdroid.android.mods.RetroRewindPatches
+import com.driftdroid.android.mods.RiivolutionChoices
 import org.json.JSONObject
 import java.io.File
 
@@ -114,6 +116,24 @@ object ModManager {
     fun enabledOverlayRoots(context: Context): List<String> =
         installedPacks(context).filter { it.enabled }.map { it.dir.absolutePath }
 
+    /** Readies every turned-on mod for the game - see [RiivolutionChoices] and
+     * [RetroRewindPatches.addRegionTwins]. Called just before the
+     * game starts, so mods installed by an earlier version of the app get it too. */
+    fun prepareEnabledPacks(context: Context) {
+        for (pack in installedPacks(context)) {
+            if (!pack.enabled) continue
+            runCatching { RiivolutionChoices.ensure(pack.dir) }
+            runCatching { RetroRewindPatches.addRegionTwins(pack.dir) }
+        }
+    }
+
+    /** Lays the turned-on mods out in Retro Rewind's own Patches folder - see [RetroRewindPatches].
+     * Called as Retro Rewind starts fresh, before the game reads its files. */
+    fun syncRetroRewindPatches(context: Context, retroRewindRoot: File) {
+        val packs = installedPacks(context).filter { it.enabled }.map { it.dir }
+        RetroRewindPatches.sync(packs, File(retroRewindRoot, "Patches"))
+    }
+
     fun setEnabled(pack: Pack, enabled: Boolean) {
         val marker = File(pack.dir, DISABLED_MARKER)
         if (enabled) marker.delete() else marker.createNewFile()
@@ -154,6 +174,8 @@ object ModManager {
                 resolved.copyRecursively(dest, overwrite = true)
             }
             File(dest, META_FILE).writeText(meta.toJson().toString())
+            RiivolutionChoices.ensure(dest)
+            RetroRewindPatches.addRegionTwins(dest)
             val order = installedPacks(context).map { it.name }.filter { it != dest.name }
             setOrder(context, listOf(dest.name) + order)
             return Pack(dest, enabled = true, meta = meta)

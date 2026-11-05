@@ -165,7 +165,25 @@ class MainActivity : SDLActivity() {
             restartIntoProduct(resolvedProduct)
             return
         }
+        // Same for mods: the running game read its overlay roots once, at DVD init, and never
+        // looks again. A mod installed, switched on or off, or reordered in the launcher since
+        // then would silently not apply when Play just resumed this session - restart clean so
+        // the new set is the one the game starts with.
+        ModManager.prepareEnabledPacks(this)
+        val overlayRoots = ModManager.enabledOverlayRoots(this)
+        if (sLoadedProduct != null && sLoadedOverlayRoots != overlayRoots) {
+            restartIntoProduct(resolvedProduct)
+            return
+        }
+        val freshStart = sLoadedProduct == null
         sLoadedProduct = resolvedProduct
+        sLoadedOverlayRoots = overlayRoots
+        // Retro Rewind also takes mods through its own Patches folder (loose archive overrides
+        // and all) - laid out now, before the game reads anything, and only on a fresh start: a
+        // session that is merely resumed already has its files open.
+        if (freshStart && resolvedProduct == PRODUCT_RETRO_REWIND) {
+            runCatching { ModManager.syncRetroRewindPatches(this, File(filesDir, RETRO_REWIND_STAGING_SUBDIR)) }
+        }
         // Vertical mode: upright screen, read by aurora's window setup (SDL_HINT_ORIENTATIONS) from
         // this variable, so it has to be set before the native side starts.
         val vertical = VerticalMode.isEnabled(this)
@@ -206,7 +224,7 @@ class MainActivity : SDLActivity() {
         if (resolvedProduct == PRODUCT_RETRO_REWIND) {
             nativeSetRetroRewindRoot(File(filesDir, RETRO_REWIND_STAGING_SUBDIR).absolutePath)
         }
-        for (root in ModManager.enabledOverlayRoots(this)) {
+        for (root in overlayRoots) {
             nativeAddOverlayRoot(root)
         }
         // Only ever used as a FIRST-RUN default (native side only writes it when no explicit
@@ -666,6 +684,13 @@ class MainActivity : SDLActivity() {
         /** True once a game has started in this process; the launcher warns before editing saves
          * or Miis then, since the still-loaded game may write its own copy back over them. */
         val isGameLoaded: Boolean get() = sLoadedProduct != null
+
+        // The mod folders (in priority order) the loaded game started with.
+        private var sLoadedOverlayRoots: List<String>? = null
+
+        /** The game is loaded but the launcher's mods have changed since: Play restarts it. */
+        fun modsChangedSinceLoad(context: android.content.Context): Boolean =
+            sLoadedProduct != null && sLoadedOverlayRoots != ModManager.enabledOverlayRoots(context)
 
         // Staging path for the Retro Rewind asset pack (tracks/textures - distinct from Code.pul,
         // which only carries the mod's patched game LOGIC and is already compiled into
