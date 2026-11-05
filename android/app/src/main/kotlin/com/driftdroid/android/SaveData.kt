@@ -28,7 +28,7 @@ internal object SaveData {
     /** "RKSD" header, then a CRC-32 of the first 0x27FFC bytes stored big-endian at 0x27FFC. */
     private const val CHECKSUM_OFFSET = 0x27FFC
 
-    private enum class Game(val label: String, val relativePath: String) {
+    internal enum class Game(val label: String, val relativePath: String) {
         MarioKartWii("Mario Kart Wii", "WiiCompiled/NAND/title/00010004/524d4350/data/rksys.dat"),
         RetroRewind("Retro Rewind", "WiiCompiled/riivolution/save/RetroWFC/RMCP/rksys.dat"),
     }

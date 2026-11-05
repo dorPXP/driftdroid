@@ -112,8 +112,88 @@ internal object DriftUi {
     }
 }
 
+/**
+ * The colours a [DriftSheet] draws with. In game it is the native settings drawer's ([GAME]); a
+ * screen with a look of its own - the launcher - hands sheets its palette by being [SheetThemed].
+ */
+class SheetPalette internal constructor(
+    val panel: Int,
+    val row: Int,
+    val rowStrong: Int,
+    val line: Int,
+    val text: Int,
+    val muted: Int,
+    val accent: Int,
+    val accentText: Int,
+    val focus: Int,
+    val trackOff: Int,
+    val knobOff: Int,
+    val danger: Int,
+    val radiusDp: Float,
+    val panelRadiusDp: Float,
+    /** Footer buttons as the launcher's slanted plates instead of the drawer's pills. */
+    val plates: Boolean,
+) {
+    internal fun pressable(context: Context, color: Int, radiusDp: Float = this.radiusDp): Drawable =
+        DriftUi.pressable(context, color, min(radiusDp, if (plates) this.radiusDp else radiusDp))
+
+    internal fun button(context: Context, text: String, style: DriftUi.Style, onClick: () -> Unit): TextView {
+        if (!plates) return DriftUi.button(context, text, style, onClick)
+        val (fill, ink) =
+            when (style) {
+                DriftUi.Style.PRIMARY -> accent to accentText
+                DriftUi.Style.SECONDARY -> rowStrong to this.text
+                DriftUi.Style.DANGER -> Lx.alpha(danger, 0.16f) to danger
+            }
+        return TextView(context).apply {
+            this.text = text.uppercase()
+            textSize = 15f
+            typeface = Lx.CONDENSED
+            letterSpacing = 0.04f
+            gravity = Gravity.CENTER
+            isSingleLine = true
+            minHeight = DriftUi.dp(context, 46f)
+            setPadding(DriftUi.dp(context, 18f), 0, DriftUi.dp(context, 18f), 0)
+            background = Lx.plate(context, fill)
+            setTextColor(ink)
+            setOnClickListener { onClick() }
+        }
+    }
+
+    internal fun styleField(field: EditText) {
+        if (!plates) return DriftUi.styleField(field)
+        field.setTextColor(text)
+        field.setHintTextColor(muted)
+        field.textSize = 16f
+        field.background = Lx.fieldBackground(field.context)
+        field.setPadding(DriftUi.dp(field.context, 14f), DriftUi.dp(field.context, 12f), DriftUi.dp(field.context, 14f), DriftUi.dp(field.context, 12f))
+    }
+
+    companion object {
+        val GAME =
+            SheetPalette(
+                DriftUi.PANEL, DriftUi.ROW, DriftUi.ROW_STRONG, DriftUi.LINE, DriftUi.TEXT, DriftUi.MUTED, DriftUi.ACCENT,
+                DriftUi.ACCENT_TEXT, DriftUi.FOCUS, DriftUi.TRACK_OFF, DriftUi.KNOB_OFF, DriftUi.DANGER, 12f, 20f, false,
+            )
+
+        val LAUNCHER =
+            SheetPalette(
+                Lx.SURFACE, Lx.SURFACE_HI, 0xFF292E36.toInt(), Lx.LINE, Lx.TEXT, Lx.MUTED, Lx.ACCENT,
+                Lx.ACCENT_TEXT, Lx.MUTED, Lx.LINE, Lx.MUTED, Lx.DANGER, 8f, 14f, true,
+            )
+
+        internal fun of(activity: Activity): SheetPalette = (activity as? SheetThemed)?.sheetPalette ?: GAME
+    }
+}
+
+/** A screen whose sheets should wear its own colours rather than the in-game drawer's. */
+interface SheetThemed {
+    val sheetPalette: SheetPalette
+}
+
 /** The drawer's on/off switch: green track with the knob on the right when on. */
 internal class PillSwitch(context: Context) : View(context) {
+    var palette: SheetPalette = SheetPalette.GAME
     var isOn = false
         set(value) {
             field = value
@@ -125,15 +205,16 @@ internal class PillSwitch(context: Context) : View(context) {
         val w = width.toFloat()
         val h = height.toFloat()
         val r = h / 2f
-        paint.color = if (isOn) DriftUi.ACCENT else DriftUi.TRACK_OFF
+        paint.color = if (isOn) palette.accent else palette.trackOff
         canvas.drawRoundRect(0f, 0f, w, h, r, r, paint)
-        paint.color = if (isOn) Color.WHITE else DriftUi.KNOB_OFF
+        paint.color = if (isOn) Color.WHITE else palette.knobOff
         canvas.drawCircle(if (isOn) w - r else r, r, r * 0.74f, paint)
     }
 }
 
 /** The check circle of a [DriftSheet.radio] row. */
 internal class RadioMark(context: Context) : View(context) {
+    var palette: SheetPalette = SheetPalette.GAME
     var picked = false
         set(value) {
             field = value
@@ -151,7 +232,7 @@ internal class RadioMark(context: Context) : View(context) {
         val stroke = DriftUi.dp(context, 2f).toFloat()
         paint.style = Paint.Style.STROKE
         paint.strokeWidth = stroke
-        paint.color = if (picked) DriftUi.ACCENT else DriftUi.MUTED
+        paint.color = if (picked) palette.accent else palette.muted
         canvas.drawCircle(r, r, r - stroke, paint)
         if (picked) {
             paint.style = Paint.Style.FILL
@@ -192,6 +273,7 @@ internal class DriftSheet(
 ) {
     enum class Dock { AUTO, START, END, TOP, BOTTOM }
 
+    private val pal = SheetPalette.of(activity)
     private val portrait = activity.resources.configuration.orientation == Configuration.ORIENTATION_PORTRAIT
     private val dock =
         when (dock) {
@@ -219,10 +301,10 @@ internal class DriftSheet(
         val (_, screenH) = screenSize()
         val root = LinearLayout(activity)
         root.orientation = LinearLayout.VERTICAL
-        val radius = dp(20f).toFloat()
+        val radius = dp(pal.panelRadiusDp).toFloat()
         root.background = GradientDrawable().apply {
-            setColor(DriftUi.PANEL)
-            setStroke(dp(1.5f), DriftUi.LINE)
+            setColor(pal.panel)
+            setStroke(dp(1.5f), pal.line)
             cornerRadii =
                 when (this@DriftSheet.dock) {
                     Dock.BOTTOM -> floatArrayOf(radius, radius, radius, radius, 0f, 0f, 0f, 0f)
@@ -242,12 +324,12 @@ internal class DriftSheet(
         titles.addView(
             TextView(activity).apply {
                 text = T(title)
-                setTextColor(DriftUi.TEXT)
+                setTextColor(pal.text)
                 textSize = 21f
                 typeface = Typeface.DEFAULT_BOLD
             },
         )
-        subtitleView.setTextColor(DriftUi.MUTED)
+        subtitleView.setTextColor(pal.muted)
         subtitleView.textSize = 14f
         subtitleView.visibility = View.GONE
         titles.addView(subtitleView)
@@ -258,8 +340,8 @@ internal class DriftSheet(
                 text = "✕"
                 textSize = 18f
                 gravity = Gravity.CENTER
-                setTextColor(DriftUi.MUTED)
-                background = DriftUi.pressable(activity, DriftUi.ROW, 22f)
+                setTextColor(pal.muted)
+                background = pal.pressable(activity, pal.row, 22f)
                 contentDescription = "Close"
                 setOnClickListener { dismiss() }
             },
@@ -271,7 +353,7 @@ internal class DriftSheet(
             root.addView(
                 View(activity).apply {
                     background = GradientDrawable().apply {
-                        setColor(DriftUi.LINE)
+                        setColor(pal.line)
                         cornerRadius = dp(3f).toFloat()
                     }
                 },
@@ -282,7 +364,7 @@ internal class DriftSheet(
             )
         }
         root.addView(header)
-        root.addView(View(activity).apply { setBackgroundColor(DriftUi.LINE) }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(1.5f)))
+        root.addView(View(activity).apply { setBackgroundColor(pal.line) }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(1.5f)))
 
         body.orientation = LinearLayout.VERTICAL
         body.setPadding(dp(16f), dp(12f), dp(16f), dp(8f))
@@ -336,7 +418,7 @@ internal class DriftSheet(
             gravity = Gravity.CENTER_VERTICAL
             minimumHeight = dp(58f)
             setPadding(dp(16f), dp(10f), dp(14f), dp(10f))
-            background = DriftUi.pressable(activity, DriftUi.ROW)
+            background = pal.pressable(activity, pal.row)
         }
 
     private fun labelColumn(label: String, detail: String?): LinearLayout {
@@ -345,7 +427,7 @@ internal class DriftSheet(
         column.addView(
             TextView(activity).apply {
                 text = T(label)
-                setTextColor(DriftUi.TEXT)
+                setTextColor(pal.text)
                 textSize = 16f
             },
         )
@@ -353,7 +435,7 @@ internal class DriftSheet(
             column.addView(
                 TextView(activity).apply {
                     text = T(detail)
-                    setTextColor(DriftUi.MUTED)
+                    setTextColor(pal.muted)
                     textSize = 13f
                     setPadding(0, dp(2f), 0, 0)
                 },
@@ -366,7 +448,7 @@ internal class DriftSheet(
         body.addView(
             TextView(activity).apply {
                 this.text = T(text).uppercase()
-                setTextColor(DriftUi.FOCUS)
+                setTextColor(pal.focus)
                 textSize = 12f
                 typeface = Typeface.DEFAULT_BOLD
                 letterSpacing = 0.08f
@@ -378,7 +460,7 @@ internal class DriftSheet(
     fun note(text: String): TextView =
         TextView(activity).apply {
             this.text = T(text)
-            setTextColor(DriftUi.MUTED)
+            setTextColor(pal.muted)
             textSize = 14f
             setLineSpacing(0f, 1.15f)
             setPadding(dp(4f), dp(2f), dp(4f), dp(10f))
@@ -389,6 +471,7 @@ internal class DriftSheet(
         val row = rowBase()
         row.addView(labelColumn(label, detail), LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
         val pill = PillSwitch(activity)
+        pill.palette = pal
         pill.isOn = checked
         row.addView(pill, LinearLayout.LayoutParams(dp(52f), dp(30f)).apply { marginStart = dp(12f) })
         row.setOnClickListener {
@@ -407,7 +490,7 @@ internal class DriftSheet(
             trailing ?: TextView(activity).apply {
                 text = "›"
                 textSize = 24f
-                setTextColor(DriftUi.MUTED)
+                setTextColor(pal.muted)
                 setPadding(dp(12f), 0, dp(2f), dp(2f))
             },
         )
@@ -422,8 +505,8 @@ internal class DriftSheet(
         card.orientation = LinearLayout.VERTICAL
         card.setPadding(dp(16f), dp(12f), dp(12f), dp(12f))
         card.background = GradientDrawable().apply {
-            setColor(DriftUi.ROW)
-            cornerRadius = dp(12f).toFloat()
+            setColor(pal.row)
+            cornerRadius = dp(pal.radiusDp).toFloat()
         }
         card.addView(labelColumn(label, detail))
         val pills = LinearLayout(activity)
@@ -432,8 +515,8 @@ internal class DriftSheet(
         fun paint(current: Int) {
             pillViews.forEachIndexed { index, view ->
                 val on = index == current
-                view.background = DriftUi.pressable(activity, if (on) DriftUi.ACCENT else DriftUi.ROW_STRONG, 10f)
-                view.setTextColor(if (on) DriftUi.ACCENT_TEXT else DriftUi.TEXT)
+                view.background = pal.pressable(activity, if (on) pal.accent else pal.rowStrong, 10f)
+                view.setTextColor(if (on) pal.accentText else pal.text)
             }
         }
         options.forEachIndexed { index, option ->
@@ -494,22 +577,22 @@ internal class DriftSheet(
         card.orientation = LinearLayout.VERTICAL
         card.setPadding(dp(16f), dp(12f), dp(8f), dp(6f))
         card.background = GradientDrawable().apply {
-            setColor(DriftUi.ROW)
-            cornerRadius = dp(12f).toFloat()
+            setColor(pal.row)
+            cornerRadius = dp(pal.radiusDp).toFloat()
         }
         val top = LinearLayout(activity)
         top.orientation = LinearLayout.HORIZONTAL
         top.addView(
             TextView(activity).apply {
                 text = label
-                setTextColor(DriftUi.TEXT)
+                setTextColor(pal.text)
                 textSize = 16f
             },
             LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f),
         )
         val valueView = TextView(activity).apply {
             text = format(value)
-            setTextColor(DriftUi.TEXT)
+            setTextColor(pal.text)
             textSize = 15f
             typeface = Typeface.DEFAULT_BOLD
             setPadding(0, 0, dp(8f), 0)
@@ -519,8 +602,8 @@ internal class DriftSheet(
         val seek = SeekBar(activity)
         seek.max = steps
         seek.progress = (((value - min) / (max - min)) * steps).toInt().coerceIn(0, steps)
-        seek.progressTintList = ColorStateList.valueOf(DriftUi.ACCENT)
-        seek.progressBackgroundTintList = ColorStateList.valueOf(DriftUi.TRACK_OFF)
+        seek.progressTintList = ColorStateList.valueOf(pal.accent)
+        seek.progressBackgroundTintList = ColorStateList.valueOf(pal.trackOff)
         seek.thumbTintList = ColorStateList.valueOf(Color.WHITE)
         seek.setPadding(dp(8f), dp(12f), dp(16f), dp(12f))
         seek.setOnSeekBarChangeListener(
@@ -547,7 +630,7 @@ internal class DriftSheet(
         field.setText(initial)
         field.isSingleLine = true
         field.inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
-        DriftUi.styleField(field)
+        pal.styleField(field)
         addRow(field)
         field.setSelection(field.text.length)
         return field
@@ -559,6 +642,7 @@ internal class DriftSheet(
      * [setPicked] when one is tapped). */
     fun radio(label: String, detail: String? = null, picked: Boolean, onClick: () -> Unit): LinearLayout {
         val mark = RadioMark(activity)
+        mark.palette = pal
         mark.picked = picked
         val row = action(label, detail, mark, onClick)
         (mark.layoutParams as? LinearLayout.LayoutParams)?.marginStart = dp(12f)
@@ -575,9 +659,9 @@ internal class DriftSheet(
         val bar = android.widget.ProgressBar(activity, null, android.R.attr.progressBarStyleHorizontal)
         bar.max = 1000
         bar.isIndeterminate = true
-        bar.progressTintList = ColorStateList.valueOf(DriftUi.ACCENT)
-        bar.progressBackgroundTintList = ColorStateList.valueOf(DriftUi.TRACK_OFF)
-        bar.indeterminateTintList = ColorStateList.valueOf(DriftUi.ACCENT)
+        bar.progressTintList = ColorStateList.valueOf(pal.accent)
+        bar.progressBackgroundTintList = ColorStateList.valueOf(pal.trackOff)
+        bar.indeterminateTintList = ColorStateList.valueOf(pal.accent)
         addRow(bar)
         return bar
     }
@@ -618,7 +702,7 @@ internal class DriftSheet(
 
     /** A footer button. Buttons share the footer's width equally. */
     fun button(text: String, style: DriftUi.Style = DriftUi.Style.SECONDARY, onClick: () -> Unit): TextView {
-        val view = DriftUi.button(activity, T(text), style, onClick)
+        val view = pal.button(activity, T(text), style, onClick)
         footer.visibility = View.VISIBLE
         footer.addView(
             view,
@@ -651,7 +735,11 @@ internal class DriftSheet(
         window.addFlags(WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN)
         window.attributes = window.attributes.apply {
             layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+            // The system bars are hidden, so the sheet sits on the screen's real edge rather than
+            // above where the navigation bar would be (which left a strip of the page under it).
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) fitInsetsTypes = 0
         }
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) window.setDecorFitsSystemWindows(false)
         window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
         if (sideDock) {
             val width = (screenW * 0.40f).toInt().coerceIn(min(dp(340f), screenW), (screenW * 0.62f).toInt().coerceAtLeast(dp(340f)))
@@ -669,9 +757,12 @@ internal class DriftSheet(
         dialog.show()
         @Suppress("DEPRECATION")
         window.decorView.systemUiVisibility = activity.window.decorView.systemUiVisibility
-        window.insetsController?.let {
-            it.hide(WindowInsets.Type.systemBars())
-            it.systemBarsBehavior = WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+        // WindowInsetsController is Android 11+; on Android 10 the copied flags above do the job.
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
+            window.insetsController?.let {
+                it.hide(WindowInsets.Type.systemBars())
+                it.systemBarsBehavior = WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+            }
         }
         window.clearFlags(WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE)
     }
