@@ -157,3 +157,23 @@ Found, to check before release:
    only its own files) and the generated `riivolution/config/RMCP.xml`; the game-restart-on-mod-change logic in
    `MainActivity`; the Mii editor writing to `rksys.dat` while the game could be running.
 3. Device test (needs the owner's OK for each action on the phone).
+
+## Switch phase (planned 2026-11-05, not started)
+
+The Switch launcher (`runtime/src/switch_launcher.cpp`, native ImGui) already draws the original drifting
+checkerboard (`DrawBackground`, dark greys, 42-unit tiles at 0.1 tile/s). It keeps it as the default.
+Android got the same checkerboard back as a built-in background (default for the original theme).
+
+Order, smallest risk first. The Aura screens are Android views, so on Switch they are rebuilt in C++, reusing
+the web calls and the file logic, not the code:
+
+1. **Theming.** Replace the fixed colour constants and the few drawing functions (background, button, panel,
+   list row) with values from a theme: the same presets, accent, backdrop colours and checkerboard; read
+   `.driftdroid-theme.json` files from the SD card so a theme works on both. Looks (glass, Aero, skeuo) via
+   ImGui's gradient vertex colouring. Backgrounds: still picture and GIF (stb_image); no video, the Switch has
+   no video decoder (THP only). Needs the owner's console to judge it; nothing can be screenshotted here.
+2. **Rooms and Ranks:** HTTPS GET to rwfc.net plus JSON. The runtime already does TLS for Retro Rewind downloads.
+3. **Mods store:** GameBanana API, download, extract. Zip extraction exists (`zip_extract.cpp`); 7z and RAR
+   need a library (check devkitPro portlibs) or are skipped with a clear message.
+4. **Profile and Mii editor:** port of `profile/SaveFile.kt` and the `mii/` package (rksys.dat licences and
+   friends, RFL_DB.dat); the largest piece, with backups before every write as on Android.
