@@ -1,41 +1,53 @@
 package com.driftdroid.android
 
 import android.app.Activity
-import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
-import android.content.IntentFilter
-import android.content.pm.PackageInstaller
-import android.graphics.Color
-import android.graphics.Typeface
-import android.graphics.drawable.Drawable
-import android.graphics.drawable.GradientDrawable
-import android.graphics.drawable.LayerDrawable
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.provider.OpenableColumns
-import android.provider.Settings
 import android.view.Gravity
-import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
-import android.view.ViewOutlineProvider
-import android.widget.Button
+import android.view.WindowInsets
+import android.view.WindowInsetsController
+import android.view.WindowManager
+import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ProgressBar
+import android.widget.ScrollView
 import android.widget.TextView
 import androidx.documentfile.provider.DocumentFile
+import com.driftdroid.android.launcher.HomePage
+import com.driftdroid.android.launcher.LeaderboardPage
+import com.driftdroid.android.launcher.ModsPage
+import com.driftdroid.android.launcher.Page
+import com.driftdroid.android.launcher.ProfilePage
+import com.driftdroid.android.launcher.RoomsPage
+import com.driftdroid.android.launcher.SettingsPage
+import com.driftdroid.android.launcher.Tab
+import com.driftdroid.android.mods.ModInstallJob
+import com.driftdroid.android.net.Http
 import com.driftdroid.android.ui.DriftSheet
 import com.driftdroid.android.ui.DriftUi
+import com.driftdroid.android.ui.Icon
+import com.driftdroid.android.ui.IconDrawable
+import com.driftdroid.android.ui.LauncherBackground
+import com.driftdroid.android.ui.Lx
+import com.driftdroid.android.ui.RemoteImages
+import com.driftdroid.android.ui.SheetPalette
+import com.driftdroid.android.ui.SheetThemed
+import com.driftdroid.android.ui.SlantDrawable
 import java.io.File
 import java.io.RandomAccessFile
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import java.util.concurrent.Executors
 import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
 
@@ -46,440 +58,678 @@ import java.util.zip.ZipOutputStream
  * running game has a supported way to reset and switch profiles live - MainActivity.EXTRA_PRODUCT
  * tells it which one nativeSetActiveProduct() should select.
  *
+ * It is also the home of everything around the game: Home, Mods, Rooms, Ranks, Profile and
+ * Settings (the pages in com.driftdroid.android.launcher), behind a bottom tab bar on a phone held
+ * upright or a navigation rail on a tablet or handheld held sideways (LauncherOrientation picks
+ * which). A header carries the page's title and actions, detail pages are pushed on top with a back
+ * arrow, and a task bar for long jobs (Retro Rewind installs, mod downloads, imports) keeps
+ * following a job across pages.
+ *
  * Retro Rewind's pack (tracks/textures, ~2GB - distinct from Code.pul, which only carries the
- * mod's patched game LOGIC and is already compiled into libGameCombined.so) is never bundled or
- * downloaded by this app, matching how the PC version works: WiiCompiled.Setup's
- * RetroRewindSource.cs only ever resolves a folder the user already has (normally obtained via the
- * separate Wheel Wizard tool) - it never packages or downloads it itself. This picker offers two
- * ways to hand over a copy the user already obtained: the .zip file exactly as downloaded (most
- * people will only ever have this - extracted first, matching how someone who downloaded Retro
- * Rewind normally has it), or an already-extracted folder for anyone who prefers that.
+ * mod's patched game LOGIC and is already compiled into libGameCombined.so) is downloaded from
+ * Retro Rewind's own server by RetroRewindInstallService, or taken from a copy the player already
+ * has: the .zip file exactly as downloaded, or an already-extracted folder.
+ *
+ * File pickers and anything else that hands Android's own UI the screen stay here rather than in
+ * the in-game sidebar: launching one while a live game session's GPU surface is running lost the
+ * WebGPU/Vulkan surface on-device ("QueuePresent failed with VK_ERROR_SURFACE_LOST_KHR") and
+ * crashed the game. No such surface exists on this screen.
  */
-class ModePickerActivity : Activity() {
+class ModePickerActivity : Activity(), SheetThemed {
 
-    private lateinit var root: LinearLayout
-    private lateinit var baseButton: Button
-    private lateinit var retroButton: Button
-    private lateinit var retroMenuButton: Button
-    private lateinit var statusText: TextView
-    private lateinit var progressBar: ProgressBar
-    private lateinit var diagnosticsButton: Button
-    private lateinit var graphicsButton: Button
-    private lateinit var iconButton: Button
-    private lateinit var languageButton: Button
-    private lateinit var serverSettingsButton: Button
-    private lateinit var modsButton: Button
-    private lateinit var miiDataButton: Button
+    override val sheetPalette: SheetPalette get() = SheetPalette.LAUNCHER
+
     private val mainHandler = Handler(Looper.getMainLooper())
+    private val background = Executors.newCachedThreadPool { r -> Thread(r, "launcher-work").apply { isDaemon = true } }
+
+    /** Phone layout: one column with a bottom tab bar, instead of a rail beside the pages. */
+    internal var compact = false
+        private set
+
+    private val navItems = HashMap<Tab, NavItem>()
+    private var rail: View? = null
+    private lateinit var backButton: View
+    private lateinit var settingsButton: View
+    private lateinit var titleView: TextView
+    private lateinit var subtitleView: TextView
+    private lateinit var titlesBox: View
+    private lateinit var brandBox: LinearLayout
+    private lateinit var brandArt: ImageView
+    private lateinit var actionsBox: LinearLayout
+    private lateinit var pageHost: FrameLayout
+    private lateinit var taskBar: LinearLayout
+    private lateinit var taskTitle: TextView
+    private lateinit var taskDetail: TextView
+    private lateinit var taskProgress: ProgressBar
+    private lateinit var taskCancel: View
+    private lateinit var snack: LinearLayout
+    private lateinit var snackEdge: View
+    private lateinit var snackText: TextView
+
+    private val tabPages = HashMap<Tab, Page>()
+    private val stack = ArrayList<Page>()
+    private val actionViews = HashMap<Page, List<View>>()
+    private var currentTab = Tab.HOME
+    private var previousTab = Tab.HOME
+    private var shown: Page? = null
+    private var paused = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // Portrait on phones, landscape on tablets and handhelds, or the player's choice. When this
+        // turns the screen, Android starts the Activity again the right way up straight away.
+        requestedOrientation = LauncherOrientation.requested(this)
         I18n.init(this)
-        buildUi()
+        Http.userAgent = "DriftDroid/${appVersionName()} (Android ${Build.VERSION.RELEASE})"
+        RemoteImages.init(this)
+        window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_PAN)
+        // Draw the backdrop under a camera cutout too (no black band beside or above it); the
+        // shell keeps its content clear of the cutout itself.
+        window.attributes = window.attributes.apply {
+            layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) window.setDecorFitsSystemWindows(false)
+        compact = Lx.isCompact(this)
+        buildShell()
+        val tab = savedInstanceState?.getString(STATE_TAB)?.let { name -> Tab.values().firstOrNull { it.name == name } } ?: Tab.HOME
+        navigate(tab)
+    }
+
+    override fun onSaveInstanceState(outState: Bundle) {
+        super.onSaveInstanceState(outState)
+        outState.putString(STATE_TAB, currentTab.name)
     }
 
     override fun onResume() {
         super.onResume()
-        refreshChannelButtons()
+        hideSystemBars()
+        // Coming back from the game or a picker: the page refreshes what may have changed.
+        if (paused) currentPage()?.let { if (it === shown) it.onShow() }
+        paused = false
         // An install may still be running in RetroRewindInstallService from a previous instance
         // of this Activity (e.g. this one is a fresh recreation after Android reclaimed the old
         // one while backgrounded) - pick up its live progress instead of showing an idle screen
         // over a copy that's actually still going.
-        if (RetroRewindInstallStatus.running) {
-            beginImportUi(RetroRewindInstallStatus.label)
-            startStatusPolling()
-        }
+        if (RetroRewindInstallStatus.running) trackingRetroInstall = true
+        if (ModInstallJob.running) watchModInstall()
+        startTaskPolling()
     }
 
     override fun onPause() {
         super.onPause()
-        stopStatusPolling()
+        paused = true
+        stopTaskPolling()
+        shown?.onHide()
     }
 
-    private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
-
-    /** A rounded "channel" tile background, Wii Menu channel style. */
-    private fun channelDrawable(topColor: Int, bottomColor: Int, radius: Float): GradientDrawable =
-        GradientDrawable(
-            GradientDrawable.Orientation.TOP_BOTTOM,
-            intArrayOf(topColor, bottomColor),
-        ).also { it.cornerRadius = radius }
-
-    private fun styleChannelButton(
-        button: Button,
-        topColor: Int,
-        bottomColor: Int,
-        radius: Float = dp(18).toFloat(),
-    ) {
-        button.background = channelDrawable(topColor, bottomColor, radius)
-        button.setTextColor(Color.WHITE)
-        button.typeface = Typeface.DEFAULT_BOLD
-        button.isAllCaps = false
-        button.setShadowLayer(3f, 0f, 2f, Color.argb(140, 0, 0, 0))
-        button.stateListAnimator = null
-        button.elevation = dp(4).toFloat()
-        addPressBounce(button)
+    override fun onDestroy() {
+        super.onDestroy()
+        (stack + tabPages.values).forEach { it.onClose() }
     }
 
-    /**
-     * Custom channel art (a full banner image, already carrying its own logo/text) as a button's
-     * background, clipped to rounded corners via the view's outline rather than baked into the
-     * image itself - the source banners are plain rectangles at 1120x256 (= 280x64dp at 4x/xxxhdpi,
-     * matching buttonParams exactly, so the image stretches to fill with no cropping needed).
-     */
-    private fun styleImageButton(
-        button: Button,
-        drawableRes: Int,
-        locked: Boolean,
-        lockedLabel: String,
-        radius: Float = dp(18).toFloat(),
-    ) {
-        val art = androidx.core.content.ContextCompat.getDrawable(this, drawableRes)!!.mutate()
-        button.background =
-            if (locked) {
-                // A dark scrim over the banner art (rather than editing the art itself) both
-                // signals "locked" Wii-channel style and naturally dims the banner's own baked-in
-                // title text underneath the "Install..." label drawn on top, so the two don't
-                // compete for attention.
-                val scrim = GradientDrawable()
-                scrim.setColor(Color.argb(175, 0, 0, 0))
-                scrim.cornerRadius = radius
-                LayerDrawable(arrayOf(art, scrim))
-            } else {
-                art
-            }
-        button.text = if (locked) lockedLabel else ""
-        button.setTextColor(Color.WHITE)
-        button.typeface = Typeface.DEFAULT_BOLD
-        button.textSize = 16f
-        button.isAllCaps = false
-        button.setShadowLayer(3f, 0f, 2f, Color.argb(200, 0, 0, 0))
-        button.stateListAnimator = null
-        button.elevation = dp(4).toFloat()
-        button.clipToOutline = true
-        button.outlineProvider =
-            object : ViewOutlineProvider() {
-                override fun getOutline(view: View, outline: android.graphics.Outline) {
-                    outline.setRoundRect(0, 0, view.width, view.height, radius)
-                }
-            }
-        addPressBounce(button)
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        if (hasFocus) hideSystemBars()
     }
 
-    /**
-     * The little "press in, spring back" wiggle every Wii Menu channel does when tapped -
-     * squishes non-uniformly (width in more than height) rather than a plain uniform scale, and
-     * overshoots slightly past 1.0 on release before settling - the actual difference between
-     * "shrinks and grows back" (mechanical) and "liquid"/gel-like motion is in that asymmetry and
-     * overshoot, not just easing curve choice. Purely a touch-feedback animation (returns false so
-     * the real click listener still fires), not a gate on the click itself.
-     */
-    private fun addPressBounce(view: View) {
-        val overshoot = android.view.animation.OvershootInterpolator(3.5f)
-        view.setOnTouchListener { v, event ->
-            when (event.action) {
-                MotionEvent.ACTION_DOWN ->
-                    v.animate().scaleX(0.92f).scaleY(0.95f).setDuration(90)
-                        .setInterpolator(android.view.animation.DecelerateInterpolator()).start()
-                // Sound plays on an actual completed tap only, not ACTION_CANCEL (a drag that
-                // left the view, or the touch getting reassigned elsewhere) - both still spring
-                // the view back visually, but a canceled touch never counted as a "click" and
-                // shouldn't sound like one either.
-                MotionEvent.ACTION_UP -> {
-                    v.animate().scaleX(1f).scaleY(1f).setDuration(260).setInterpolator(overshoot).start()
-                    UiSounds.playClick(v.context)
-                }
-                MotionEvent.ACTION_CANCEL ->
-                    v.animate().scaleX(1f).scaleY(1f).setDuration(260).setInterpolator(overshoot).start()
+    /** Full screen like the game itself; a swipe from the edge brings the system bars back briefly. */
+    private fun hideSystemBars() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            window.insetsController?.let {
+                it.hide(WindowInsets.Type.systemBars())
+                it.systemBarsBehavior = WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
             }
-            false
+        } else {
+            // Android 10 has no WindowInsetsController.
+            @Suppress("DEPRECATION")
+            window.decorView.systemUiVisibility =
+                View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY or View.SYSTEM_UI_FLAG_FULLSCREEN or View.SYSTEM_UI_FLAG_HIDE_NAVIGATION or
+                View.SYSTEM_UI_FLAG_LAYOUT_STABLE or View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN or View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
         }
     }
 
-    private fun buildUi() {
-        root = LinearLayout(this)
-        root.orientation = LinearLayout.VERTICAL
-        root.gravity = Gravity.CENTER
-        val pad = dp(24)
-        root.setPadding(pad, pad, pad, pad)
+    @Deprecated("Deprecated in Java")
+    override fun onBackPressed() {
+        when {
+            stack.isNotEmpty() -> back()
+            currentTab == Tab.SETTINGS && compact -> navigate(previousTab)
+            currentTab != Tab.HOME -> navigate(Tab.HOME)
+            else -> @Suppress("DEPRECATION") super.onBackPressed()
+        }
+    }
 
-        val title = ImageView(this)
-        title.setImageResource(R.drawable.driftdroid_logo)
-        title.adjustViewBounds = true
-        val titleParams = LinearLayout.LayoutParams(dp(240), ViewGroup.LayoutParams.WRAP_CONTENT)
-        title.layoutParams = titleParams
-        title.setPadding(0, dp(8), 0, 0)
+    private fun dp(value: Float): Int = Lx.dp(this, value)
 
-        val subtitle = TextView(this)
-        subtitle.text = T("Kart Channel")
-        subtitle.setTextColor(Color.argb(230, 0xDD, 0xDD, 0xDD))
-        subtitle.textSize = 14f
-        subtitle.gravity = Gravity.CENTER
-        subtitle.setPadding(0, dp(2), 0, dp(28))
+    // --- Shell ---
 
-        baseButton = Button(this)
-        baseButton.setOnClickListener { launchProduct(MainActivity.PRODUCT_BASE) }
+    /** One destination in the tab bar or rail: its icon on a slanted green plate when picked, and a label. */
+    private inner class NavItem(val tab: Tab) {
+        val root: LinearLayout = Lx.vbox(this@ModePickerActivity)
+        private val icon = ImageView(this@ModePickerActivity)
+        private val label = Lx.text(this@ModePickerActivity, T(tab.label).uppercase(), 10.5f, Lx.FAINT, Lx.CONDENSED, 1)
 
-        retroButton = Button(this)
-        retroButton.setOnClickListener {
-            if (packWithoutRetroRewind()) {
-                DriftSheet.message(
-                    this,
-                    "Retro Rewind isn't in your game pack",
-                    "Your game pack was made without Retro Rewind. To play it, run DriftDroid Builder again " +
-                        "with \"Retro Rewind\" ticked and import the new game pack.",
-                )
-            } else if (isRetroRewindInstalled()) {
-                launchRetroRewindOrUpdate()
-            } else {
-                showInstallRetroRewindDialog()
+        init {
+            root.gravity = Gravity.CENTER
+            val p = dp(15f)
+            icon.setPadding(p, dp(4f), p, dp(4f))
+            root.addView(icon, Lx.lp(this@ModePickerActivity, 56f, 30f))
+            label.letterSpacing = 0.08f
+            root.addView(label, Lx.lp(this@ModePickerActivity, -2f, -2f, top = 4f))
+            root.background = Lx.pressable(this@ModePickerActivity, android.graphics.Color.TRANSPARENT, 8f)
+            root.contentDescription = T(tab.label)
+            root.setOnClickListener {
+                UiSounds.playClick(this@ModePickerActivity)
+                navigate(tab)
             }
         }
 
-        val buttonParams = LinearLayout.LayoutParams(dp(280), dp(64))
-        buttonParams.topMargin = dp(14)
-
-        retroMenuButton = Button(this)
-        retroMenuButton.text = "⋮" // vertical ellipsis ("3 dots")
-        retroMenuButton.textSize = 18f
-        retroMenuButton.setOnClickListener { showRetroRewindMenuDialog() }
-        styleChannelButton(retroMenuButton, Color.rgb(0xF2, 0x5C, 0x4C), Color.rgb(0xD1, 0x2A, 0x1E), dp(14).toFloat())
-
-        val retroRowParams =
-            LinearLayout.LayoutParams(dp(280), dp(64))
-        retroRowParams.topMargin = dp(14)
-        val retroRow = LinearLayout(this)
-        retroRow.orientation = LinearLayout.HORIZONTAL
-        val retroButtonParams =
-            LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f)
-        val retroMenuButtonParams =
-            LinearLayout.LayoutParams(dp(56), ViewGroup.LayoutParams.MATCH_PARENT)
-        retroMenuButtonParams.marginStart = dp(8)
-        retroRow.addView(retroButton, retroButtonParams)
-        retroRow.addView(retroMenuButton, retroMenuButtonParams)
-
-        progressBar = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal)
-        progressBar.max = 1000
-        progressBar.visibility = View.GONE
-        val progressParams = LinearLayout.LayoutParams(dp(280), ViewGroup.LayoutParams.WRAP_CONTENT)
-        progressParams.topMargin = dp(14)
-
-        statusText = TextView(this)
-        statusText.setTextColor(Color.rgb(0xDD, 0xDD, 0xDD))
-        statusText.textSize = 13f
-        statusText.gravity = Gravity.CENTER
-        statusText.setPadding(0, dp(16), 0, 0)
-
-
-        diagnosticsButton = Button(this)
-        diagnosticsButton.text = T("Export Diagnostics")
-        diagnosticsButton.textSize = 11f
-        diagnosticsButton.setOnClickListener { launchDiagnosticsExportPicker() }
-        val diagnosticsButtonParams =
-            LinearLayout.LayoutParams(dp(260), dp(40))
-        diagnosticsButtonParams.topMargin = dp(24)
-        styleChannelButton(
-            diagnosticsButton,
-            Color.rgb(0x5A, 0x5A, 0x5A),
-            Color.rgb(0x3A, 0x3A, 0x3A),
-            dp(12).toFloat(),
-        )
-        diagnosticsButton.setTextColor(Color.rgb(0xDD, 0xDD, 0xDD))
-        diagnosticsButton.setShadowLayer(0f, 0f, 0f, 0)
-
-        serverSettingsButton = Button(this)
-        serverSettingsButton.text = T("Experimental Server Settings...")
-        serverSettingsButton.textSize = 11f
-        serverSettingsButton.setOnClickListener { PrivateServerSettings.show(this) }
-        val serverSettingsButtonParams =
-            LinearLayout.LayoutParams(dp(260), dp(40))
-        serverSettingsButtonParams.topMargin = dp(8)
-        styleChannelButton(
-            serverSettingsButton,
-            Color.rgb(0x5A, 0x5A, 0x5A),
-            Color.rgb(0x3A, 0x3A, 0x3A),
-            dp(12).toFloat(),
-        )
-        serverSettingsButton.setTextColor(Color.rgb(0xDD, 0xDD, 0xDD))
-        serverSettingsButton.setShadowLayer(0f, 0f, 0f, 0)
-
-        // Renderer choice lives here because a device with no working Vulkan driver crashes before
-        // the in-game settings exist (GitHub issue #3).
-        graphicsButton = Button(this)
-        graphicsButton.text = T("Graphics...")
-        graphicsButton.textSize = 11f
-        graphicsButton.setOnClickListener { GraphicsSettings.show(this) }
-        val graphicsButtonParams =
-            LinearLayout.LayoutParams(dp(260), dp(40))
-        graphicsButtonParams.topMargin = dp(8)
-        styleChannelButton(
-            graphicsButton,
-            Color.rgb(0x5A, 0x5A, 0x5A),
-            Color.rgb(0x3A, 0x3A, 0x3A),
-            dp(12).toFloat(),
-        )
-        graphicsButton.setTextColor(Color.rgb(0xDD, 0xDD, 0xDD))
-        graphicsButton.setShadowLayer(0f, 0f, 0f, 0)
-
-        // Custom home-screen shortcut icon. Lives here rather than in the in-game sidebar because
-        // it opens the gallery picker, which must not run over a live game surface (see the
-        // Mods... button below for the crash that caused).
-        iconButton = Button(this)
-        iconButton.text = T("App icon...")
-        iconButton.textSize = 11f
-        iconButton.setOnClickListener { IconSettings.show(this) }
-        val iconButtonParams =
-            LinearLayout.LayoutParams(dp(260), dp(40))
-        iconButtonParams.topMargin = dp(8)
-        styleChannelButton(
-            iconButton,
-            Color.rgb(0x5A, 0x5A, 0x5A),
-            Color.rgb(0x3A, 0x3A, 0x3A),
-            dp(12).toFloat(),
-        )
-        iconButton.setTextColor(Color.rgb(0xDD, 0xDD, 0xDD))
-        iconButton.setShadowLayer(0f, 0f, 0f, 0)
-
-        languageButton = Button(this)
-        languageButton.text = T("Language...")
-        languageButton.textSize = 11f
-        languageButton.setOnClickListener { LanguageSettings.show(this) }
-        val languageButtonParams = LinearLayout.LayoutParams(dp(260), dp(40))
-        languageButtonParams.topMargin = dp(8)
-        styleChannelButton(
-            languageButton,
-            Color.rgb(0x5A, 0x5A, 0x5A),
-            Color.rgb(0x3A, 0x3A, 0x3A),
-            dp(12).toFloat(),
-        )
-        languageButton.setTextColor(Color.rgb(0xDD, 0xDD, 0xDD))
-        languageButton.setShadowLayer(0f, 0f, 0f, 0)
-
-        // Import/manage from here, not from the in-game settings sidebar - launching Android's
-        // file picker while a live game session's GPU surface is running lost the WebGPU/Vulkan
-        // surface on-device ("QueuePresent failed with VK_ERROR_SURFACE_LOST_KHR") and crashed
-        // the game. No such surface exists yet on this screen, so it's safe here - same reasoning
-        // as why Retro Rewind's own install flow only ever runs from this Activity.
-        modsButton = Button(this)
-        modsButton.text = T("Mods...")
-        modsButton.textSize = 11f
-        modsButton.setOnClickListener { ModManager.showManagerDialog(this) }
-        val modsButtonParams =
-            LinearLayout.LayoutParams(dp(260), dp(40))
-        modsButtonParams.topMargin = dp(8)
-        styleChannelButton(
-            modsButton,
-            Color.rgb(0x5A, 0x5A, 0x5A),
-            Color.rgb(0x3A, 0x3A, 0x3A),
-            dp(12).toFloat(),
-        )
-        modsButton.setTextColor(Color.rgb(0xDD, 0xDD, 0xDD))
-        modsButton.setShadowLayer(0f, 0f, 0f, 0)
-
-        val gamePackButton = Button(this)
-        gamePackButton.text = T("Import Game Pack...")
-        gamePackButton.textSize = 11f
-        gamePackButton.setOnClickListener { launchGamePackPicker() }
-        val gamePackButtonParams = LinearLayout.LayoutParams(dp(260), dp(40))
-        gamePackButtonParams.topMargin = dp(8)
-        styleChannelButton(
-            gamePackButton,
-            Color.rgb(0x5A, 0x5A, 0x5A),
-            Color.rgb(0x3A, 0x3A, 0x3A),
-            dp(12).toFloat(),
-        )
-        gamePackButton.setTextColor(Color.rgb(0xDD, 0xDD, 0xDD))
-        gamePackButton.setShadowLayer(0f, 0f, 0f, 0)
-
-        // GitHub issue #14: bring a save over from a Wii NAND backup or Dolphin, or copy it out.
-        val saveDataButton = Button(this)
-        saveDataButton.text = T("Save Data...")
-        saveDataButton.textSize = 11f
-        saveDataButton.setOnClickListener { SaveData.showDialog(this) }
-        val saveDataButtonParams = LinearLayout.LayoutParams(dp(260), dp(40))
-        saveDataButtonParams.topMargin = dp(8)
-        styleChannelButton(
-            saveDataButton,
-            Color.rgb(0x5A, 0x5A, 0x5A),
-            Color.rgb(0x3A, 0x3A, 0x3A),
-            dp(12).toFloat(),
-        )
-        saveDataButton.setTextColor(Color.rgb(0xDD, 0xDD, 0xDD))
-        saveDataButton.setShadowLayer(0f, 0f, 0f, 0)
-
-        // A square channel-style tile, same idea as baseButton/retroButton but square (96dp,
-        // matching the eventual custom Mii icon art) rather than a wide banner - Mii Data isn't a
-        // product to launch, but it's frequent enough (importing/exporting Miis) to earn its own
-        // channel rather than living in the pale utility-button stack below.
-        miiDataButton = Button(this)
-        miiDataButton.setOnClickListener { showMiiDataMenuDialog() }
-        val miiDataButtonParams = LinearLayout.LayoutParams(dp(96), dp(96))
-        miiDataButtonParams.topMargin = dp(14)
-        styleImageButton(
-            miiDataButton,
-            R.drawable.channel_mii_data,
-            locked = false,
-            lockedLabel = "",
-            radius = dp(20).toFloat(),
-        )
-
-        root.addView(title)
-        root.addView(subtitle)
-        root.addView(baseButton, buttonParams)
-        root.addView(retroRow, retroRowParams)
-        root.addView(miiDataButton, miiDataButtonParams)
-        root.addView(progressBar, progressParams)
-        root.addView(statusText)
-        root.addView(diagnosticsButton, diagnosticsButtonParams)
-        root.addView(graphicsButton, graphicsButtonParams)
-        root.addView(iconButton, iconButtonParams)
-        root.addView(languageButton, languageButtonParams)
-        root.addView(serverSettingsButton, serverSettingsButtonParams)
-        root.addView(modsButton, modsButtonParams)
-        root.addView(saveDataButton, saveDataButtonParams)
-        root.addView(gamePackButton, gamePackButtonParams)
-
-        // The picker has grown past what fits on-screen in landscape on some phones - confirmed
-        // directly on-device: the two lowest buttons (server settings, Mii data) were laid out
-        // fine but simply extended below the visible screen with no way to reach them, since a
-        // LinearLayout doesn't scroll on its own. A ScrollView guarantees every control stays
-        // reachable regardless of screen height/font scale, at the cost of no longer being
-        // perfectly vertically centered when everything DOES fit - worth it for correctness.
-        val scroll = android.widget.ScrollView(this)
-        scroll.background = ScrollingCheckerboardDrawable(this)
-        scroll.addView(
-            root,
-            ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT),
-        )
-        setContentView(scroll)
-        refreshChannelButtons()
+        fun paint(selected: Boolean) {
+            icon.setImageDrawable(IconDrawable(tab.icon, if (selected) Lx.ACCENT_TEXT else Lx.MUTED))
+            icon.background = if (selected) SlantDrawable(Lx.ACCENT, 0, 0f, dp(3f).toFloat()) else null
+            label.setTextColor(if (selected) Lx.TEXT else Lx.FAINT)
+            root.isSelected = selected
+        }
     }
 
-    private fun refreshChannelButtons() {
-        val romInstalled = isRomImported()
-        styleImageButton(baseButton, R.drawable.channel_mkwii, locked = !romInstalled, lockedLabel = "Install with ISO/WBFS")
+    private fun buildShell() {
+        val root = FrameLayout(this)
+        root.background = LauncherBackground(compact)
 
-        val retroInstalled = isRetroRewindInstalled()
-        val notInPack = packWithoutRetroRewind()
-        styleImageButton(
-            retroButton,
-            R.drawable.channel_retro_rewind,
-            locked = !retroInstalled || notInPack,
-            lockedLabel = if (notInPack) T("NOT IN GAME PACK") else "INSTALL",
-        )
-        // Nothing to update or delete until a copy is actually installed.
-        retroMenuButton.visibility = if (retroInstalled) View.VISIBLE else View.GONE
+        pageHost = FrameLayout(this)
+        val header = buildHeader()
+        if (compact) {
+            val column = Lx.vbox(this)
+            column.addView(header)
+            column.addView(pageHost, Lx.lp(this, -1f, 0f, 1f))
+            val bar = Lx.hbox(this, Gravity.CENTER)
+            bar.setBackgroundColor(Lx.BAR)
+            for (tab in Tab.values().filter { it != Tab.SETTINGS }) {
+                val item = NavItem(tab)
+                navItems[tab] = item
+                bar.addView(item.root, Lx.lp(this, 0f, -1f, 1f))
+            }
+            column.addView(Lx.divider(this))
+            column.addView(bar, Lx.lp(this, -1f, BOTTOM_BAR_DP))
+            root.addView(column, Lx.match())
+        } else {
+            val row = Lx.hbox(this, Gravity.TOP)
+            val rail = Lx.vbox(this)
+            rail.gravity = Gravity.CENTER_HORIZONTAL
+            // A phone held sideways is only ~400dp tall: tighter items so all six and the icon fit
+            // without the rail scrolling Settings out of sight.
+            val short = resources.configuration.screenHeightDp < 480
+            rail.setPadding(0, dp(if (short) 6f else 12f), 0, dp(if (short) 6f else 12f))
+            val mark = ImageView(this)
+            mark.setImageResource(R.mipmap.ic_launcher)
+            mark.contentDescription = getString(R.string.app_name)
+            rail.addView(mark, Lx.lp(this, if (short) 42f else 56f, if (short) 42f else 56f, bottom = if (short) 4f else 10f))
+            for (tab in Tab.values()) {
+                val item = NavItem(tab)
+                navItems[tab] = item
+                if (tab == Tab.SETTINGS) rail.addView(View(this), LinearLayout.LayoutParams(1, 0, 1f))
+                rail.addView(item.root, Lx.lp(this, 80f, if (short) 56f else 62f, bottom = if (short) 0f else 2f))
+            }
+            val railScroll = ScrollView(this)
+            railScroll.isVerticalScrollBarEnabled = false
+            railScroll.isFillViewport = true
+            railScroll.setBackgroundColor(Lx.BAR)
+            railScroll.addView(rail, ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+            row.addView(railScroll, LinearLayout.LayoutParams(dp(RAIL_DP), ViewGroup.LayoutParams.MATCH_PARENT))
+            row.addView(View(this).apply { setBackgroundColor(Lx.LINE) }, LinearLayout.LayoutParams(dp(1f), ViewGroup.LayoutParams.MATCH_PARENT))
+            val main = Lx.vbox(this)
+            main.addView(header)
+            main.addView(pageHost, Lx.lp(this, -1f, 0f, 1f))
+            row.addView(main, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f))
+            root.addView(row, Lx.match())
+            this.rail = railScroll
+        }
+
+        buildTaskBar(root)
+        buildSnack(root)
+        // Keep content clear of a camera cutout. Sideways, a cutout on the rail's side widens the
+        // rail instead, so the rail runs right to the screen's edge.
+        root.setOnApplyWindowInsetsListener { view, insets ->
+            val cutout = insets.displayCutout
+            val left = cutout?.safeInsetLeft ?: 0
+            val railView = rail
+            if (railView != null) {
+                railView.setPadding(left, 0, 0, 0)
+                railView.layoutParams = railView.layoutParams.apply { width = dp(RAIL_DP) + left }
+                view.setPadding(0, cutout?.safeInsetTop ?: 0, cutout?.safeInsetRight ?: 0, cutout?.safeInsetBottom ?: 0)
+            } else {
+                view.setPadding(left, cutout?.safeInsetTop ?: 0, cutout?.safeInsetRight ?: 0, cutout?.safeInsetBottom ?: 0)
+            }
+            insets
+        }
+        setContentView(root)
     }
 
-    /** A game pack is in and it was built without Retro Rewind. */
-    private fun packWithoutRetroRewind(): Boolean =
-        GamePack.state(this) == GamePack.State.Ready && !GamePack.hasRetroRewind(this)
+    private fun buildHeader(): View {
+        val header = Lx.hbox(this)
+        header.setPadding(dp(if (compact) 8f else 16f), dp(8f), dp(if (compact) 8f else 20f), dp(8f))
+        header.minimumHeight = dp(if (compact) 60f else 72f)
+        backButton = Lx.iconButton(this, Icon.BACK, "Back", Lx.TEXT, android.graphics.Color.TRANSPARENT, 44f) { goBack() }
+        header.addView(backButton, Lx.lp(this, 44f, 44f, end = 4f))
 
-    private fun isRomImported(): Boolean =
+        // Home's header is the brand: the app icon (the rail already shows it in landscape) and the wordmark.
+        brandBox = Lx.hbox(this)
+        if (compact) {
+            val mark = ImageView(this)
+            mark.setImageResource(R.mipmap.ic_launcher)
+            brandBox.addView(mark, Lx.lp(this, 44f, 44f, end = 6f))
+        }
+        brandArt = ImageView(this)
+        brandArt.scaleType = ImageView.ScaleType.FIT_START
+        brandArt.adjustViewBounds = true
+        brandBox.addView(brandArt, Lx.lp(this, -2f, if (compact) 30f else 40f))
+        header.addView(brandBox, Lx.lp(this, 0f, -2f, 1f, start = if (compact) 4f else 8f))
+
+        val titles = Lx.vbox(this)
+        titleView = Lx.display(this, "", if (compact) 23f else 27f, Lx.TEXT, 1)
+        subtitleView = Lx.caption(this, "", Lx.MUTED, 1)
+        titles.addView(titleView)
+        titles.addView(subtitleView, Lx.lp(this, top = 3f))
+        titlesBox = titles
+        header.addView(titles, Lx.lp(this, 0f, -2f, 1f, start = 8f, end = 8f))
+
+        actionsBox = Lx.hbox(this)
+        header.addView(actionsBox)
+        settingsButton = Lx.iconButton(this, Icon.SETTINGS, "Settings", Lx.MUTED, android.graphics.Color.TRANSPARENT, 44f) {
+            UiSounds.playClick(this)
+            navigate(Tab.SETTINGS)
+        }
+        header.addView(settingsButton, Lx.lp(this, 44f, 44f, start = 4f))
+        return header
+    }
+
+    private fun buildTaskBar(root: FrameLayout) {
+        taskBar = Lx.hbox(this)
+        taskBar.background = Lx.rounded(this, Lx.SURFACE_HI, 8f)
+        Lx.clipRounded(taskBar, 8f)
+        taskBar.elevation = dp(10f).toFloat()
+        taskBar.addView(View(this).apply { setBackgroundColor(Lx.ACCENT) }, LinearLayout.LayoutParams(dp(4f), ViewGroup.LayoutParams.MATCH_PARENT))
+        val taskText = Lx.vbox(this)
+        taskTitle = Lx.text(this, "", 14.5f, Lx.TEXT, Lx.CONDENSED, 1)
+        taskDetail = Lx.caption(this, "", Lx.MUTED, 2)
+        taskProgress = Lx.progressBar(this)
+        taskText.addView(taskTitle)
+        taskText.addView(taskDetail, Lx.lp(this, top = 3f))
+        taskText.addView(taskProgress, Lx.lp(this, -1f, 6f, top = 8f))
+        taskBar.addView(taskText, Lx.lp(this, 0f, -2f, 1f, start = 14f, top = 12f, end = 8f, bottom = 12f))
+        taskCancel = Lx.iconButton(this, Icon.CLOSE, "Cancel", Lx.MUTED, android.graphics.Color.TRANSPARENT, 40f) { ModInstallJob.cancel() }
+        taskBar.addView(taskCancel, Lx.lp(this, 40f, 40f, end = 6f))
+        taskBar.visibility = View.GONE
+        val params =
+            if (compact) {
+                FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM).apply {
+                    setMargins(dp(12f), 0, dp(12f), dp(BOTTOM_BAR_DP + 10f))
+                }
+            } else {
+                FrameLayout.LayoutParams(dp(380f), ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM or Gravity.END).apply {
+                    setMargins(0, 0, dp(20f), dp(18f))
+                }
+            }
+        root.addView(taskBar, params)
+    }
+
+    private fun buildSnack(root: FrameLayout) {
+        snack = Lx.hbox(this)
+        snack.background = Lx.rounded(this, 0xF51E2229.toInt(), 8f)
+        Lx.clipRounded(snack, 8f)
+        snack.elevation = dp(12f).toFloat()
+        snackEdge = View(this)
+        snack.addView(snackEdge, LinearLayout.LayoutParams(dp(4f), ViewGroup.LayoutParams.MATCH_PARENT))
+        snackText = Lx.text(this, "", 14f, Lx.TEXT, Lx.MEDIUM, 3)
+        snackText.setLineSpacing(0f, 1.15f)
+        snack.addView(snackText, Lx.lp(this, -2f, -2f, start = 14f, top = 12f, end = 16f, bottom = 12f))
+        snack.visibility = View.GONE
+        root.addView(snack, FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL).apply {
+            if (compact) setMargins(dp(16f), 0, dp(16f), dp(BOTTOM_BAR_DP + 12f)) else setMargins(dp(RAIL_DP + 24f), 0, dp(24f), dp(22f))
+        })
+    }
+
+    private fun pageFor(tab: Tab): Page =
+        tabPages.getOrPut(tab) {
+            when (tab) {
+                Tab.HOME -> HomePage(this)
+                Tab.MODS -> ModsPage(this)
+                Tab.ROOMS -> RoomsPage(this)
+                Tab.RANKS -> LeaderboardPage(this)
+                Tab.PROFILE -> ProfilePage(this)
+                Tab.SETTINGS -> SettingsPage(this)
+            }
+        }
+
+    private fun currentPage(): Page? = stack.lastOrNull() ?: tabPages[currentTab]
+
+    internal fun isShowing(page: Page): Boolean = shown === page && !isFinishing
+
+    /** Switches to a top-level page, closing any detail pages that were open. */
+    internal fun navigate(tab: Tab) {
+        while (stack.isNotEmpty()) stack.removeAt(stack.size - 1).also { if (it === shown) it.onHide() }.onClose()
+        if (tab != currentTab && currentTab != Tab.SETTINGS) previousTab = currentTab
+        currentTab = tab
+        for ((t, item) in navItems) item.paint(t == tab)
+        show(pageFor(tab))
+    }
+
+    /** Pushes a detail page on top of the current one. */
+    internal fun open(page: Page) {
+        stack.add(page)
+        show(page)
+    }
+
+    /** The header's back arrow: a detail page closes; Settings (opened from the gear) returns to where it was opened. */
+    private fun goBack() {
+        if (stack.isNotEmpty()) back() else if (currentTab == Tab.SETTINGS) navigate(previousTab)
+    }
+
+    /** Closes the top detail page. [force] skips the page's own say (unsaved changes, say). */
+    internal fun back(force: Boolean = false) {
+        val top = stack.lastOrNull() ?: return
+        if (!force && top.onBack()) return
+        stack.removeAt(stack.size - 1)
+        top.onHide()
+        top.onClose()
+        actionViews.remove(top)
+        show(currentPage() ?: pageFor(currentTab))
+    }
+
+    private fun show(page: Page) {
+        val previous = shown
+        if (previous != null && previous !== page && (previous in stack || tabPages.containsValue(previous))) previous.onHide()
+        shown = page
+        pageHost.removeAllViews()
+        val view = page.view
+        (view.parent as? ViewGroup)?.removeView(view)
+        pageHost.addView(view, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+        val detail = stack.isNotEmpty()
+        // Detail pages slide in from the side; top-level pages rise a little.
+        view.alpha = 0f
+        view.translationX = if (detail && page === stack.last()) dp(16f).toFloat() else 0f
+        view.translationY = if (detail) 0f else dp(8f).toFloat()
+        view.animate().alpha(1f).translationX(0f).translationY(0f).setDuration(170).start()
+        backButton.visibility = if (detail || (compact && currentTab == Tab.SETTINGS)) View.VISIBLE else View.GONE
+        settingsButton.visibility = if (compact && !detail && currentTab != Tab.SETTINGS) View.VISIBLE else View.GONE
+        actionsBox.removeAllViews()
+        for (action in actionViews.getOrPut(page) { page.actions() }) {
+            (action.parent as? ViewGroup)?.removeView(action)
+            actionsBox.addView(action)
+        }
+        refreshHeader(page)
+        page.onShow()
+    }
+
+    internal fun refreshHeader(page: Page) {
+        if (page !== shown) return
+        titleView.text = page.title
+        val sub = page.subtitle
+        subtitleView.text = sub ?: ""
+        subtitleView.visibility = if (sub.isNullOrEmpty()) View.GONE else View.VISIBLE
+        val art = page.headerArt
+        if (art != null) brandArt.setImageResource(art)
+        brandBox.contentDescription = page.title
+        brandBox.visibility = if (art != null) View.VISIBLE else View.GONE
+        titlesBox.visibility = if (art != null) View.GONE else View.VISIBLE
+    }
+
+    /** Tells every open page that [what] changed. */
+    internal fun broadcast(what: Page.Data) {
+        (tabPages.values + stack).forEach { it.onDataChanged(what) }
+        shown?.let { refreshHeader(it) }
+    }
+
+    private val hideSnack = Runnable { snack.animate().alpha(0f).translationY(dp(8f).toFloat()).setDuration(200).withEndAction { snack.visibility = View.GONE }.start() }
+
+    /** A short message over the bottom of the screen, edged in the colour of what it reports. */
+    internal fun toast(message: String, tone: Lx.Tone = Lx.Tone.INFO) {
+        val color =
+            when (tone) {
+                Lx.Tone.PRIMARY -> Lx.ACCENT
+                Lx.Tone.DANGER -> Lx.DANGER
+                else -> Lx.CYAN
+            }
+        snackText.text = message
+        snackEdge.setBackgroundColor(color)
+        snack.visibility = View.VISIBLE
+        snack.alpha = 0f
+        snack.translationY = dp(8f).toFloat()
+        snack.animate().alpha(1f).translationY(0f).setDuration(160).start()
+        mainHandler.removeCallbacks(hideSnack)
+        mainHandler.postDelayed(hideSnack, if (tone == Lx.Tone.DANGER) 6000L else 3800L)
+    }
+
+    /** Runs [task] off the main thread and hands its result back on it (unless the screen is gone). */
+    internal fun <T> work(task: () -> T, done: (Result<T>) -> Unit) {
+        background.execute {
+            val result = runCatching(task)
+            mainHandler.post { if (!isDestroyed) done(result) }
+        }
+    }
+
+    /** A job long enough to show in the task bar: [task] can report a line of progress as it goes. */
+    internal fun <T> task(label: String, task: ((String) -> Unit) -> T, done: (Result<T>) -> Unit) {
+        val job = LocalTask(label)
+        localTasks.add(job)
+        startTaskPolling()
+        background.execute {
+            val result = runCatching { task { job.detail = it } }
+            mainHandler.post {
+                localTasks.remove(job)
+                paintTaskBar()
+                if (!isDestroyed) done(result)
+            }
+        }
+    }
+
+    internal fun isGameLoaded(): Boolean = MainActivity.isGameLoaded
+
+    /** Runs [block], after a warning when the game is still loaded and could overwrite the change. */
+    internal fun guardGameRunning(block: () -> Unit) {
+        if (!isGameLoaded()) {
+            block()
+            return
+        }
+        DriftSheet.confirm(
+            this,
+            "The game is still open",
+            "It's running in the background and may write its own copy of this file back when it saves. To be safe, " +
+                "close DriftDroid from Recents, reopen it and make the change then.",
+            "Change it anyway",
+            cancelLabel = "Not now",
+        ) { block() }
+    }
+
+    // --- Pickers for pages ---
+
+    private var pendingOpen: ((Uri?) -> Unit)? = null
+    private var pendingCreate: ((Uri?) -> Unit)? = null
+
+    internal fun openDocument(callback: (Uri?) -> Unit) {
+        pendingOpen = callback
+        val intent = Intent(Intent.ACTION_OPEN_DOCUMENT)
+        intent.addCategory(Intent.CATEGORY_OPENABLE)
+        // Not restricted by MIME type: many file managers hand files over with a generic or
+        // missing type, so each caller checks the file itself.
+        intent.type = "*/*"
+        startActivityForResult(intent, REQUEST_CODE_OPEN_DOCUMENT)
+    }
+
+    internal fun createDocument(mime: String, name: String, callback: (Uri?) -> Unit) {
+        pendingCreate = callback
+        val intent = Intent(Intent.ACTION_CREATE_DOCUMENT)
+        intent.addCategory(Intent.CATEGORY_OPENABLE)
+        intent.type = mime
+        intent.putExtra(Intent.EXTRA_TITLE, name)
+        startActivityForResult(intent, REQUEST_CODE_CREATE_DOCUMENT)
+    }
+
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        val uri = if (resultCode == RESULT_OK) data?.data else null
+        when (requestCode) {
+            REQUEST_CODE_OPEN_DOCUMENT -> pendingOpen.also { pendingOpen = null }?.invoke(uri)
+            REQUEST_CODE_CREATE_DOCUMENT -> pendingCreate.also { pendingCreate = null }?.invoke(uri)
+            REQUEST_CODE_PICK_RETRO_REWIND_FOLDER -> handleFolderPicked(data?.data)
+            REQUEST_CODE_PICK_RETRO_REWIND_ZIP -> handleZipPicked(data?.data)
+            SaveData.REQUEST_CODE_EXPORT -> SaveData.onExportDestinationPicked(this, data?.data)
+            SaveData.REQUEST_CODE_IMPORT -> SaveData.onImportSourcePicked(this, data?.data)
+            GpuDriverSettings.REQUEST_CODE_PICK_ZIP -> GpuDriverSettings.onZipPicked(this, data?.data)
+            IconSettings.REQUEST_CODE_PICK_IMAGE -> IconSettings.onImagePicked(this, data?.data)
+        }
+    }
+
+    // --- Task bar ---
+
+    private class LocalTask(val label: String) {
+        @Volatile var detail: String = ""
+    }
+
+    private val localTasks = ArrayList<LocalTask>()
+    private var trackingRetroInstall = false
+    private var pendingRetroLabel: String? = null
+    private var watchingModInstall = false
+    private var seenModFinishes = ModInstallJob.finishedCount
+    private var taskPoller: Runnable? = null
+
+    internal fun watchModInstall() {
+        if (!watchingModInstall) seenModFinishes = ModInstallJob.finishedCount
+        watchingModInstall = true
+        startTaskPolling()
+    }
+
+    private fun startTaskPolling() {
+        if (taskPoller != null) return
+        val poller =
+            object : Runnable {
+                override fun run() {
+                    pollTasks()
+                    if (trackingRetroInstall || watchingModInstall || localTasks.isNotEmpty()) {
+                        mainHandler.postDelayed(this, 400)
+                    } else {
+                        taskPoller = null
+                    }
+                }
+            }
+        taskPoller = poller
+        mainHandler.post(poller)
+    }
+
+    private fun stopTaskPolling() {
+        taskPoller?.let { mainHandler.removeCallbacks(it) }
+        taskPoller = null
+    }
+
+    private fun pollTasks() {
+        if (trackingRetroInstall && RetroRewindInstallStatus.finished && !RetroRewindInstallStatus.running) {
+            trackingRetroInstall = false
+            pendingRetroLabel = null
+            finishRetroInstall(RetroRewindInstallStatus.error, RetroRewindInstallStatus.filesDone)
+        }
+        if (watchingModInstall && !ModInstallJob.running && ModInstallJob.finishedCount != seenModFinishes) {
+            watchingModInstall = false
+            seenModFinishes = ModInstallJob.finishedCount
+            if (ModInstallJob.stage == ModInstallJob.Stage.DONE) {
+                toast(T("Installed \"%s\". It loads the next time you start the game.").format(ModInstallJob.title), Lx.Tone.PRIMARY)
+            } else if (ModInstallJob.error != "cancelled") {
+                toast(T("Couldn't install \"%s\": %s").format(ModInstallJob.title, ModInstallJob.error ?: "unknown error"), Lx.Tone.DANGER)
+            }
+            broadcast(Page.Data.MODS)
+        }
+        paintTaskBar()
+    }
+
+    private fun paintTaskBar() {
+        val local = localTasks.lastOrNull()
+        when {
+            trackingRetroInstall -> {
+                val total = RetroRewindInstallStatus.totalBytes
+                taskTitle.text = T("Retro Rewind")
+                taskDetail.text =
+                    when {
+                        !RetroRewindInstallStatus.running -> pendingRetroLabel ?: T("Starting...")
+                        total > 0 -> T("%s... %s of %s").format(RetroRewindInstallStatus.label, Lx.fileSize(RetroRewindInstallStatus.downloadedBytes), Lx.fileSize(total))
+                        else -> T("%s... %s files done").format(RetroRewindInstallStatus.label, RetroRewindInstallStatus.filesDone)
+                    }
+                setProgress(if (total > 0) RetroRewindInstallStatus.downloadedBytes.toFloat() / total else -1f)
+                taskCancel.visibility = View.GONE
+                taskBar.visibility = View.VISIBLE
+            }
+            ModInstallJob.running -> {
+                taskTitle.text = ModInstallJob.title
+                val total = ModInstallJob.bytesTotal
+                if (ModInstallJob.stage == ModInstallJob.Stage.DOWNLOADING) {
+                    taskDetail.text =
+                        if (total > 0) T("Downloading... %s of %s").format(Lx.fileSize(ModInstallJob.bytesDone), Lx.fileSize(total))
+                        else T("Downloading... %s").format(Lx.fileSize(ModInstallJob.bytesDone))
+                    setProgress(if (total > 0) ModInstallJob.bytesDone.toFloat() / total else -1f)
+                    taskCancel.visibility = View.VISIBLE
+                } else {
+                    taskDetail.text = T("Unpacking... %s files").format(ModInstallJob.filesUnpacked)
+                    setProgress(-1f)
+                    taskCancel.visibility = View.GONE
+                }
+                taskBar.visibility = View.VISIBLE
+            }
+            local != null -> {
+                taskTitle.text = local.label
+                taskDetail.text = local.detail.ifEmpty { T("Working...") }
+                setProgress(-1f)
+                taskCancel.visibility = View.GONE
+                taskBar.visibility = View.VISIBLE
+            }
+            else -> taskBar.visibility = View.GONE
+        }
+    }
+
+    private fun setProgress(fraction: Float) {
+        if (fraction < 0f) {
+            taskProgress.isIndeterminate = true
+        } else {
+            taskProgress.isIndeterminate = false
+            taskProgress.progress = (fraction.coerceIn(0f, 1f) * 1000).toInt()
+        }
+    }
+
+    // --- The games ---
+
+    internal fun isRomImported(): Boolean =
         com.driftdroid.android.rom.RomImportOverlay.isRomAlreadyImported(File(filesDir, "WiiCompiled/DiscData"))
 
-    private fun showRetroRewindMenuDialog() {
-        val sheet = DriftSheet(this, "Retro Rewind", RetroRewindCatalog.installedVersion(retroRewindRoot())?.let { T("Installed: %s").format(it) })
+    internal fun isRetroRewindInstalled(): Boolean = File(retroRewindRoot(), "Binaries/Code.pul").isFile
+
+    internal fun retroRewindVersion(): String? = RetroRewindCatalog.installedVersion(retroRewindRoot())
+
+    /** A game pack is in and it was built without Retro Rewind. */
+    internal fun packWithoutRetroRewind(): Boolean =
+        GamePack.state(this) == GamePack.State.Ready && !GamePack.hasRetroRewind(this)
+
+    private fun retroRewindRoot(): File = File(filesDir, MainActivity.RETRO_REWIND_STAGING_SUBDIR)
+
+    /** Plays the original game. Without the disc's data yet, MainActivity asks for the image first. */
+    internal fun playBase() {
+        UiSounds.playClick(this)
+        launchProduct(MainActivity.PRODUCT_BASE)
+    }
+
+    internal fun playRetroRewind() {
+        UiSounds.playClick(this)
+        if (packWithoutRetroRewind()) {
+            DriftSheet.message(
+                this,
+                "Retro Rewind isn't in your game pack",
+                "Your game pack was made without Retro Rewind. To play it, run DriftDroid Builder again " +
+                    "with \"Retro Rewind\" ticked and import the new game pack.",
+            )
+        } else if (isRetroRewindInstalled()) {
+            launchRetroRewindOrUpdate()
+        } else {
+            showInstallRetroRewindDialog()
+        }
+    }
+
+    internal fun showRetroRewindMenu() {
+        val sheet = DriftSheet(this, "Retro Rewind", retroRewindVersion()?.let { T("Installed: %s").format(it) })
         sheet.action("Check for updates", "Downloads only what changed") {
             sheet.dismiss()
             startDeltaUpdate()
@@ -505,16 +755,10 @@ class ModePickerActivity : Activity() {
             danger = true,
         ) {
             retroRewindRoot().deleteRecursively()
-            refreshChannelButtons()
-            statusText.setTextColor(Color.rgb(0xDD, 0xDD, 0xDD))
-            statusText.text = T("Retro Rewind deleted.")
+            broadcast(Page.Data.INSTALL)
+            toast(T("Retro Rewind deleted."))
         }
     }
-
-    private fun isRetroRewindInstalled(): Boolean =
-        File(retroRewindRoot(), "Binaries/Code.pul").isFile
-
-    private fun retroRewindRoot(): File = File(filesDir, MainActivity.RETRO_REWIND_STAGING_SUBDIR)
 
     /**
      * Starts Retro Rewind - unless the installed copy holds game code this build isn't compiled
@@ -525,24 +769,18 @@ class ModePickerActivity : Activity() {
      */
     private fun launchRetroRewindOrUpdate() {
         val root = retroRewindRoot()
-        retroButton.isEnabled = false
-        Thread {
-            val supported = RetroRewindCatalog.isSupportedCodePul(RetroRewindCatalog.installedCodePulSha256(root))
-            mainHandler.post {
-                retroButton.isEnabled = true
-                if (isFinishing || isDestroyed) return@post
-                if (supported) {
-                    launchProduct(MainActivity.PRODUCT_RETRO_REWIND)
-                } else {
-                    val installed = RetroRewindCatalog.installedVersion(root)
-                    beginImportUi(
-                        T("Retro Rewind %s needs updating for this version of DriftDroid - updating it now...").format(installed ?: ""),
-                    )
-                    RetroRewindInstallService.startDeltaUpdate(this)
-                    startStatusPolling()
-                }
+        work({ RetroRewindCatalog.isSupportedCodePul(RetroRewindCatalog.installedCodePulSha256(root)) }) { result ->
+            if (isFinishing) return@work
+            if (result.getOrDefault(false)) {
+                launchProduct(MainActivity.PRODUCT_RETRO_REWIND)
+            } else {
+                val installed = RetroRewindCatalog.installedVersion(root)
+                beginRetroInstall(
+                    T("Retro Rewind %s needs updating for this version of DriftDroid - updating it now...").format(installed ?: ""),
+                )
+                RetroRewindInstallService.startDeltaUpdate(this)
             }
-        }.start()
+        }
     }
 
     private fun launchProduct(product: String) {
@@ -569,7 +807,8 @@ class ModePickerActivity : Activity() {
         )
         sheet.action("Download it", "About 1.9 GB. Wi-Fi recommended") {
             sheet.dismiss()
-            startLatestInstall()
+            beginRetroInstall(T("Checking for the newest Retro Rewind..."))
+            RetroRewindInstallService.startLatestInstall(this)
         }
         sheet.action("Pick a .zip I have", "The file exactly as downloaded") {
             sheet.dismiss()
@@ -582,26 +821,39 @@ class ModePickerActivity : Activity() {
         sheet.show()
     }
 
-    private fun startDownloadInstall() {
-        beginImportUi(T("Downloading Retro Rewind %s...").format(RetroRewindRelease.VERSION))
-        RetroRewindInstallService.startDownloadInstall(this)
-        startStatusPolling()
-    }
-
-    /** Installs whatever the live release catalog says is newest AND runnable on this build,
-     * rather than only ever the release that was current when the app was compiled. */
-    private fun startLatestInstall() {
-        beginImportUi(T("Checking for the newest Retro Rewind..."))
-        RetroRewindInstallService.startLatestInstall(this)
-        startStatusPolling()
-    }
-
     /** Applies the mod's own small per-version update archives to the existing install - a few MB
      * rather than another ~1.9GB. */
     private fun startDeltaUpdate() {
-        beginImportUi(T("Checking for Retro Rewind updates..."))
+        beginRetroInstall(T("Checking for Retro Rewind updates..."))
         RetroRewindInstallService.startDeltaUpdate(this)
-        startStatusPolling()
+    }
+
+    /** The install itself runs in [RetroRewindInstallService] (a foreground service that outlives
+     * this Activity); the task bar follows [RetroRewindInstallStatus] until it finishes. */
+    private fun beginRetroInstall(label: String) {
+        pendingRetroLabel = label
+        trackingRetroInstall = true
+        // A finished flag left over from an earlier run must not end this one before it starts.
+        RetroRewindInstallStatus.finished = false
+        broadcast(Page.Data.INSTALL)
+        startTaskPolling()
+    }
+
+    private fun finishRetroInstall(error: String?, filesCount: Int) {
+        if (error == null) {
+            toast(RetroRewindInstallStatus.successMessage ?: T("Retro Rewind installed (%s files).").format(filesCount), Lx.Tone.PRIMARY)
+        } else {
+            // Leave no half-copied install behind - isRetroRewindInstalled() only checks for
+            // Code.pul, and a partial copy that happened to include it would then look
+            // "installed" while actually missing tracks/assets. Only when the install really was
+            // being rebuilt, though: a refused version or an update check that couldn't finish
+            // has not touched the working install, and deleting it then cost the player 1.9GB.
+            if (RetroRewindInstallStatus.installIncomplete) {
+                retroRewindRoot().deleteRecursively()
+            }
+            DriftSheet.message(this, "Retro Rewind", T("Install failed: %s").format(error))
+        }
+        broadcast(Page.Data.INSTALL)
     }
 
     private fun launchRetroRewindFolderPicker() {
@@ -622,181 +874,80 @@ class ModePickerActivity : Activity() {
         intent.addCategory(Intent.CATEGORY_OPENABLE)
         // Not restricted to "application/zip": many file managers/browsers hand a downloaded zip
         // over with a generic or missing MIME type - the extension check on the picked file (see
-        // onActivityResult) is the real gate, same reasoning as RomImportOverlay's ISO/WBFS picker.
+        // handleZipPicked) is the real gate, same reasoning as RomImportOverlay's ISO/WBFS picker.
         intent.type = "*/*"
         startActivityForResult(intent, REQUEST_CODE_PICK_RETRO_REWIND_ZIP)
     }
 
-    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
-        super.onActivityResult(requestCode, resultCode, data)
-        when (requestCode) {
-            REQUEST_CODE_PICK_RETRO_REWIND_FOLDER -> handleFolderPicked(data?.data)
-            REQUEST_CODE_PICK_RETRO_REWIND_ZIP -> handleZipPicked(data?.data)
-            REQUEST_CODE_EXPORT_DIAGNOSTICS -> handleDiagnosticsDestinationPicked(data?.data)
-            REQUEST_CODE_EXPORT_MII_DATA -> handleMiiExportDestinationPicked(data?.data)
-            REQUEST_CODE_IMPORT_MII_DATA -> handleMiiImportSourcePicked(data?.data)
-            REQUEST_CODE_IMPORT_SINGLE_MII -> handleSingleMiiSourcePicked(data?.data)
-            ModManager.REQUEST_CODE_PICK_ZIP -> ModManager.onZipPicked(this, data?.data)
-            REQUEST_CODE_IMPORT_GAME_PACK -> handleGamePackPicked(data?.data)
-            SaveData.REQUEST_CODE_EXPORT -> SaveData.onExportDestinationPicked(this, data?.data)
-            SaveData.REQUEST_CODE_IMPORT -> SaveData.onImportSourcePicked(this, data?.data)
-            GpuDriverSettings.REQUEST_CODE_PICK_ZIP -> GpuDriverSettings.onZipPicked(this, data?.data)
-            IconSettings.REQUEST_CODE_PICK_IMAGE -> IconSettings.onImagePicked(this, data?.data)
-        }
-    }
-
-    /**
-     * The Mii Channel's own database (RFL_DB.dat, distinct from RFL_Res.dat - the read-only face
-     * resource seeded from the ISO by nand_fs.cpp's SeedFaceLibResource, never written by the
-     * player) - lives at NAND/shared2/menu/FaceLib/RFL_DB.dat under filesDir/WiiCompiled, since
-     * ApplicationDataDirectory() / "NAND" (nand_path.h) resolves to that same directory on
-     * Android. A fixed-size file (779968 bytes, the standard RFL database size on real Wii/Wii
-     * consoles) - checked before import so a wrong/corrupt file can't silently wedge the Mii
-     * Channel, with the previous database always backed up first regardless.
-     */
-    private fun miiDatabaseFile(): File =
-        File(filesDir, "WiiCompiled/NAND/shared2/menu/FaceLib/RFL_DB.dat")
-
-    private fun showMiiDataMenuDialog() {
-        val sheet = DriftSheet(this, "Mii data", T("The Miis in the Mii Channel"))
-        sheet.note("Start Mario Kart Wii at least once first: that makes the Mii file.")
-        sheet.action("Export all Miis", "Saves RFL_DB.dat where you choose") {
-            sheet.dismiss()
-            launchMiiExportPicker()
-        }
-        sheet.action("Replace all Miis", "From an RFL_DB.dat file. The current one is backed up") {
-            sheet.dismiss()
-            launchMiiImportPicker()
-        }
-        sheet.action("Add one Mii", "From a .rcd file, into a free slot") {
-            sheet.dismiss()
-            launchSingleMiiImportPicker()
-        }
-        sheet.show()
-    }
-
-    private fun launchSingleMiiImportPicker() {
-        val intent = Intent(Intent.ACTION_OPEN_DOCUMENT)
-        intent.addCategory(Intent.CATEGORY_OPENABLE)
-        intent.type = "*/*"
-        startActivityForResult(intent, REQUEST_CODE_IMPORT_SINGLE_MII)
-    }
-
-    private fun handleSingleMiiSourcePicked(source: Uri?) {
-        if (source == null) return
-        insertSingleMii(source)
-    }
-
-    /**
-     * Inserts one standalone Mii (.rcd, the 74-byte Wii Mii exchange format) into a free slot in
-     * the existing database - see MiiDatabaseEditor.kt for the format details and where they came
-     * from. Backs up the current database first, same as the whole-database Replace path.
-     */
-    private fun insertSingleMii(source: Uri) {
+    private fun handleFolderPicked(treeUri: Uri?) {
+        if (treeUri == null) return
+        // Best-effort: the transient grant this Activity already holds is enough to run the copy
+        // (the service is the same UID, same process), so a provider that refuses to persist is
+        // not a reason to fail the import - and must never be a reason to crash.
         try {
-            val size = queryFileSize(source)
-            if (size >= 0 && size != MiiDatabaseEditor.MII_RECORD_BYTES.toLong()) {
-                throw IllegalArgumentException(
-                    "not a single-Mii file (expected ${MiiDatabaseEditor.MII_RECORD_BYTES} bytes, got $size)",
-                )
-            }
-            val record =
-                contentResolver.openInputStream(source)?.use { it.readBytes() }
-                    ?: throw IllegalStateException("couldn't open the picked file")
-
-            val dbFile = miiDatabaseFile()
-            if (!dbFile.isFile) {
-                throw IllegalStateException("no existing Mii database - start Mario Kart Wii once first")
-            }
-            val database = dbFile.readBytes()
-
-            when (val result = MiiDatabaseEditor.insertMii(database, record)) {
-                is MiiDatabaseEditor.Result.Failure -> throw IllegalStateException(result.message)
-                is MiiDatabaseEditor.Result.Success -> {
-                    val backup = File(dbFile.parentFile, "RFL_DB.dat.bak")
-                    dbFile.copyTo(backup, overwrite = true)
-                    dbFile.writeBytes(result.database)
-                    statusText.setTextColor(Color.rgb(20, 140, 60))
-                    statusText.text = T("Mii added to slot %s of 100.").format(result.slotIndex + 1)
-                }
-            }
-        } catch (e: Exception) {
-            statusText.setTextColor(Color.rgb(190, 30, 30))
-            statusText.text = T("Mii import failed: %s").format(e.message ?: "unknown error")
+            contentResolver.takePersistableUriPermission(treeUri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        } catch (_: SecurityException) {
         }
-    }
-
-    private fun launchMiiExportPicker() {
-        if (!miiDatabaseFile().isFile) {
-            statusText.setTextColor(Color.rgb(190, 30, 30))
-            statusText.text = T("No Mii database yet - start Mario Kart Wii once first.")
+        val picked = DocumentFile.fromTreeUri(this, treeUri)
+        if (picked == null) {
+            toast(T("Couldn't open that folder - try picking it again."), Lx.Tone.DANGER)
             return
         }
-        val stamp = SimpleDateFormat("yyyy-MM-dd_HHmmss", Locale.US).format(Date())
-        val intent = Intent(Intent.ACTION_CREATE_DOCUMENT)
-        intent.addCategory(Intent.CATEGORY_OPENABLE)
-        intent.type = "application/octet-stream"
-        intent.putExtra(Intent.EXTRA_TITLE, "DriftDroid-Mii-$stamp.dat")
-        startActivityForResult(intent, REQUEST_CODE_EXPORT_MII_DATA)
-    }
-
-    private fun handleMiiExportDestinationPicked(destination: Uri?) {
-        if (destination == null) return
-        try {
-            contentResolver.openOutputStream(destination)?.use { output ->
-                miiDatabaseFile().inputStream().use { input -> input.copyTo(output) }
-            } ?: throw IllegalStateException("couldn't open the chosen destination")
-            statusText.setTextColor(Color.rgb(20, 140, 60))
-            statusText.text = T("Mii data exported.")
-        } catch (e: Exception) {
-            statusText.setTextColor(Color.rgb(190, 30, 30))
-            statusText.text = T("Mii export failed: %s").format(e.message ?: "unknown error")
+        // Walking a SAF tree means a content-provider round trip per entry, which on a big folder
+        // on slow storage is far too slow for the main thread (an ANR reads to the player exactly
+        // like a crash). Resolve off-thread, then come back to the UI.
+        task(T("Checking the selected folder..."), { resolveRetroRewind6(picked) }) { result ->
+            val resolved = result.getOrNull()
+            if (resolved == null) {
+                DriftSheet.message(
+                    this,
+                    "Retro Rewind",
+                    T("That folder doesn't contain RetroRewind6/Binaries/Code.pul - pick the folder you extracted Retro Rewind into (or the RetroRewind6 folder itself)."),
+                )
+                return@task
+            }
+            beginRetroInstall(T("Copying Retro Rewind files - this can take a while for ~2GB..."))
+            RetroRewindInstallService.startFolderInstall(this, resolved.uri)
         }
     }
 
-    private fun launchMiiImportPicker() {
-        val intent = Intent(Intent.ACTION_OPEN_DOCUMENT)
-        intent.addCategory(Intent.CATEGORY_OPENABLE)
-        intent.type = "*/*"
-        startActivityForResult(intent, REQUEST_CODE_IMPORT_MII_DATA)
-    }
-
-    private fun handleMiiImportSourcePicked(source: Uri?) {
-        if (source == null) return
-        DriftSheet.confirm(
-            this,
-            "Replace all Miis?",
-            "Every Mii in the Mii Channel is replaced with the picked file's Miis. The current ones are " +
-                "backed up first (RFL_DB.dat.bak) in case this goes wrong.",
-            "Replace",
-            danger = true,
-        ) { importMiiDatabase(source) }
-    }
-
-    private fun importMiiDatabase(source: Uri): Unit =
-        try {
-            val picked =
-                contentResolver.openInputStream(source)?.use { it.readBytes() }
-                    ?: throw IllegalStateException("couldn't open the picked file")
-            // Real CRC-16 validation (matches KartPad's own check), not just a size comparison -
-            // catches a corrupted-but-right-size file that a size-only check would wave through.
-            if (!MiiDatabaseEditor.isValidDatabase(picked)) {
-                throw IllegalArgumentException("that doesn't look like a valid Mii database file")
-            }
-            val dest = miiDatabaseFile()
-            if (!dest.isFile) {
-                throw IllegalStateException("no existing Mii database - start Mario Kart Wii once first")
-            }
-            val backup = File(dest.parentFile, "RFL_DB.dat.bak")
-            dest.copyTo(backup, overwrite = true)
-            dest.writeBytes(picked)
-            statusText.setTextColor(Color.rgb(20, 140, 60))
-            statusText.text = T("Mii data replaced (previous copy saved as RFL_DB.dat.bak).")
-            Unit
-        } catch (e: Exception) {
-            statusText.setTextColor(Color.rgb(190, 30, 30))
-            statusText.text = T("Mii import failed: %s").format(e.message ?: "unknown error")
+    private fun handleZipPicked(uri: Uri?) {
+        if (uri == null) return
+        val name = queryDisplayName(uri) ?: uri.lastPathSegment ?: "selected file"
+        if (!name.substringAfterLast('.', "").equals("zip", ignoreCase = true)) {
+            toast(T("\"%s\" isn't a .zip file - pick the Retro Rewind archive you downloaded.").format(name), Lx.Tone.DANGER)
+            return
         }
+        beginRetroInstall(T("Extracting \"%s\" - this can take a while for ~2GB...").format(name))
+        RetroRewindInstallService.startZipInstall(this, uri, name)
+    }
+
+    private fun queryDisplayName(uri: Uri): String? =
+        try {
+            contentResolver.query(uri, null, null, null, null)?.use { cursor ->
+                val index = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                if (index >= 0 && cursor.moveToFirst()) cursor.getString(index) else null
+            }
+        } catch (_: Exception) {
+            null
+        }
+
+    /** Mirrors the PC installer's RetroRewindSource.ResolveRetroRewind6: accept either the
+     * RetroRewind6 folder itself, its parent, or a one-level-deeper wrapper folder. */
+    private fun resolveRetroRewind6(picked: DocumentFile): DocumentFile? {
+        val candidates = mutableListOf(picked)
+        picked.findFile("RetroRewind6")?.let { candidates.add(it) }
+        for (child in picked.listFiles()) {
+            if (child.isDirectory) {
+                child.findFile("RetroRewind6")?.let { candidates.add(it) }
+            }
+        }
+        return candidates.firstOrNull { candidate ->
+            candidate.findFile("Binaries")?.findFile("Code.pul")?.isFile == true
+        }
+    }
+
+    // --- Game pack ---
 
     private fun showGamePackNeededDialog(wrongVersion: Boolean) {
         val message =
@@ -813,38 +964,29 @@ class ModePickerActivity : Activity() {
         }
         sheet.button("Import game pack", DriftUi.Style.PRIMARY) {
             sheet.dismiss()
-            launchGamePackPicker()
+            importGamePack()
         }
         sheet.show()
     }
 
-    private fun launchGamePackPicker() {
-        val intent = Intent(Intent.ACTION_OPEN_DOCUMENT)
-        intent.addCategory(Intent.CATEGORY_OPENABLE)
-        intent.type = "*/*"
-        startActivityForResult(intent, REQUEST_CODE_IMPORT_GAME_PACK)
-    }
-
-    private fun handleGamePackPicked(source: Uri?) {
-        if (source == null) return
-        statusText.setTextColor(Color.rgb(0xDD, 0xDD, 0xDD))
-        statusText.text = T("Importing the game pack...")
-        Thread {
-            val error =
-                GamePack.import(this, source) { bytes ->
-                    mainHandler.post { statusText.text = T("Importing the game pack... %s MB").format(bytes / (1 shl 20)) }
-                }
-            mainHandler.post {
+    internal fun importGamePack() {
+        openDocument { source ->
+            if (source == null) return@openDocument
+            task(T("Importing the game pack..."), { progress ->
+                GamePack.import(this, source) { bytes -> progress(T("%s MB").format(bytes / (1 shl 20))) }
+            }) { result ->
+                val error = result.getOrElse { it.message ?: "unknown error" }
                 if (error == null) {
-                    statusText.setTextColor(Color.rgb(20, 140, 60))
-                    statusText.text = T("Game pack imported. You can play now.")
+                    toast(T("Game pack imported. You can play now."), Lx.Tone.PRIMARY)
+                    broadcast(Page.Data.INSTALL)
                 } else {
-                    statusText.setTextColor(Color.rgb(190, 30, 30))
-                    statusText.text = T("Game pack import failed: %s").format(error)
+                    DriftSheet.message(this, "Game pack", T("Game pack import failed: %s").format(error))
                 }
             }
-        }.start()
+        }
     }
+
+    // --- Diagnostics ---
 
     /**
      * Bundles the runtime's own log files (see android_jni_bridge.cpp's freopen() of
@@ -854,33 +996,16 @@ class ModePickerActivity : Activity() {
      * so troubleshooting doesn't require a USB cable and `adb shell run-as ... cat` - the only way
      * this app's logs have been readable until now.
      */
-    private fun launchDiagnosticsExportPicker() {
+    internal fun exportDiagnostics() {
         val stamp = SimpleDateFormat("yyyy-MM-dd_HHmmss", Locale.US).format(Date())
-        val intent = Intent(Intent.ACTION_CREATE_DOCUMENT)
-        intent.addCategory(Intent.CATEGORY_OPENABLE)
-        intent.type = "application/zip"
-        intent.putExtra(Intent.EXTRA_TITLE, "DriftDroid-diagnostics-$stamp.zip")
-        startActivityForResult(intent, REQUEST_CODE_EXPORT_DIAGNOSTICS)
-    }
-
-    private fun handleDiagnosticsDestinationPicked(destination: Uri?) {
-        if (destination == null) return
-        statusText.setTextColor(Color.rgb(0xDD, 0xDD, 0xDD))
-        statusText.text = T("Exporting diagnostics...")
-        val thread =
-            Thread {
-                val error = writeDiagnosticsZip(destination)
-                mainHandler.post {
-                    if (error == null) {
-                        statusText.setTextColor(Color.rgb(20, 140, 60))
-                        statusText.text = T("Diagnostics exported.")
-                    } else {
-                        statusText.setTextColor(Color.rgb(190, 30, 30))
-                        statusText.text = T("Diagnostics export failed: %s").format(error)
-                    }
-                }
+        createDocument("application/zip", "DriftDroid-diagnostics-$stamp.zip") { destination ->
+            if (destination == null) return@createDocument
+            task(T("Exporting diagnostics..."), { writeDiagnosticsZip(destination) }) { result ->
+                val error = result.getOrElse { it.message ?: "unknown error" }
+                if (error == null) toast(T("Diagnostics exported."), Lx.Tone.PRIMARY)
+                else toast(T("Diagnostics export failed: %s").format(error), Lx.Tone.DANGER)
             }
-        thread.start()
+        }
     }
 
     private fun writeDiagnosticsZip(destination: Uri): String? {
@@ -904,9 +1029,9 @@ class ModePickerActivity : Activity() {
                     zip.putNextEntry(ZipEntry("README.txt"))
                     zip.write(
                         buildString {
-                            appendLine("DriftDroid runtime diagnostics - review before sharing.")
-                            appendLine("Device: ${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL}")
-                            appendLine("API level: ${android.os.Build.VERSION.SDK_INT}")
+                            appendLine("${getString(R.string.app_name)} runtime diagnostics - review before sharing.")
+                            appendLine("Device: ${Build.MANUFACTURER} ${Build.MODEL}")
+                            appendLine("API level: ${Build.VERSION.SDK_INT}")
                             appendLine("App version: ${appVersionName()}")
                             appendLine("Memory: ${totalMemoryMiB()} MiB")
                             appendLine("Each log is truncated to its last $MAX_LOG_FILE_BYTES bytes.")
@@ -955,7 +1080,7 @@ class ModePickerActivity : Activity() {
         }
     }
 
-    private fun appVersionName(): String =
+    internal fun appVersionName(): String =
         try {
             packageManager.getPackageInfo(packageName, 0).versionName ?: "unknown"
         } catch (_: Exception) {
@@ -1037,273 +1162,16 @@ class ModePickerActivity : Activity() {
             }
         }
 
-    private fun handleFolderPicked(treeUri: Uri?) {
-        if (treeUri == null) return
-        // Best-effort: the transient grant this Activity already holds is enough to run the copy
-        // (the service is the same UID, same process), so a provider that refuses to persist is
-        // not a reason to fail the import - and must never be a reason to crash.
-        try {
-            contentResolver.takePersistableUriPermission(treeUri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
-        } catch (_: SecurityException) {
-        }
-        val picked = DocumentFile.fromTreeUri(this, treeUri)
-        if (picked == null) {
-            showImportError(T("Couldn't open that folder - try picking it again."))
-            return
-        }
-        // Walking a SAF tree means a content-provider round trip per entry, which on a big folder
-        // on slow storage is far too slow for the main thread (an ANR reads to the player exactly
-        // like the crash above). Resolve off-thread, then come back to the UI.
-        beginImportUi(T("Checking the selected folder..."))
-        Thread {
-            val resolved =
-                try {
-                    resolveRetroRewind6(picked)
-                } catch (_: Exception) {
-                    null
-                }
-            mainHandler.post {
-                if (isFinishing || isDestroyed) return@post
-                if (resolved == null) {
-                    endImportUi()
-                    showImportError(
-                        T("That folder doesn't contain RetroRewind6/Binaries/Code.pul - pick the folder you extracted Retro Rewind into (or the RetroRewind6 folder itself)."),
-                    )
-                    return@post
-                }
-                statusText.text = T("Copying Retro Rewind files - this can take a while for ~2GB...")
-                RetroRewindInstallService.startFolderInstall(this, resolved.uri)
-                startStatusPolling()
-            }
-        }.start()
-    }
-
-    private fun showImportError(message: String) {
-        statusText.setTextColor(Color.rgb(190, 30, 30))
-        statusText.text = message
-    }
-
-    private fun handleZipPicked(uri: Uri?) {
-        if (uri == null) return
-        val name = queryDisplayName(uri) ?: uri.lastPathSegment ?: "selected file"
-        if (!name.substringAfterLast('.', "").equals("zip", ignoreCase = true)) {
-            statusText.setTextColor(Color.rgb(190, 30, 30))
-            statusText.text = "\"$name\" isn't a .zip file - pick the Retro Rewind archive you downloaded."
-            return
-        }
-        beginImportUi(T("Extracting \"%s\" - this can take a while for ~2GB...").format(name))
-        RetroRewindInstallService.startZipInstall(this, uri, name)
-        startStatusPolling()
-    }
-
-    private fun queryDisplayName(uri: Uri): String? =
-        try {
-            contentResolver.query(uri, null, null, null, null)?.use { cursor ->
-                val index = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
-                if (index >= 0 && cursor.moveToFirst()) cursor.getString(index) else null
-            }
-        } catch (_: Exception) {
-            null
-        }
-
-    /** Mirrors the PC installer's RetroRewindSource.ResolveRetroRewind6: accept either the
-     * RetroRewind6 folder itself, its parent, or a one-level-deeper wrapper folder. */
-    private fun resolveRetroRewind6(picked: DocumentFile): DocumentFile? {
-        val candidates = mutableListOf(picked)
-        picked.findFile("RetroRewind6")?.let { candidates.add(it) }
-        for (child in picked.listFiles()) {
-            if (child.isDirectory) {
-                child.findFile("RetroRewind6")?.let { candidates.add(it) }
-            }
-        }
-        return candidates.firstOrNull { candidate ->
-            candidate.findFile("Binaries")?.findFile("Code.pul")?.isFile == true
-        }
-    }
-
-    private fun beginImportUi(statusMessage: String) {
-        baseButton.isEnabled = false
-        retroButton.isEnabled = false
-        progressBar.visibility = View.VISIBLE
-        // Indeterminate (spinning), not a 0-100% fill: neither the folder-copy nor the zip-extract
-        // path knows the total file/byte count up front without a slow pre-scan, so a fixed
-        // progress value just sat frozen at 0% the whole time - confirmed directly as "no progress
-        // bar... which is weird" (it was there, just never moving, so it looked broken/absent).
-        // The file-count text next to it already gives a live sense of movement.
-        progressBar.isIndeterminate = true
-        statusText.setTextColor(Color.rgb(0xDD, 0xDD, 0xDD))
-        statusText.text = statusMessage
-    }
-
-    /** Puts the buttons/progress bar back without writing any status text - for bailing out of an
-     * import before the service was ever started (the caller sets its own message). */
-    private fun endImportUi() {
-        progressBar.isIndeterminate = false
-        progressBar.visibility = View.GONE
-        baseButton.isEnabled = true
-        retroButton.isEnabled = true
-    }
-
-    private fun finishImportUi(error: String?, filesCount: Int) {
-        endImportUi()
-        if (error == null) {
-            statusText.setTextColor(Color.rgb(20, 140, 60))
-            statusText.text =
-                RetroRewindInstallStatus.successMessage ?: T("Retro Rewind installed (%s files).").format(filesCount)
-            refreshChannelButtons()
-        } else {
-            // Leave no half-copied install behind - isRetroRewindInstalled() only checks for
-            // Code.pul, and a partial copy that happened to include it would then look
-            // "installed" while actually missing tracks/assets. Only when the install really was
-            // being rebuilt, though: a refused version or an update check that couldn't finish
-            // has not touched the working install, and deleting it then cost the player 1.9GB.
-            if (RetroRewindInstallStatus.installIncomplete) {
-                retroRewindRoot().deleteRecursively()
-            }
-            refreshChannelButtons()
-            statusText.setTextColor(Color.rgb(190, 30, 30))
-            statusText.text = T("Install failed: %s").format(error)
-        }
-    }
-
-    /**
-     * The actual copy/extract now runs in [RetroRewindInstallService], a foreground service that
-     * outlives this Activity's lifecycle (see the service's own doc comment for why - short
-     * version: a plain background Thread here died whenever Android reclaimed this Activity's
-     * process while backgrounded, losing the whole ~2GB copy). This just reflects
-     * [RetroRewindInstallStatus] into the UI, polling rather than needing a callback since a
-     * brand new Activity instance (post-recreation) can start polling and pick up exactly where
-     * an old, now-gone instance left off.
-     */
-    private var statusPoller: Runnable? = null
-
-    private fun startStatusPolling() {
-        if (statusPoller != null) return
-        val poller =
-            object : Runnable {
-                override fun run() {
-                    if (RetroRewindInstallStatus.finished) {
-                        statusPoller = null
-                        finishImportUi(RetroRewindInstallStatus.error, RetroRewindInstallStatus.filesDone)
-                        return
-                    }
-                    val totalBytes = RetroRewindInstallStatus.totalBytes
-                    statusText.text =
-                        if (totalBytes > 0) {
-                            val doneMb = RetroRewindInstallStatus.downloadedBytes / (1024 * 1024)
-                            val totalMb = totalBytes / (1024 * 1024)
-                            "${RetroRewindInstallStatus.label}... ${doneMb}MB / ${totalMb}MB"
-                        } else {
-                            "${RetroRewindInstallStatus.label}... ${RetroRewindInstallStatus.filesDone} files done"
-                        }
-                    mainHandler.postDelayed(this, 500)
-                }
-            }
-        statusPoller = poller
-        mainHandler.post(poller)
-    }
-
-    private fun stopStatusPolling() {
-        statusPoller?.let { mainHandler.removeCallbacks(it) }
-        statusPoller = null
-    }
-
-    private fun queryFileSize(uri: Uri): Long =
-        try {
-            contentResolver.query(uri, null, null, null, null)?.use { cursor ->
-                val index = cursor.getColumnIndex(OpenableColumns.SIZE)
-                if (index >= 0 && cursor.moveToFirst() && !cursor.isNull(index)) cursor.getLong(index) else -1L
-            } ?: -1L
-        } catch (_: Exception) {
-            -1L
-        }
-
     companion object {
+        private const val STATE_TAB = "tab"
+        private const val BOTTOM_BAR_DP = 66f
+        private const val RAIL_DP = 88f
         private const val REQUEST_CODE_PICK_RETRO_REWIND_FOLDER = 0x52520000 // "RR"
         private const val REQUEST_CODE_PICK_RETRO_REWIND_ZIP = 0x52520001
-        private const val REQUEST_CODE_EXPORT_DIAGNOSTICS = 0x52520002
+        private const val REQUEST_CODE_OPEN_DOCUMENT = 0x4C4E0001 // "LN"
+        private const val REQUEST_CODE_CREATE_DOCUMENT = 0x4C4E0002
         private const val MAX_LOG_FILES = 12
         private const val MAX_LOG_FILE_BYTES = 4L * 1024 * 1024
         private const val MAX_EXIT_REASONS = 10
-        private const val REQUEST_CODE_IMPORT_GAME_PACK = 0x47500000 // "GP"
-        private const val REQUEST_CODE_EXPORT_MII_DATA = 0x52520003
-        private const val REQUEST_CODE_IMPORT_MII_DATA = 0x52520004
-        private const val REQUEST_CODE_IMPORT_SINGLE_MII = 0x52520005
-    }
-}
-
-/**
- * A gray checkerboard wallpaper, tiled and drifting diagonally forever - replaces the earlier sky
- * gradient background. A Drawable (not a View) so it can just be dropped in as `view.background`;
- * animates itself via Drawable.scheduleSelf, which only works because setting a Drawable as a
- * View's background makes that View its Drawable.Callback automatically (no manual wiring needed,
- * and it stops scheduling redraws on its own once the View is gone/detached).
- */
-private class ScrollingCheckerboardDrawable(context: android.content.Context) : Drawable() {
-    private val tilePx = (28 * context.resources.displayMetrics.density).toInt().coerceAtLeast(8)
-    private val paint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG)
-    private val shader: android.graphics.BitmapShader
-    private val localMatrix = android.graphics.Matrix()
-    private var offsetPx = 0f
-    private var lastFrameUptimeMs = android.os.SystemClock.uptimeMillis()
-    private var started = false
-
-    init {
-        val size = tilePx * 2
-        val bitmap = android.graphics.Bitmap.createBitmap(size, size, android.graphics.Bitmap.Config.ARGB_8888)
-        val canvas = android.graphics.Canvas(bitmap)
-        val light = android.graphics.Paint().apply { color = Color.rgb(0x3A, 0x3A, 0x3A) }
-        val dark = android.graphics.Paint().apply { color = Color.rgb(0x22, 0x22, 0x22) }
-        val t = tilePx.toFloat()
-        val s = size.toFloat()
-        canvas.drawRect(0f, 0f, t, t, light)
-        canvas.drawRect(t, 0f, s, t, dark)
-        canvas.drawRect(0f, t, t, s, dark)
-        canvas.drawRect(t, t, s, s, light)
-        shader = android.graphics.BitmapShader(
-            bitmap, android.graphics.Shader.TileMode.REPEAT, android.graphics.Shader.TileMode.REPEAT,
-        )
-        paint.shader = shader
-    }
-
-    private val tick =
-        object : Runnable {
-            override fun run() {
-                val now = android.os.SystemClock.uptimeMillis()
-                val deltaMs = (now - lastFrameUptimeMs).coerceIn(0, 100)
-                lastFrameUptimeMs = now
-                offsetPx += deltaMs * SPEED_PX_PER_MS
-                invalidateSelf()
-                scheduleSelf(this, now + FRAME_INTERVAL_MS)
-            }
-        }
-
-    override fun draw(canvas: android.graphics.Canvas) {
-        localMatrix.setTranslate(offsetPx, offsetPx * 0.6f)
-        shader.setLocalMatrix(localMatrix)
-        canvas.drawRect(bounds, paint)
-        // First draw() (right after the background is actually attached/visible) is what starts
-        // the animation loop, once - scheduling from init{} instead would need scheduleSelf's
-        // Callback (set by View.setBackground) that doesn't exist yet at construction time; after
-        // this, `tick` reschedules itself, so draw() must NOT also reschedule on every frame (that
-        // would stack a second, independent chain of ticks on top of tick's own, each triggering
-        // more invalidateSelf() calls than the last - confirmed this exact mistake in an earlier
-        // draft, caught before it shipped).
-        if (!started) {
-            started = true
-            lastFrameUptimeMs = android.os.SystemClock.uptimeMillis()
-            scheduleSelf(tick, lastFrameUptimeMs + FRAME_INTERVAL_MS)
-        }
-    }
-
-    override fun setAlpha(alpha: Int) {}
-
-    override fun setColorFilter(colorFilter: android.graphics.ColorFilter?) {}
-
-    override fun getOpacity(): Int = android.graphics.PixelFormat.OPAQUE
-
-    companion object {
-        private const val FRAME_INTERVAL_MS = 32L // ~30fps - plenty smooth for a slow drift
-        private const val SPEED_PX_PER_MS = 0.006f // slow: one tile crossed roughly every 9s
     }
 }

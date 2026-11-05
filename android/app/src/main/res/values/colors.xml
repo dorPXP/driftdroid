@@ -4,4 +4,6 @@
     <color name="wii_orange">#F07C1E</color>
     <color name="wii_sky_top">#35C3F0</color>
     <color name="driftdroid_gray_dark">#2A2A2A</color>
+    <!-- The launcher's navy backdrop (ui/Lx.kt BG), also the window colour before it draws. -->
+    <color name="launcher_bg">#0C0E11</color>
 </resources>

@@ -35,10 +35,11 @@
         <!-- The Original/Retro Rewind choice must happen before any product .so loads (Android
              cannot swap which native library is loaded within a process), so it's now the actual
              launcher - MainActivity is started explicitly from here with the resolved choice. -->
+        <!-- No fixed orientation: LauncherOrientation stands it upright on phones and sideways
+             on tablets and handhelds (or as the player picks in Settings). -->
         <activity
             android:name=".ModePickerActivity"
-            android:exported="true"
-            android:screenOrientation="sensorLandscape">
+            android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />

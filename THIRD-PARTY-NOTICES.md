@@ -143,6 +143,16 @@ load time, at `android/app/src/main/java/org/libsdl/app/`. Taken unmodified from
 source tree pinned below (`android-project/app/src/main/java/org/libsdl/app/`).
 Source: <https://github.com/libsdl-org/SDL>.
 
+### libarchive-android 1.1.4 - Apache-2.0, with libarchive - BSD
+
+The Android app's mod installer unpacks `.7z` and `.rar` archives with libarchive, through the
+`me.zhanghai.android.libarchive:library:1.1.4` JNI wrapper (fetched from Maven Central by Gradle and
+packaged into the APK as `libarchive-jni.so`). The wrapper is Copyright 2023 Google LLC, licensed
+under the Apache License 2.0. libarchive is Copyright Tim Kientzle and the libarchive contributors,
+licensed under the 2-clause BSD license; the native library also contains the compression libraries
+it is built with, each under its own license as listed by the wrapper project.
+Sources: <https://github.com/zhanghai/libarchive-android>, <https://github.com/libarchive/libarchive>.
+
 ---
 
 ## Fetched at build time and redistributed in release builds

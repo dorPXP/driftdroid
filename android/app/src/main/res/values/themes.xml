@@ -8,10 +8,11 @@
         <item name="colorOnPrimary">@android:color/white</item>
         <item name="colorSecondary">@color/wii_orange</item>
         <item name="colorOnSecondary">@android:color/white</item>
-        <!-- Was wii_sky_top (bright blue) to match the launcher's old sky-gradient background -
-             now that the launcher is a gray checkerboard, a bright blue bar clashed badly with it. -->
-        <item name="android:statusBarColor">@color/driftdroid_gray_dark</item>
-        <item name="android:navigationBarColor">@color/driftdroid_gray_dark</item>
+        <!-- The launcher's navy, for the bars when a swipe brings them back and for the window
+             itself, so nothing flashes white before the launcher draws. -->
+        <item name="android:windowBackground">@color/launcher_bg</item>
+        <item name="android:statusBarColor">@color/launcher_bg</item>
+        <item name="android:navigationBarColor">@color/launcher_bg</item>
         <item name="android:windowLightStatusBar">false</item>
     </style>
 </resources>

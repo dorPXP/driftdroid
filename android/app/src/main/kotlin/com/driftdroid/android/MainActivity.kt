@@ -663,6 +663,10 @@ class MainActivity : SDLActivity() {
         // instances within the same still-alive process.
         private var sLoadedProduct: String? = null
 
+        /** True once a game has started in this process; the launcher warns before editing saves
+         * or Miis then, since the still-loaded game may write its own copy back over them. */
+        val isGameLoaded: Boolean get() = sLoadedProduct != null
+
         // Staging path for the Retro Rewind asset pack (tracks/textures - distinct from Code.pul,
         // which only carries the mod's patched game LOGIC and is already compiled into
         // libGameCombined.so). Populated by ModePickerActivity's folder-import flow, mirroring how
