@@ -17,7 +17,10 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <iterator>
+
+extern "C" void AuroraSwitchRestoreControllers();  // end of file
 
 namespace aurora::input::switch_pad {
 namespace {
@@ -645,11 +648,24 @@ void attach() noexcept {
     return;
   }
   g_attached = true;
+  std::atexit(AuroraSwitchRestoreControllers);
   // Accept every player slot: supporting only No1+Handheld makes HID disconnect any other
   // controller at launch. Slots 5-8 have no port in the game, so they steer player 1 as before.
   padConfigureInput(8, HidNpadStyleSet_NpadStandard);
   // Single Joy-Cons are held sideways; the controller screen then offers "press SL and SR".
-  hidSetNpadJoyHoldType(HidNpadJoyHoldType_Horizontal);
+  // Sideways mode splits a Joy-Con pair, so it is not forced on a console whose first controller is
+  // a pair, a Pro Controller or the handheld Joy-Cons: the controller screen sets it when the
+  // player asks to hand out single Joy-Cons. Already-single Joy-Cons need it to work at all.
+  {
+    constexpr u32 kWholeController = HidNpadStyleTag_NpadJoyDual | HidNpadStyleTag_NpadFullKey |
+                                     HidNpadStyleTag_NpadHandheld;
+    const u32 first = hidGetNpadStyleSet(HidNpadIdType_No1) | hidGetNpadStyleSet(HidNpadIdType_Handheld);
+    if ((first & kWholeController) == 0) {
+      hidSetNpadJoyHoldType(HidNpadJoyHoldType_Horizontal);
+    } else {
+      std::fprintf(stderr, "[switch-pad] launch: first controller is a pair/Pro/handheld, hold type left alone\n");
+    }
+  }
   padInitialize(&g_players[0].pad, HidNpadIdType_No1, HidNpadIdType_Handheld, HidNpadIdType_No5, HidNpadIdType_No6,
                 HidNpadIdType_No7, HidNpadIdType_No8);
   padInitialize(&g_players[1].pad, HidNpadIdType_No2);
@@ -686,6 +702,22 @@ void detach() noexcept {
 }
 
 } // namespace aurora::input::switch_pad
+
+// Puts the console's hold type back to the default, for the end of the process.
+//
+// This only resets the hold type. It used to also join two single Joy-Cons back into a pair
+// (hidMergeSingleJoyAsDualJoy, as libnx suggests); on third-party Joy-Cons that made the console
+// drop BOTH of them (2026-11-04 test), so it is not done. A split pair is joined again from the
+// console's Controllers > Change Grip/Order screen, or by clipping the Joy-Cons onto the rails.
+// Safe to call twice.
+extern "C" void AuroraSwitchRestoreControllers() {
+  static std::atomic<bool> done{false};
+  if (done.exchange(true)) {
+    return;
+  }
+  hidSetNpadJoyHoldType(HidNpadJoyHoldType_Vertical);
+  std::fprintf(stderr, "[switch-pad] exit: hold type restored\n");
+}
 
 // Called from the settings menu (runtime/src/settings_overlay.cpp).
 extern "C" void AuroraSwitchSetMotionSteering(int enabled, float sensitivity, int inverted) {
