@@ -102,7 +102,8 @@ internal object Appearance {
         if (mine.isNotEmpty()) {
             val cards =
                 mine.map { saved ->
-                    val card = ThemePreview(host, saved.look, saved.top, saved.bottom, saved.accent, saved.texture)
+                    val thumb = if (saved.media != null) com.driftdroid.android.ui.BackgroundMedia.thumbnail(ThemeStore.mediaFile(host, saved), saved.mediaKind) else null
+                    val card = ThemePreview(host, saved.look, saved.top, saved.bottom, saved.accent, saved.texture, backdrop = thumb)
                     card.setOnClickListener {
                         sheet.dismiss()
                         ThemeStore.apply(host, saved)
@@ -116,13 +117,13 @@ internal object Appearance {
                     card to saved.name
                 }
             sheet.custom(strip(host, cards))
-            sheet.note(T("Touch and hold a theme to export or delete it."))
+            sheet.note(T("Your themes keep their own background. Touch and hold one to export or delete it. The ready-made themes only change colours and look."))
         }
         sheet.action(T("Save this look as a theme"), T("Name it and keep it with your themes")) {
             sheet.dismiss()
             askName(host) { name ->
                 host.work({ ThemeStore.save(host, name, look, texture, top, bottom, accent, angle, panelAlpha, corner) }) { result ->
-                    if (result.isSuccess) host.toast(T("Saved \"%s\".").format(result.getOrNull()?.name), Lx.Tone.PRIMARY) else host.toast(T("Couldn't save: %s").format(result.exceptionOrNull()?.message), Lx.Tone.DANGER)
+                    if (result.isSuccess) host.toast((if (result.getOrNull()?.media != null) T("Saved \"%s\" with its background.") else T("Saved \"%s\".")).format(result.getOrNull()?.name), Lx.Tone.PRIMARY) else host.toast(T("Couldn't save: %s").format(result.exceptionOrNull()?.message), Lx.Tone.DANGER)
                     show(host)
                 }
             }
@@ -260,7 +261,7 @@ internal object Appearance {
 
     private fun themeMenu(host: ModePickerActivity, saved: ThemeStore.Saved) {
         val menu = DriftSheet(host, saved.name)
-        menu.action(T("Export to a file"), if (ThemeStore.exportIncludesPicture(host)) T("Includes your background picture") else null) {
+        menu.action(T("Export to a file"), if (ThemeStore.exportIncludesPicture(host, saved)) T("Includes the background picture") else if (saved.media == "anim" || saved.media == "video") T("GIFs and videos stay on this phone") else null) {
             menu.dismiss()
             val safe = saved.name.map { if (it.isLetterOrDigit() || it == ' ' || it == '-') it else '_' }.joinToString("").trim().ifEmpty { "theme" }
             host.createDocument("application/json", "$safe.driftdroid-theme.json") { uri ->

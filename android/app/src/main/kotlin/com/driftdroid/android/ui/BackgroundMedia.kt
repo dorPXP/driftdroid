@@ -155,6 +155,87 @@ internal object BackgroundMedia {
         return Kind.IMAGE
     }
 
+    /** The file holding the current background, or null with none. */
+    fun currentFile(context: Context): File? =
+        when (kind(context)) {
+            Kind.VIDEO -> videoFile(context)
+            Kind.ANIM -> animFile(context)
+            Kind.IMAGE -> Theme.imageFile(context)
+            Kind.NONE -> null
+        }
+
+    fun extensionOf(kind: Kind): String =
+        when (kind) {
+            Kind.VIDEO -> "mp4"
+            Kind.ANIM -> "anim"
+            else -> "jpg"
+        }
+
+    /** Makes [source] (a background kept with a saved theme) the current background. [luma] is its stored brightness. */
+    @Synchronized
+    fun restoreFrom(context: Context, source: File, kind: Kind, luma: Float?) {
+        val target =
+            when (kind) {
+                Kind.VIDEO -> videoFile(context)
+                Kind.ANIM -> animFile(context)
+                Kind.IMAGE -> Theme.imageFile(context)
+                Kind.NONE -> return
+            }
+        val temporary = File(target.path + ".saving")
+        source.copyTo(temporary, overwrite = true)
+        if (!temporary.renameTo(target)) {
+            temporary.delete()
+            throw IOException("couldn't restore the background")
+        }
+        removeOthers(context, kind)
+        animation = null
+        animationLoaded = false
+        preview = null
+        previewLoaded = false
+        Theme.forgetImage()
+        if (luma != null) {
+            context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putFloat("bg_luma", luma).apply()
+            Theme.setMediaLuma(luma)
+        } else {
+            updateBrightness(context)
+        }
+    }
+
+    /** The brightness stored for the current background, or null. */
+    fun storedBrightness(context: Context): Float? {
+        val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        return if (prefs.contains("bg_luma")) prefs.getFloat("bg_luma", 0.3f) else null
+    }
+
+    /** A small still of a background file, for a theme's preview card. Null when it cannot be read. */
+    fun thumbnail(file: File, kind: Kind, longSide: Int = 220): Bitmap? =
+        runCatching {
+            when (kind) {
+                Kind.IMAGE, Kind.ANIM ->
+                    ImageDecoder.decodeBitmap(ImageDecoder.createSource(file)) { decoder, info, _ ->
+                        decoder.allocator = ImageDecoder.ALLOCATOR_SOFTWARE
+                        val long = max(info.size.width, info.size.height)
+                        if (long > longSide) {
+                            val f = longSide.toFloat() / long
+                            decoder.setTargetSize((info.size.width * f).toInt().coerceAtLeast(1), (info.size.height * f).toInt().coerceAtLeast(1))
+                        }
+                    }
+                Kind.VIDEO -> {
+                    val retriever = MediaMetadataRetriever()
+                    try {
+                        retriever.setDataSource(file.path)
+                        retriever.getFrameAtTime(500_000, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)?.let { f ->
+                            val s = longSide.toFloat() / max(f.width, f.height)
+                            if (s < 1f) Bitmap.createScaledBitmap(f, (f.width * s).toInt().coerceAtLeast(1), (f.height * s).toInt().coerceAtLeast(1), true) else f
+                        }
+                    } finally {
+                        runCatching { retriever.release() }
+                    }
+                }
+                Kind.NONE -> null
+            }
+        }.getOrNull()
+
     /** Installs picture bytes (from an imported theme) as the background picture, after checking they decode. */
     @Synchronized
     fun installImage(context: Context, bytes: ByteArray) {

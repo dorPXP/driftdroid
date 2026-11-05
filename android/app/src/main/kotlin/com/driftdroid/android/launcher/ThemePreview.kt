@@ -29,6 +29,7 @@ internal class ThemePreview(
     private val accent: Int,
     private val texture: Texture = Texture.NONE,
     private val backdropOnly: Boolean = false,
+    private val backdrop: android.graphics.Bitmap? = null,
 ) : View(context) {
     var picked = false
         set(value) {
@@ -56,6 +57,13 @@ internal class ThemePreview(
     }
 
     private fun drawBackdrop(canvas: Canvas, w: Float, h: Float) {
+        if (backdrop != null) {
+            val cover = max(w / backdrop.width, h / backdrop.height)
+            val dw = backdrop.width * cover
+            val dh = backdrop.height * cover
+            canvas.drawBitmap(backdrop, null, RectF((w - dw) / 2, (h - dh) / 2, (w + dw) / 2, (h + dh) / 2), paint)
+            return
+        }
         paint.shader = LinearGradient(0f, 0f, 0f, h, top, bottom, Shader.TileMode.CLAMP)
         canvas.drawRect(0f, 0f, w, h, paint)
         paint.shader = null

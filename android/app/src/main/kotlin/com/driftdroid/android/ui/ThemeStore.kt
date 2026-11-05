@@ -28,15 +28,34 @@ internal object ThemeStore {
         val dim: Float,
         val portrait: Theme.Framing,
         val landscape: Theme.Framing,
-    )
+        /** The background kept with this theme: "image", "anim", "video" or null for none. */
+        val media: String? = null,
+        /** Brightness of that background (for the text colour), when known. */
+        val luma: Float? = null,
+    ) {
+        val mediaKind: BackgroundMedia.Kind
+            get() =
+                when (media) {
+                    "image" -> BackgroundMedia.Kind.IMAGE
+                    "anim" -> BackgroundMedia.Kind.ANIM
+                    "video" -> BackgroundMedia.Kind.VIDEO
+                    else -> BackgroundMedia.Kind.NONE
+                }
+    }
 
     private const val FORMAT = "driftdroid-theme"
     private const val MAX_NAME = 40
     private const val MAX_EMBEDDED_IMAGE = 2_500_000
     private const val MAX_IMPORT_BYTES = 6_000_000
+    private const val MAX_KEPT_MEDIA = 64L shl 20
     const val MAX_THEMES = 40
 
     private fun file(context: Context) = File(context.filesDir, "themes.json")
+
+    private fun mediaDir(context: Context) = File(context.filesDir, "themes").also { it.mkdirs() }
+
+    /** Where [saved]'s own background is kept. */
+    fun mediaFile(context: Context, saved: Saved): File = File(mediaDir(context), "${saved.id}.${BackgroundMedia.extensionOf(saved.mediaKind)}")
 
     fun list(context: Context): List<Saved> {
         val f = file(context)
@@ -62,20 +81,45 @@ internal object ThemeStore {
     fun save(context: Context, name: String, look: Look, texture: Texture, top: Int, bottom: Int, accent: Int, angle: Float, panelAlpha: Float, cornerScale: Float): Saved {
         val all = list(context)
         if (all.size >= MAX_THEMES) throw IOException("that is the most themes you can keep ($MAX_THEMES) - delete one first")
+        val id = UUID.randomUUID().toString()
+        // Keep the current background (picture, GIF or video) with the theme, unless it is very large.
+        val kind = BackgroundMedia.kind(context)
+        val current = BackgroundMedia.currentFile(context)
+        val keep = kind != BackgroundMedia.Kind.NONE && current != null && current.length() <= MAX_KEPT_MEDIA
+        val media =
+            if (keep) {
+                when (kind) {
+                    BackgroundMedia.Kind.IMAGE -> "image"
+                    BackgroundMedia.Kind.ANIM -> "anim"
+                    else -> "video"
+                }
+            } else {
+                null
+            }
         val saved =
             Saved(
-                UUID.randomUUID().toString(), cleanName(name), look, texture, top, bottom, accent, angle, panelAlpha, cornerScale, Theme.dim,
-                Theme.portrait.copy(), Theme.landscape.copy(),
+                id, cleanName(name), look, texture, top, bottom, accent, angle, panelAlpha, cornerScale, Theme.dim,
+                Theme.portrait.copy(), Theme.landscape.copy(), media, if (keep) BackgroundMedia.storedBrightness(context) else null,
             )
+        if (keep && current != null) current.copyTo(mediaFile(context, saved), overwrite = true)
         write(context, all + saved)
         return saved
     }
 
     fun delete(context: Context, id: String) {
-        write(context, list(context).filter { it.id != id })
+        val all = list(context)
+        all.firstOrNull { it.id == id }?.let { runCatching { mediaFile(context, it).delete() } }
+        write(context, all.filter { it.id != id })
     }
 
     fun apply(context: Context, saved: Saved) {
+        // A saved theme is the whole look: its own background comes back with it (or none, if it had none).
+        val file = mediaFile(context, saved)
+        if (saved.media != null && file.isFile) {
+            BackgroundMedia.restoreFrom(context, file, saved.mediaKind, saved.luma)
+        } else {
+            BackgroundMedia.remove(context)
+        }
         Theme.applyValues(context, saved.look, saved.texture, saved.top, saved.bottom, saved.accent, saved.angle, saved.panelAlpha, saved.cornerScale, saved.dim, saved.portrait, saved.landscape)
     }
 
@@ -83,16 +127,16 @@ internal object ThemeStore {
 
     fun export(context: Context, saved: Saved): String {
         val json = JSONObject(exportText(saved))
-        val image = Theme.imageFile(context)
-        if (BackgroundMedia.kind(context) == BackgroundMedia.Kind.IMAGE && image.length() in 1..MAX_EMBEDDED_IMAGE) {
+        val image = mediaFile(context, saved)
+        if (saved.media == "image" && image.isFile && image.length() in 1..MAX_EMBEDDED_IMAGE) {
             json.put("image", Base64.encodeToString(image.readBytes(), Base64.NO_WRAP))
         }
         return json.toString(1)
     }
 
-    /** True when exporting [export] would include the current background picture. */
-    fun exportIncludesPicture(context: Context): Boolean =
-        BackgroundMedia.kind(context) == BackgroundMedia.Kind.IMAGE && Theme.imageFile(context).length() in 1..MAX_EMBEDDED_IMAGE
+    /** True when exporting [saved] would include its background picture (GIFs and videos are never included). */
+    fun exportIncludesPicture(context: Context, saved: Saved): Boolean =
+        saved.media == "image" && mediaFile(context, saved).length() in 1..MAX_EMBEDDED_IMAGE
 
     /** A theme read from a file: the settings, and the embedded picture (base64) if the file carries one. */
     class Parsed(val theme: Saved, val image: String)
@@ -115,13 +159,22 @@ internal object ThemeStore {
         val parsed = parse(text)
         val all = list(context)
         if (all.size >= MAX_THEMES) throw IOException("that is the most themes you can keep ($MAX_THEMES) - delete one first")
+        var theme = parsed.theme
         if (parsed.image.isNotEmpty()) {
             val bytes = runCatching { Base64.decode(parsed.image, Base64.DEFAULT) }.getOrNull() ?: throw IOException("the picture in that theme is damaged")
             if (bytes.size > MAX_EMBEDDED_IMAGE * 2) throw IOException("the picture in that theme is too big")
-            BackgroundMedia.installImage(context, bytes)
+            val bounds = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+            if (bounds.outWidth <= 0 || bounds.outHeight <= 0) throw IOException("the picture in that theme can't be read")
+            theme = Saved(theme.id, theme.name, theme.look, theme.texture, theme.top, theme.bottom, theme.accent, theme.angle, theme.panelAlpha, theme.cornerScale, theme.dim, theme.portrait, theme.landscape, "image", theme.luma)
+            mediaFile(context, theme).writeBytes(bytes)
         }
-        write(context, all + parsed.theme)
-        return parsed.theme
+        // A file cannot claim a background it does not carry.
+        if (parsed.image.isEmpty() && theme.media != null) {
+            theme = Saved(theme.id, theme.name, theme.look, theme.texture, theme.top, theme.bottom, theme.accent, theme.angle, theme.panelAlpha, theme.cornerScale, theme.dim, theme.portrait, theme.landscape, null, null)
+        }
+        write(context, all + theme)
+        return theme
     }
 
     /** The text of a theme file for [saved] (no picture): what [export] writes before it adds one. */
@@ -129,6 +182,7 @@ internal object ThemeStore {
         val json = toJson(saved)
         json.put("format", FORMAT).put("version", 1)
         json.remove("id")
+        json.remove("media")
         return json.toString(1)
     }
 
@@ -168,6 +222,10 @@ internal object ThemeStore {
             .put("dim", r3(s.dim))
             .put("portrait", framing(s.portrait))
             .put("landscape", framing(s.landscape))
+            .also { j ->
+                if (s.media != null) j.put("media", s.media)
+                if (s.luma != null) j.put("luma", r3(s.luma))
+            }
 
     private fun fromJson(j: JSONObject, fresh: Boolean): Saved =
         Saved(
@@ -184,6 +242,8 @@ internal object ThemeStore {
             dim = j.optDouble("dim", 0.35).toFloat().coerceIn(0f, Theme.MAX_DIM),
             portrait = framingOf(j.optJSONArray("portrait")),
             landscape = framingOf(j.optJSONArray("landscape")),
+            media = j.optString("media", "").takeIf { it == "image" || it == "anim" || it == "video" },
+            luma = if (j.has("luma")) j.optDouble("luma", 0.3).toFloat().coerceIn(0f, 1f) else null,
         )
 
     private fun cleanName(name: String): String {

@@ -102,4 +102,24 @@ class ThemeStoreTest {
         val parsed = ThemeStore.parse("""{"format":"driftdroid-theme","name":"x","image":"AAAA"}""")
         assertEquals("AAAA", parsed.image)
     }
+
+    @Test
+    fun aFileCannotClaimABackgroundItDoesNotCarry() {
+        val parsed = ThemeStore.parse("""{"format":"driftdroid-theme","name":"x","media":"video","luma":2}""")
+        // parse keeps what the file says; import() drops the claim when no picture came with it.
+        assertEquals(1f, parsed.theme.luma!!, 0.001f)
+        assertEquals("video", parsed.theme.media)
+        assertEquals("", parsed.image)
+    }
+
+    @Test
+    fun theExportedTextNeverNamesABackground() {
+        val withMedia = ThemeStore.Saved(
+            "id-2", "bg", Look.GLASS, Texture.NONE, 0xFF102030.toInt(), 0xFF203040.toInt(), 0xFF3DDC84.toInt(),
+            90f, 0.3f, 1f, 0.35f, Theme.Framing(), Theme.Framing(), "image", 0.4f,
+        )
+        val text = ThemeStore.exportText(withMedia)
+        assertTrue(!text.contains("\"media\""))
+        assertEquals("image", ThemeStore.parse("""{"format":"driftdroid-theme","name":"x","media":"image"}""").theme.media)
+    }
 }
