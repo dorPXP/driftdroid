@@ -36,6 +36,7 @@ internal class SettingsPage(host: ModePickerActivity) : Page(host) {
         }
         val launcher = group("Launcher") {
             row(Icon.SCREEN_ROTATION, "Launcher orientation", orientationDetail()) { LauncherOrientation.show(host) }
+            row(Icon.IMAGE, "Appearance", Appearance.summary()) { Appearance.show(host) }
             val switch = Switch(context)
             switch.isOn = MiiImages.onlineEnabled(context)
             switch.layoutParams = Lx.switchLp(context)

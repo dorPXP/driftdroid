@@ -3,6 +3,8 @@ package com.driftdroid.android.ui
 import android.content.Context
 import android.content.res.ColorStateList
 import android.graphics.Canvas
+import android.graphics.Shader
+import android.graphics.LinearGradient
 import android.graphics.Color
 import android.graphics.ColorFilter
 import android.graphics.CornerPathEffect
@@ -46,19 +48,19 @@ import kotlin.math.tan
  */
 internal object Lx {
     // Asphalt neutrals, darkest to lightest.
-    const val BG = 0xFF0C0E11.toInt()
-    const val BAR = 0xFF111418.toInt()
-    const val SURFACE_LO = 0xFF121519.toInt()
-    const val SURFACE = 0xFF171A1F.toInt()
-    const val SURFACE_HI = 0xFF20242B.toInt()
-    const val LINE = 0xFF2A2F37.toInt()
+    val BG: Int get() = Theme.bg
+    val BAR: Int get() = Theme.bar
+    val SURFACE_LO: Int get() = Theme.surfaceLo
+    val SURFACE: Int get() = Theme.surface
+    val SURFACE_HI: Int get() = Theme.surfaceHi
+    val LINE: Int get() = Theme.line
     const val TEXT = 0xFFF1F3F6.toInt()
     const val MUTED = 0xFFA3ABB7.toInt()
     const val FAINT = 0xFF77808C.toInt()
 
     // Signals. Green is reserved for "go": the main action, things that are on, the current tab.
-    const val ACCENT = 0xFF3DDC84.toInt()
-    const val ACCENT_TEXT = 0xFF04210F.toInt()
+    val ACCENT: Int get() = Theme.accent
+    val ACCENT_TEXT: Int get() = Theme.accentText
     const val AMBER = 0xFFFFB547.toInt()
     const val CYAN = 0xFF5CC8FF.toInt()
     const val DANGER = 0xFFFF5A5F.toInt()
@@ -862,13 +864,46 @@ internal class AspectFrame(context: Context, private val ratio: Float) : FrameLa
  * The launcher's backdrop: flat asphalt with three faint slanted stripes in the top corner - the
  * kart's speed lines, quiet enough to sit behind any page. Static, so it costs nothing.
  */
-internal class LauncherBackground(private val compact: Boolean) : Drawable() {
+internal class LauncherBackground(private val context: Context, private val compact: Boolean) : Drawable() {
     private val stripe = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val fill = Paint()
+    private val picture = Paint(Paint.FILTER_BITMAP_FLAG)
     private val path = Path()
+    private val src = Rect()
+    private val dst = Rect()
+    private var shader: LinearGradient? = null
+    private var shaderKey = 0L
 
     override fun draw(canvas: Canvas) {
-        canvas.drawColor(Lx.BG)
         val b = bounds
+        if (Theme.top == Theme.bottom && Theme.presetId == "pit_lane") {
+            canvas.drawColor(Lx.BG)
+        } else {
+            val rad = Math.toRadians(Theme.angle.toDouble())
+            val dx = Math.cos(rad).toFloat()
+            val dy = Math.sin(rad).toFloat()
+            val half = (kotlin.math.abs(dx) * b.width() + kotlin.math.abs(dy) * b.height()) / 2f
+            val cx = b.exactCenterX()
+            val cy = b.exactCenterY()
+            val key = Theme.top.toLong() * 31 + Theme.bottom + Theme.angle.toLong() * 7 + b.width() * 1000L + b.height()
+            if (shader == null || key != shaderKey) {
+                shaderKey = key
+                shader = LinearGradient(cx - dx * half, cy - dy * half, cx + dx * half, cy + dy * half, Theme.top, Theme.bottom, Shader.TileMode.CLAMP)
+            }
+            fill.shader = shader
+            canvas.drawRect(b, fill)
+        }
+        val image = Theme.image(context)
+        if (image != null && b.width() > 0 && b.height() > 0) {
+            // Cover: scale to fill the screen, crop the overflow evenly.
+            val scale = max(b.width().toFloat() / image.width, b.height().toFloat() / image.height)
+            val w = b.width() / scale
+            val h = b.height() / scale
+            src.set(((image.width - w) / 2).toInt(), ((image.height - h) / 2).toInt(), ((image.width + w) / 2).toInt(), ((image.height + h) / 2).toInt())
+            dst.set(b)
+            canvas.drawBitmap(image, src, dst, picture)
+            canvas.drawColor(Lx.alpha(0xFF000000.toInt(), Theme.dim))
+        }
         val unit = (if (compact) b.width() else b.height()) * 0.09f
         val lean = unit * 2.2f
         for (i in 0 until 3) {

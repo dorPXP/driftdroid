@@ -38,6 +38,7 @@ import com.driftdroid.android.ui.Icon
 import com.driftdroid.android.ui.IconDrawable
 import com.driftdroid.android.ui.LauncherBackground
 import com.driftdroid.android.ui.Lx
+import com.driftdroid.android.ui.Theme
 import com.driftdroid.android.ui.RemoteImages
 import com.driftdroid.android.ui.SheetPalette
 import com.driftdroid.android.ui.SheetThemed
@@ -120,6 +121,7 @@ class ModePickerActivity : Activity(), SheetThemed {
         // turns the screen, Android starts the Activity again the right way up straight away.
         requestedOrientation = LauncherOrientation.requested(this)
         I18n.init(this)
+        Theme.load(this)
         Http.userAgent = "DriftDroid/${appVersionName()} (Android ${Build.VERSION.RELEASE})"
         RemoteImages.init(this)
         window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_PAN)
@@ -233,7 +235,7 @@ class ModePickerActivity : Activity(), SheetThemed {
 
     private fun buildShell() {
         val root = FrameLayout(this)
-        root.background = LauncherBackground(compact)
+        root.background = LauncherBackground(this, compact)
 
         pageHost = FrameLayout(this)
         val header = buildHeader()

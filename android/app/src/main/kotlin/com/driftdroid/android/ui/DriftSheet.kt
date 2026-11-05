@@ -176,8 +176,8 @@ class SheetPalette internal constructor(
                 DriftUi.ACCENT_TEXT, DriftUi.FOCUS, DriftUi.TRACK_OFF, DriftUi.KNOB_OFF, DriftUi.DANGER, 12f, 20f, false,
             )
 
-        val LAUNCHER =
-            SheetPalette(
+        val LAUNCHER: SheetPalette
+            get() = SheetPalette(
                 Lx.SURFACE, Lx.SURFACE_HI, 0xFF292E36.toInt(), Lx.LINE, Lx.TEXT, Lx.MUTED, Lx.ACCENT,
                 Lx.ACCENT_TEXT, Lx.MUTED, Lx.LINE, Lx.MUTED, Lx.DANGER, 8f, 14f, true,
             )
