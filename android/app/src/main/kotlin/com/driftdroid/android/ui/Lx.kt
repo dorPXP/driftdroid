@@ -54,9 +54,9 @@ internal object Lx {
     val SURFACE: Int get() = Theme.surface
     val SURFACE_HI: Int get() = Theme.surfaceHi
     val LINE: Int get() = Theme.line
-    const val TEXT = 0xFFF1F3F6.toInt()
-    const val MUTED = 0xFFA3ABB7.toInt()
-    const val FAINT = 0xFF77808C.toInt()
+    val TEXT: Int get() = Theme.text
+    val MUTED: Int get() = Theme.muted
+    val FAINT: Int get() = Theme.faint
 
     // Signals. Green is reserved for "go": the main action, things that are on, the current tab.
     val ACCENT: Int get() = Theme.accent
@@ -92,12 +92,29 @@ internal object Lx {
 
     // --- Shapes ---
 
-    fun rounded(context: Context, color: Int, radiusDp: Float, strokeColor: Int = 0, strokeDp: Float = 1f): GradientDrawable =
-        GradientDrawable().apply {
-            setColor(color)
-            cornerRadius = dp(context, radiusDp).toFloat()
-            if (strokeColor != 0) setStroke(dp(context, strokeDp).coerceAtLeast(1), strokeColor)
+    fun rounded(context: Context, color: Int, radiusDp: Float, strokeColor: Int = 0, strokeDp: Float = 1f): GradientDrawable {
+        val look = Theme.look
+        val scaled = radiusDp * Theme.cornerScale
+        if (look == Look.FLAT) {
+            return GradientDrawable().apply {
+                setColor(color)
+                cornerRadius = dp(context, scaled).toFloat()
+                if (strokeColor != 0) setStroke(dp(context, strokeDp).coerceAtLeast(1), strokeColor)
+            }
         }
+        val radius =
+            when (look) {
+                Look.GLASS -> max(scaled * 1.8f, 14f * Theme.cornerScale)
+                Look.AERO -> max(scaled * 2.4f, 18f * Theme.cornerScale)
+                else -> max(scaled * 1.3f, 8f * Theme.cornerScale)
+            }
+        val family = color == SURFACE || color == SURFACE_LO || color == SURFACE_HI || color == BAR
+        val drawable =
+            LookDrawable(look, color, dp(context, radius).toFloat(), strokeColor, dp(context, strokeDp), family, Theme.panelAlpha, Theme.isLight)
+        // A focus outline in the accent colour stays an accent outline in every look.
+        if (strokeColor == ACCENT) drawable.setStroke(dp(context, strokeDp).coerceAtLeast(1), ACCENT)
+        return drawable
+    }
 
     /** A rounded fill that ripples when pressed and lights up when focused by a gamepad. */
     fun pressable(context: Context, color: Int, radiusDp: Float = 8f, strokeColor: Int = 0): Drawable {
@@ -106,8 +123,11 @@ internal object Lx {
         return RippleDrawable(ColorStateList.valueOf(0x2EFFFFFF), shape, mask)
     }
 
-    /** A slanted plate that ripples. */
+    /** A slanted plate that ripples (in the other looks, a glossy rounded plate). */
     fun plate(context: Context, fill: Int, stroke: Int = 0): Drawable {
+        if (Theme.look != Look.FLAT) {
+            return RippleDrawable(ColorStateList.valueOf(0x33FFFFFF), rounded(context, fill, 12f, stroke), rounded(context, Color.WHITE, 12f))
+        }
         val shape = SlantDrawable(fill, stroke, dp(context, 1.5f).toFloat(), dp(context, 3f).toFloat())
         val mask = SlantDrawable(Color.WHITE, 0, 0f, dp(context, 3f).toFloat())
         return RippleDrawable(ColorStateList.valueOf(0x33FFFFFF), shape, mask)
@@ -869,14 +889,21 @@ internal class LauncherBackground(private val context: Context, private val comp
     private val fill = Paint()
     private val picture = Paint(Paint.FILTER_BITMAP_FLAG)
     private val path = Path()
-    private val src = Rect()
-    private val dst = Rect()
+    private val placed = android.graphics.RectF()
     private var shader: LinearGradient? = null
     private var shaderKey = 0L
 
     override fun draw(canvas: Canvas) {
         val b = bounds
-        if (Theme.top == Theme.bottom && Theme.presetId == "pit_lane") {
+        val wallpaper = Theme.wallpaper
+        if (wallpaper != null && b.width() > 0 && b.height() > 0) {
+            val art = Wallpapers.get(wallpaper, b.width(), b.height())
+            val cover = max(b.width().toFloat() / art.width, b.height().toFloat() / art.height)
+            val w = art.width * cover
+            val h = art.height * cover
+            placed.set(b.exactCenterX() - w / 2f, b.exactCenterY() - h / 2f, b.exactCenterX() + w / 2f, b.exactCenterY() + h / 2f)
+            canvas.drawBitmap(art, null, placed, picture)
+        } else if (Theme.top == Theme.bottom && Theme.presetId == "pit_lane") {
             canvas.drawColor(Lx.BG)
         } else {
             val rad = Math.toRadians(Theme.angle.toDouble())
@@ -895,15 +922,15 @@ internal class LauncherBackground(private val context: Context, private val comp
         }
         val image = Theme.image(context)
         if (image != null && b.width() > 0 && b.height() > 0) {
-            // Cover: scale to fill the screen, crop the overflow evenly.
-            val scale = max(b.width().toFloat() / image.width, b.height().toFloat() / image.height)
-            val w = b.width() / scale
-            val h = b.height() / scale
-            src.set(((image.width - w) / 2).toInt(), ((image.height - h) / 2).toInt(), ((image.width + w) / 2).toInt(), ((image.height + h) / 2).toInt())
-            dst.set(b)
-            canvas.drawBitmap(image, src, dst, picture)
+            Theme.place(image.width, image.height, b.width().toFloat(), b.height().toFloat(), Theme.framingFor(b.width(), b.height()), placed)
+            canvas.save()
+            canvas.clipRect(b)
+            canvas.drawBitmap(image, null, placed, picture)
+            canvas.clipRect(placed)
             canvas.drawColor(Lx.alpha(0xFF000000.toInt(), Theme.dim))
+            canvas.restore()
         }
+        if (Theme.look != Look.FLAT) return
         val unit = (if (compact) b.width() else b.height()) * 0.09f
         val lean = unit * 2.2f
         for (i in 0 until 3) {

@@ -115,6 +115,18 @@ class ModePickerActivity : Activity(), SheetThemed {
     private var shown: Page? = null
     private var paused = false
 
+    override fun attachBaseContext(newBase: android.content.Context) {
+        // The launcher's own text size (Settings > Appearance) on top of the system font size.
+        val scale = newBase.getSharedPreferences("launcher", MODE_PRIVATE).getFloat("theme_text_scale", 1f).coerceIn(0.85f, 1.4f)
+        if (scale == 1f) {
+            super.attachBaseContext(newBase)
+        } else {
+            val config = android.content.res.Configuration(newBase.resources.configuration)
+            config.fontScale *= scale
+            super.attachBaseContext(newBase.createConfigurationContext(config))
+        }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         // Portrait on phones, landscape on tablets and handhelds, or the player's choice. When this
