@@ -37,6 +37,7 @@ import com.driftdroid.android.ui.DriftUi
 import com.driftdroid.android.ui.Icon
 import com.driftdroid.android.ui.IconDrawable
 import com.driftdroid.android.ui.LauncherBackground
+import com.driftdroid.android.ui.Look
 import com.driftdroid.android.ui.Lx
 import com.driftdroid.android.ui.Theme
 import com.driftdroid.android.ui.RemoteImages
@@ -86,6 +87,8 @@ class ModePickerActivity : Activity(), SheetThemed {
     /** Phone layout: one column with a bottom tab bar, instead of a rail beside the pages. */
     internal var compact = false
         private set
+
+    private var videoBackground: com.driftdroid.android.ui.VideoBackground? = null
 
     private val navItems = HashMap<Tab, NavItem>()
     private var rail: View? = null
@@ -167,6 +170,9 @@ class ModePickerActivity : Activity(), SheetThemed {
         if (RetroRewindInstallStatus.running) trackingRetroInstall = true
         if (ModInstallJob.running) watchModInstall()
         startTaskPolling()
+        // A moving background plays only while the launcher is on screen.
+        com.driftdroid.android.ui.BackgroundMedia.setResumed(true)
+        videoBackground?.start()
     }
 
     override fun onPause() {
@@ -174,6 +180,8 @@ class ModePickerActivity : Activity(), SheetThemed {
         paused = true
         stopTaskPolling()
         shown?.onHide()
+        com.driftdroid.android.ui.BackgroundMedia.setResumed(false)
+        videoBackground?.stop()
     }
 
     override fun onDestroy() {
@@ -239,7 +247,7 @@ class ModePickerActivity : Activity(), SheetThemed {
 
         fun paint(selected: Boolean) {
             icon.setImageDrawable(IconDrawable(tab.icon, if (selected) Lx.ACCENT_TEXT else Lx.MUTED))
-            icon.background = if (selected) SlantDrawable(Lx.ACCENT, 0, 0f, dp(3f).toFloat()) else null
+            icon.background = if (selected) (if (Theme.look == Look.FLAT) SlantDrawable(Lx.ACCENT, 0, 0f, dp(3f).toFloat()) else Lx.rounded(this@ModePickerActivity, Lx.ACCENT, 12f)) else null
             label.setTextColor(if (selected) Lx.TEXT else Lx.FAINT)
             root.isSelected = selected
         }
@@ -248,6 +256,10 @@ class ModePickerActivity : Activity(), SheetThemed {
     private fun buildShell() {
         val root = FrameLayout(this)
         root.background = LauncherBackground(this, compact)
+
+        if (com.driftdroid.android.ui.BackgroundMedia.kind(this) == com.driftdroid.android.ui.BackgroundMedia.Kind.VIDEO) {
+            videoBackground = com.driftdroid.android.ui.VideoBackground(this).also { root.addView(it, Lx.match()) }
+        }
 
         pageHost = FrameLayout(this)
         val header = buildHeader()

@@ -178,7 +178,7 @@ class SheetPalette internal constructor(
 
         val LAUNCHER: SheetPalette
             get() = SheetPalette(
-                Lx.SURFACE, Lx.SURFACE_HI, 0xFF292E36.toInt(), Lx.LINE, Lx.TEXT, Lx.MUTED, Lx.ACCENT,
+                Lx.SURFACE, Lx.SURFACE_HI, if (Theme.isLight) LookDrawable.darken(Lx.SURFACE_HI, 0.10f) else 0xFF292E36.toInt(), Lx.LINE, Lx.TEXT, Lx.MUTED, Lx.ACCENT,
                 Lx.ACCENT_TEXT, Lx.MUTED, Lx.LINE, Lx.MUTED, Lx.DANGER, 8f, 14f, true,
             )
 
@@ -741,6 +741,14 @@ internal class DriftSheet(
         }
         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) window.setDecorFitsSystemWindows(false)
         window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
+            // With the decor not fitting the system windows, the keyboard no longer shrinks the dialog on its
+            // own: lift the sheet by the keyboard's height so a text box and its buttons stay in view.
+            window.decorView.setOnApplyWindowInsetsListener { v, insets ->
+                v.setPadding(0, 0, 0, insets.getInsets(WindowInsets.Type.ime()).bottom)
+                insets
+            }
+        }
         if (sideDock) {
             val width = (screenW * 0.40f).toInt().coerceIn(min(dp(340f), screenW), (screenW * 0.62f).toInt().coerceAtLeast(dp(340f)))
             window.setLayout(width, ViewGroup.LayoutParams.MATCH_PARENT)

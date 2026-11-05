@@ -26,7 +26,7 @@ import kotlin.math.min
  */
 internal object BackgroundFraming {
     fun show(host: ModePickerActivity) {
-        val image = Theme.image(host) ?: return
+        val image = com.driftdroid.android.ui.BackgroundMedia.still(host) ?: return
         val originalPortrait = Theme.portrait.copy()
         val originalLandscape = Theme.landscape.copy()
         val dialog = Dialog(host, android.R.style.Theme_Black_NoTitleBar_Fullscreen)

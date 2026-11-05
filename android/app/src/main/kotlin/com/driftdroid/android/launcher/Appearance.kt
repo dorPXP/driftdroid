@@ -3,17 +3,19 @@ package com.driftdroid.android.launcher
 import android.view.View
 import com.driftdroid.android.ModePickerActivity
 import com.driftdroid.android.T
+import com.driftdroid.android.ui.BackgroundMedia
 import com.driftdroid.android.ui.ColorPickerSheet
 import com.driftdroid.android.ui.DriftSheet
 import com.driftdroid.android.ui.DriftUi
 import com.driftdroid.android.ui.Look
 import com.driftdroid.android.ui.Lx
 import com.driftdroid.android.ui.Theme
-import com.driftdroid.android.ui.Wallpaper
+import com.driftdroid.android.ui.Texture
+import com.driftdroid.android.ui.ThemeStore
 
 /**
- * Settings > Appearance. Top: ready-made themes (a look, a wallpaper and colours together). Below:
- * the parts on their own - the look (flat, glass, Frutiger Aero, skeuomorphic), the wallpaper (a
+ * Settings > Appearance. Top: ready-made themes (a look and colours together). Below:
+ * the parts on their own - the look (flat, glass, Frutiger Aero, skeuomorphic), the material (a
  * built-in one, or your own picture, positioned separately for upright and sideways), the colours
  * with a proper picker, and how it feels (panel transparency, corners, text size).
  *
@@ -48,35 +50,31 @@ internal object Appearance {
             Look.SKEUO -> T("Skeuomorphic")
         }
 
-    private fun wallpaperName(wallpaper: Wallpaper?): String =
-        when (wallpaper) {
-            null -> T("None")
-            Wallpaper.AQUA -> T("Water")
-            Wallpaper.BUBBLES -> T("Bubbles")
-            Wallpaper.MEADOW -> T("Meadow")
-            Wallpaper.SUNSET -> T("Sunset")
-            Wallpaper.AURORA -> T("Aurora")
-            Wallpaper.DEEP -> T("Deep sea")
+    /** Short names for the pills (the long ones do not fit four to a row). */
+    private fun lookPill(look: Look): String =
+        when (look) {
+            Look.FLAT -> T("Flat")
+            Look.GLASS -> T("Glass")
+            Look.AERO -> T("Aero")
+            Look.SKEUO -> T("Skeuo")
+        }
+
+    private fun textureName(texture: Texture): String =
+        when (texture) {
+            Texture.NONE -> T("Smooth")
+            Texture.METAL -> T("Metal")
+            Texture.LEATHER -> T("Leather")
         }
 
     fun summary(): String =
         Theme.PRESETS.firstOrNull { it.id == Theme.presetId }?.let { presetName(it) } ?: T("Custom")
 
     fun show(host: ModePickerActivity) {
-        val sheet = DriftSheet(host, T("Appearance"), T("Looks, wallpapers and colours for this launcher"))
-
-        sheet.section(T("Themes"))
-        for (preset in Theme.PRESETS) {
-            sheet.radio(presetName(preset), "${lookName(preset.look)} · ${wallpaperName(preset.wallpaper)}", Theme.presetId == preset.id) {
-                sheet.dismiss()
-                Theme.usePreset(host, preset)
-                host.recreate()
-            }
-        }
+        val sheet = DriftSheet(host, T("Appearance"), T("Looks, colours and backgrounds for this launcher"))
 
         // Pending choices, applied together by the Apply button.
         var look = Theme.look
-        var wallpaper = Theme.wallpaper
+        var texture = Theme.texture
         var accent = Theme.accentColor
         var top = Theme.top
         var bottom = Theme.bottom
@@ -85,49 +83,102 @@ internal object Appearance {
         var corner = Theme.cornerScale
         var textScale = Theme.textScale
 
-        sheet.section(T("Look"))
-        val looks = Look.values().toList()
-        sheet.choice(T("Look"), T("How panels and buttons are drawn"), looks.map { lookName(it) }, looks.indexOf(look)) { look = looks[it] }
+        sheet.section(T("Themes"))
+        val themeCards =
+            Theme.PRESETS.map { preset ->
+                val card = ThemePreview(host, preset.look, preset.top, preset.bottom, preset.accent, preset.texture)
+                card.picked = Theme.presetId == preset.id
+                card.setOnClickListener {
+                    sheet.dismiss()
+                    Theme.usePreset(host, preset)
+                    host.recreate()
+                }
+                card to presetName(preset)
+            }
+        sheet.custom(strip(host, themeCards))
 
-        sheet.section(T("Wallpaper"))
-        val wallpapers = listOf<Wallpaper?>(null) + Wallpaper.values().toList()
-        val wallpaperRows = ArrayList<android.widget.LinearLayout>()
-        wallpapers.forEachIndexed { index, option ->
-            wallpaperRows.add(
-                sheet.radio(wallpaperName(option), if (option == null) T("Just the colours below") else null, option == wallpaper && !Theme.hasImage(host)) {
-                    wallpaper = option
-                    wallpaperRows.forEachIndexed { i, row -> sheet.setPicked(row, i == index) }
-                    if (Theme.hasImage(host)) Theme.removeImage(host)
-                },
-            )
+        sheet.section(T("My themes"))
+        val mine = ThemeStore.list(host)
+        if (mine.isNotEmpty()) {
+            val cards =
+                mine.map { saved ->
+                    val card = ThemePreview(host, saved.look, saved.top, saved.bottom, saved.accent, saved.texture)
+                    card.setOnClickListener {
+                        sheet.dismiss()
+                        ThemeStore.apply(host, saved)
+                        host.recreate()
+                    }
+                    card.setOnLongClickListener {
+                        sheet.dismiss()
+                        themeMenu(host, saved)
+                        true
+                    }
+                    card to saved.name
+                }
+            sheet.custom(strip(host, cards))
+            sheet.note(T("Touch and hold a theme to export or delete it."))
         }
-        sheet.action(T("Use my own picture"), T("Copied into the app and scaled to fit the screen")) {
+        sheet.action(T("Save this look as a theme"), T("Name it and keep it with your themes")) {
+            sheet.dismiss()
+            askName(host) { name ->
+                host.work({ ThemeStore.save(host, name, look, texture, top, bottom, accent, angle, panelAlpha, corner) }) { result ->
+                    if (result.isSuccess) host.toast(T("Saved \"%s\".").format(result.getOrNull()?.name), Lx.Tone.PRIMARY) else host.toast(T("Couldn't save: %s").format(result.exceptionOrNull()?.message), Lx.Tone.DANGER)
+                    show(host)
+                }
+            }
+        }
+        sheet.action(T("Import a theme file"), T("A .driftdroid-theme.json file from someone, or from another phone")) {
             sheet.dismiss()
             host.openDocument { uri ->
                 if (uri == null) return@openDocument
-                host.work({ Theme.importImage(host, uri) }) { result ->
+                host.work({
+                    val text = host.contentResolver.openInputStream(uri)?.use { it.readBytes().toString(Charsets.UTF_8) } ?: throw java.io.IOException("couldn't open the file")
+                    ThemeStore.import(host, text)
+                }) { result ->
+                    if (result.isSuccess) host.toast(T("Imported \"%s\".").format(result.getOrNull()?.name), Lx.Tone.PRIMARY) else host.toast(T("Couldn't import: %s").format(result.exceptionOrNull()?.message), Lx.Tone.DANGER)
+                    show(host)
+                }
+            }
+        }
+
+        sheet.section(T("Look"))
+        val looks = Look.values().toList()
+        sheet.choice(T("Look"), T("How panels and buttons are drawn"), looks.map { lookPill(it) }, looks.indexOf(look)) { look = looks[it] }
+
+        val textures = Texture.values().toList()
+        sheet.choice(T("Material"), T("For the skeuomorphic look"), textures.map { textureName(it) }, textures.indexOf(texture)) { texture = textures[it] }
+
+        sheet.section(T("Background"))
+        sheet.action(T("Choose a picture, GIF or video"), T("Copied into the app. GIF and MP4 play muted and loop")) {
+            sheet.dismiss()
+            host.openDocument { uri ->
+                if (uri == null) return@openDocument
+                host.work({ BackgroundMedia.import(host, uri) }) { result ->
                     if (result.isSuccess) {
                         host.recreate()
                     } else {
-                        host.toast(T("Couldn't use that picture: %s").format(result.exceptionOrNull()?.message), Lx.Tone.DANGER)
+                        host.toast(T("Couldn't use that file: %s").format(result.exceptionOrNull()?.message), Lx.Tone.DANGER)
                     }
                 }
             }
         }
-        if (Theme.hasImage(host)) {
-            sheet.action(T("Position the picture"), T("Set how it sits when the phone is upright and sideways")) {
+        if (BackgroundMedia.hasAny(host)) {
+            sheet.action(T("Position the background"), T("Set how it sits when the phone is upright and sideways")) {
                 sheet.dismiss()
                 BackgroundFraming.show(host)
             }
-            sheet.action(T("Remove the picture"), null) {
+            sheet.action(T("Remove the background"), null) {
                 sheet.dismiss()
-                Theme.removeImage(host)
+                BackgroundMedia.remove(host)
                 host.recreate()
             }
             var dim = Theme.dim
-            sheet.slider(T("Dim the picture"), 0f, Theme.MAX_DIM, dim, 16, { "%d%%".format((it * 100).toInt()) }) {
+            sheet.slider(T("Dim the background"), 0f, Theme.MAX_DIM, dim, 16, { "%d%%".format((it * 100).toInt()) }) {
                 dim = it
                 Theme.setDim(host, dim)
+            }
+            sheet.toggle(T("Animate the background"), T("Off, or in battery saver, shows the first frame"), BackgroundMedia.animateEnabled(host)) {
+                BackgroundMedia.setAnimateEnabled(host, it)
             }
         }
 
@@ -150,8 +201,8 @@ internal object Appearance {
         }
         topRow = sheet.action(T("Backdrop, top"), null, swatch(top)) { pick(T("Backdrop, top"), top, topRow) { top = it } }
         bottomRow = sheet.action(T("Backdrop, bottom"), null, swatch(bottom)) { pick(T("Backdrop, bottom"), bottom, bottomRow) { bottom = it } }
-        val directions = listOf(90f to T("Top to bottom"), 0f to T("Left to right"), 45f to T("Diagonal ↘"), 135f to T("Diagonal ↙"))
-        sheet.choice(T("Gradient direction"), null, directions.map { it.second }, directions.indexOfFirst { it.first == angle }.coerceAtLeast(0)) { angle = directions[it].first }
+        val directions = listOf(90f to "↓", 0f to "→", 45f to "↘", 135f to "↙")
+        sheet.choice(T("Gradient direction"), T("Which way the backdrop colours run"), directions.map { it.second }, directions.indexOfFirst { it.first == angle }.coerceAtLeast(0)) { angle = directions[it].first }
 
         sheet.section(T("Feel"))
         sheet.slider(T("Panel transparency"), 0.12f, 0.85f, panelAlpha, 73, { "%d%%".format((it * 100).toInt()) }) { panelAlpha = it }
@@ -162,14 +213,81 @@ internal object Appearance {
         sheet.button(T("Apply"), DriftUi.Style.PRIMARY) {
             sheet.dismiss()
             Theme.setFeel(host, panelAlpha, corner, textScale)
-            Theme.useCustom(host, top = top, bottom = bottom, accent = accent, angle = angle, look = look, wallpaper = wallpaper)
+            Theme.useCustom(host, top = top, bottom = bottom, accent = accent, angle = angle, look = look, texture = texture)
             host.recreate()
         }
-        sheet.button(T("Reset to the original look"), DriftUi.Style.SECONDARY) {
+        sheet.button(T("Reset"), DriftUi.Style.SECONDARY) {
             sheet.dismiss()
             Theme.reset(host)
             host.recreate()
         }
         sheet.show()
+    }
+
+    /** A swipeable row of preview cards, each with its name underneath. */
+    private fun strip(host: ModePickerActivity, cards: List<Pair<View, String>>): View {
+        val row = Lx.hbox(host, android.view.Gravity.TOP)
+        for ((card, name) in cards) {
+            val column = Lx.vbox(host)
+            column.addView(card, Lx.lp(host, 96f, 156f))
+            column.addView(
+                Lx.caption(host, name, Lx.MUTED, 1).apply { gravity = android.view.Gravity.CENTER; textSize = 12f },
+                Lx.lp(host, 96f, -2f, top = 6f),
+            )
+            row.addView(column, Lx.lp(host, -2f, -2f, end = 10f))
+        }
+        return android.widget.HorizontalScrollView(host).apply {
+            isHorizontalScrollBarEnabled = false
+            overScrollMode = View.OVER_SCROLL_NEVER
+            setPadding(0, Lx.dp(host, 4f), 0, Lx.dp(host, 4f))
+            addView(row)
+        }
+    }
+
+    private fun askName(host: ModePickerActivity, onName: (String) -> Unit) {
+        val sheet = DriftSheet(host, T("Name your theme"))
+        val field = sheet.textField("Theme name", "")
+        sheet.button(T("Save"), DriftUi.Style.PRIMARY) {
+            sheet.dismiss()
+            onName(field.text.toString())
+        }
+        sheet.button(T("Cancel"), DriftUi.Style.SECONDARY) {
+            sheet.dismiss()
+            show(host)
+        }
+        sheet.show()
+    }
+
+    private fun themeMenu(host: ModePickerActivity, saved: ThemeStore.Saved) {
+        val menu = DriftSheet(host, saved.name)
+        menu.action(T("Export to a file"), if (ThemeStore.exportIncludesPicture(host)) T("Includes your background picture") else null) {
+            menu.dismiss()
+            val safe = saved.name.map { if (it.isLetterOrDigit() || it == ' ' || it == '-') it else '_' }.joinToString("").trim().ifEmpty { "theme" }
+            host.createDocument("application/json", "$safe.driftdroid-theme.json") { uri ->
+                if (uri == null) {
+                    show(host)
+                    return@createDocument
+                }
+                host.work({
+                    val text = ThemeStore.export(host, saved)
+                    host.contentResolver.openOutputStream(uri)?.use { it.write(text.toByteArray(Charsets.UTF_8)) } ?: throw java.io.IOException("couldn't open the destination")
+                }) { result ->
+                    host.toast(if (result.isSuccess) T("Theme exported.") else T("Export failed: %s").format(result.exceptionOrNull()?.message), if (result.isSuccess) Lx.Tone.PRIMARY else Lx.Tone.DANGER)
+                    show(host)
+                }
+            }
+        }
+        menu.action(T("Delete"), null) {
+            menu.dismiss()
+            DriftSheet.confirm(host, T("Delete \"%s\"?").format(saved.name), T("This removes it from your themes. Your current look doesn't change."), T("Delete"), danger = true) {
+                runCatching { ThemeStore.delete(host, saved.id) }
+                show(host)
+            }
+        }
+        menu.button(T("Cancel"), DriftUi.Style.SECONDARY) {
+            menu.dismiss()
+            show(host)
+        }
+        menu.show()
     }
 }

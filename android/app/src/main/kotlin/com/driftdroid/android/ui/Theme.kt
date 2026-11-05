@@ -24,26 +24,26 @@ internal object Theme {
         val id: String,
         val name: String,
         val look: Look,
-        val wallpaper: Wallpaper?,
         val top: Int,
         val bottom: Int,
         val accent: Int,
+        val texture: Texture = Texture.NONE,
     )
 
     private fun flat(id: String, name: String, top: Long, bottom: Long, accent: Long) =
-        Preset(id, name, Look.FLAT, null, top.toInt(), bottom.toInt(), accent.toInt())
+        Preset(id, name, Look.FLAT, top.toInt(), bottom.toInt(), accent.toInt())
 
     val PRESETS =
         listOf(
             flat("pit_lane", "Pit lane", 0xFF0C0E11, 0xFF0C0E11, 0xFF3DDC84),
-            Preset("aqua_glass", "Aqua glass", Look.GLASS, Wallpaper.AQUA, 0xFF0F78C8.toInt(), 0xFF07306A.toInt(), 0xFF3DF2E0.toInt()),
-            Preset("frutiger", "Frutiger Aero", Look.AERO, Wallpaper.MEADOW, 0xFF7CCBFF.toInt(), 0xFFCDEEFF.toInt(), 0xFF22A7F0.toInt()),
-            Preset("deep_glass", "Deep sea", Look.GLASS, Wallpaper.DEEP, 0xFF053457.toInt(), 0xFF020F22.toInt(), 0xFF5CE1E6.toInt()),
-            Preset("aurora_glass", "Aurora", Look.GLASS, Wallpaper.AURORA, 0xFF0A1B36.toInt(), 0xFF0C2A44.toInt(), 0xFF9B6BFF.toInt()),
-            Preset("sunset_glass", "Sunset glass", Look.GLASS, Wallpaper.SUNSET, 0xFF8A3A86.toInt(), 0xFFFF9A5C.toInt(), 0xFFFFB36B.toInt()),
-            Preset("bubble_pop", "Bubble pop", Look.AERO, Wallpaper.BUBBLES, 0xFF22D3C5.toInt(), 0xFF6A5BEA.toInt(), 0xFFFFD84D.toInt()),
-            Preset("steel", "Brushed steel", Look.SKEUO, null, 0xFF2C3036.toInt(), 0xFF454B54.toInt(), 0xFFFF9F2E.toInt()),
-            Preset("leather", "Leather", Look.SKEUO, null, 0xFF3B2A20.toInt(), 0xFF5A3E2E.toInt(), 0xFFE8B04A.toInt()),
+            Preset("aqua_glass", "Aqua glass", Look.GLASS, 0xFF1FA6E8.toInt(), 0xFF08407F.toInt(), 0xFF3DF2E0.toInt()),
+            Preset("frutiger", "Frutiger Aero", Look.AERO, 0xFF42B0F5.toInt(), 0xFFD4F3FF.toInt(), 0xFF1E8FF0.toInt()),
+            Preset("deep_glass", "Deep sea", Look.GLASS, 0xFF053457.toInt(), 0xFF020F22.toInt(), 0xFF5CE1E6.toInt()),
+            Preset("aurora_glass", "Aurora", Look.GLASS, 0xFF0B1E3A.toInt(), 0xFF165C54.toInt(), 0xFF9B6BFF.toInt()),
+            Preset("sunset_glass", "Sunset glass", Look.GLASS, 0xFF5B2A86.toInt(), 0xFFFF9A5C.toInt(), 0xFFFFB36B.toInt()),
+            Preset("bubble_pop", "Bubble pop", Look.AERO, 0xFF7FF0E2.toInt(), 0xFFC7B8FF.toInt(), 0xFFFF8A3D.toInt()),
+            Preset("steel", "Brushed steel", Look.SKEUO, 0xFF2C3036.toInt(), 0xFF454B54.toInt(), 0xFFFF9F2E.toInt(), Texture.METAL),
+            Preset("leather", "Leather", Look.SKEUO, 0xFF3B2A20.toInt(), 0xFF5A3E2E.toInt(), 0xFFE8B04A.toInt(), Texture.LEATHER),
             flat("midnight", "Midnight", 0xFF0B1226, 0xFF16284A, 0xFF5CC8FF),
             flat("sunset", "Sunset", 0xFF1E0F1F, 0xFF40182A, 0xFFFF8A4C),
             flat("forest", "Forest", 0xFF0A1410, 0xFF133326, 0xFF7BE495),
@@ -79,7 +79,7 @@ internal object Theme {
         private set
     @Volatile var look: Look = Look.FLAT
         private set
-    @Volatile var wallpaper: Wallpaper? = null
+    @Volatile var texture: Texture = Texture.NONE
         private set
     /** How see-through the neutral surfaces are in the glass looks (0.12 - 0.85). */
     @Volatile var panelAlpha: Float = 0.30f
@@ -135,7 +135,7 @@ internal object Theme {
 
     /** True when everything is the shipped look, so the original constants are used as they were. */
     private val isOriginal: Boolean
-        get() = presetId == "pit_lane" && look == Look.FLAT && wallpaper == null
+        get() = presetId == "pit_lane" && look == Look.FLAT
 
     val bg: Int get() = if (isOriginal) PIT_BG else top
     val bar: Int
@@ -151,18 +151,44 @@ internal object Theme {
     val line: Int get() = if (isOriginal) PIT_LINE else tone(0.16f)
     val accent: Int get() = accentColor
     val accentText: Int
-        get() = if (isOriginal) PIT_ACCENT_TEXT else if (luminance(accentColor) > 0.45f) 0xFF101010.toInt() else 0xFFFFFFFF.toInt()
+        get() =
+            if (isOriginal) {
+                PIT_ACCENT_TEXT
+            } else if (luminance(accentColor) > (if (look == Look.AERO) 0.66f else 0.45f)) {
+                0xFF101010.toInt()
+            } else {
+                0xFFFFFFFF.toInt()
+            }
 
     /** True when the backdrop is light enough that the text has to be dark. */
     val isLight: Boolean
-        get() = !isOriginal && (wallpaper?.light ?: (luminance(average(top, bottom)) > 0.5f))
+        get() {
+            val media = mediaLuma
+            if (isOriginal) return false
+            if (media != null) return media * (1f - dim * 0.9f) > 0.5f
+            return !isOriginal && luminance(average(top, bottom)) > 0.5f
+        }
+
+    /** How light the background picture, GIF or video is (null with none): the text colour follows it. */
+    @Volatile private var mediaLuma: Float? = null
+
+    fun setMediaLuma(value: Float?) {
+        mediaLuma = value
+    }
 
     val text: Int get() = if (isLight) 0xFF14171C.toInt() else 0xFFF1F3F6.toInt()
     val muted: Int get() = if (isLight) 0xFF4A515B.toInt() else 0xFFA3ABB7.toInt()
     val faint: Int get() = if (isLight) 0xFF6A727E.toInt() else 0xFF77808C.toInt()
 
+    /** Whether text should be dark for a theme made of these parts (used to draw previews of other themes). */
+    fun lightFor(top: Int, bottom: Int): Boolean = luminance(average(top, bottom)) > 0.5f
+
     /** The backdrop colour mixed towards white (towards black on a light backdrop): panels a step off it. */
-    private fun tone(amount: Float): Int = mix(average(top, bottom), if (isLight) Color.BLACK else Color.WHITE, if (isLight) amount * 0.8f else amount)
+    private fun tone(amount: Float): Int {
+        // With a picture, GIF or video behind, the panels follow its brightness (like the text), not the gradient's.
+        val base = if (mediaLuma != null) (if (isLight) 0xFFE6EDF4.toInt() else 0xFF121820.toInt()) else average(top, bottom)
+        return mix(base, if (isLight) Color.BLACK else Color.WHITE, if (isLight) amount * 0.8f else amount)
+    }
 
     fun load(context: Context) {
         val p = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
@@ -176,11 +202,12 @@ internal object Theme {
         angle = p.getFloat("theme_angle", 90f)
         dim = p.getFloat("theme_dim", 0.35f).coerceIn(0f, MAX_DIM)
         look = Look.of(p.getString("theme_look", base.look.id))
-        wallpaper = if (p.contains("theme_wallpaper")) Wallpaper.of(p.getString("theme_wallpaper", null)) else base.wallpaper
+        texture = Texture.of(p.getString("theme_texture", base.texture.id))
         panelAlpha = p.getFloat("theme_panel_alpha", 0.30f).coerceIn(0.12f, 0.85f)
         cornerScale = p.getFloat("theme_corner_scale", 1f).coerceIn(0.5f, 1.8f)
         textScale = p.getFloat("theme_text_scale", 1f).coerceIn(0.85f, 1.4f)
         loadFraming(p)
+        mediaLuma = if (BackgroundMedia.kind(context) != BackgroundMedia.Kind.NONE && p.contains("bg_luma")) p.getFloat("bg_luma", 0.3f) else null
         bitmapLoaded = false
         bitmap = null
     }
@@ -189,7 +216,7 @@ internal object Theme {
     fun usePreset(context: Context, preset: Preset) {
         presetId = preset.id
         look = preset.look
-        wallpaper = preset.wallpaper
+        texture = preset.texture
         top = preset.top
         bottom = preset.bottom
         accentColor = preset.accent
@@ -197,15 +224,36 @@ internal object Theme {
     }
 
     /** Switches to custom colours (backdrop colours are kept dark enough for the text). */
-    fun useCustom(context: Context, top: Int, bottom: Int, accent: Int, angle: Float, look: Look, wallpaper: Wallpaper?) {
+    fun useCustom(context: Context, top: Int, bottom: Int, accent: Int, angle: Float, look: Look, texture: Texture) {
         presetId = CUSTOM
         this.look = look
-        this.wallpaper = wallpaper
+        this.texture = texture
         this.top = top or 0xFF000000.toInt()
         this.bottom = bottom or 0xFF000000.toInt()
         accentColor = accent or 0xFF000000.toInt()
         this.angle = angle
         save(context)
+    }
+
+    /** Applies a saved theme's values as the current (custom) theme. */
+    fun applyValues(
+        context: Context, look: Look, texture: Texture, top: Int, bottom: Int, accent: Int, angle: Float,
+        panelAlpha: Float, cornerScale: Float, dim: Float, portrait: Framing, landscape: Framing,
+    ) {
+        presetId = CUSTOM
+        this.look = look
+        this.texture = texture
+        this.top = top
+        this.bottom = bottom
+        this.accentColor = accent
+        this.angle = angle
+        this.panelAlpha = panelAlpha
+        this.cornerScale = cornerScale
+        this.dim = dim
+        this.portrait.zoom = portrait.zoom; this.portrait.cx = portrait.cx; this.portrait.cy = portrait.cy
+        this.landscape.zoom = landscape.zoom; this.landscape.cx = landscape.cx; this.landscape.cy = landscape.cy
+        save(context)
+        saveFraming(context)
     }
 
     fun setFeel(context: Context, panelAlpha: Float, cornerScale: Float, textScale: Float) {
@@ -229,7 +277,7 @@ internal object Theme {
             .putFloat("theme_angle", angle)
             .putFloat("theme_dim", dim)
             .putString("theme_look", look.id)
-            .putString("theme_wallpaper", wallpaper?.id ?: "none")
+            .putString("theme_texture", texture.id)
             .putFloat("theme_panel_alpha", panelAlpha)
             .putFloat("theme_corner_scale", cornerScale)
             .putFloat("theme_text_scale", textScale)
@@ -264,6 +312,12 @@ internal object Theme {
             bitmap = imageFile(context).takeIf { it.isFile }?.let { runCatching { BitmapFactory.decodeFile(it.path) }.getOrNull() }
         }
         return bitmap
+    }
+
+    @Synchronized
+    fun forgetImage() {
+        bitmap = null
+        bitmapLoaded = false
     }
 
     @Synchronized

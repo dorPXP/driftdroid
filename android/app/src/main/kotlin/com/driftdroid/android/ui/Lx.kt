@@ -108,12 +108,20 @@ internal object Lx {
                 Look.AERO -> max(scaled * 2.4f, 18f * Theme.cornerScale)
                 else -> max(scaled * 1.3f, 8f * Theme.cornerScale)
             }
-        val family = color == SURFACE || color == SURFACE_LO || color == SURFACE_HI || color == BAR
+        val family = color == SURFACE || color == SURFACE_LO || color == SURFACE_HI || color == BAR || isDarkNeutral(color)
         val drawable =
             LookDrawable(look, color, dp(context, radius).toFloat(), strokeColor, dp(context, strokeDp), family, Theme.panelAlpha, Theme.isLight)
         // A focus outline in the accent colour stays an accent outline in every look.
         if (strokeColor == ACCENT) drawable.setStroke(dp(context, strokeDp).coerceAtLeast(1), ACCENT)
         return drawable
+    }
+
+    /** An opaque dark grey or black: a surface tone written as a literal, which the glass looks make see-through. */
+    private fun isDarkNeutral(color: Int): Boolean {
+        if (Color.alpha(color) != 255) return false
+        val hsv = FloatArray(3)
+        Color.colorToHSV(color, hsv)
+        return hsv[1] < 0.30f && hsv[2] < 0.26f
     }
 
     /** A rounded fill that ripples when pressed and lights up when focused by a gamepad. */
@@ -141,6 +149,18 @@ internal object Lx {
             val p = dp(context, padDp)
             setPadding(p, p, p, p)
         }
+
+    /** Gives [view] a soft drop shadow shaped like its rounded body (a pill when [cornerDp] is 0). */
+    fun raise(view: View, cornerDp: Float) {
+        view.elevation = dp(view.context, 4f).toFloat()
+        view.outlineProvider =
+            object : android.view.ViewOutlineProvider() {
+                override fun getOutline(v: View, outline: android.graphics.Outline) {
+                    val radius = if (cornerDp <= 0f) v.height / 2f else minOf(v.height / 2f, dp(v.context, cornerDp).toFloat())
+                    outline.setRoundRect(0, 0, v.width, v.height, radius)
+                }
+            }
+    }
 
     /** Clips a view (and its children, such as a banner image) to rounded corners. */
     fun clipRounded(view: View, radiusDp: Float) {
@@ -170,6 +190,7 @@ internal object Lx {
             setTextColor(color)
             typeface = face
             includeFontPadding = false
+            if (Theme.look == Look.SKEUO) setShadowLayer(1.2f, 0f, 1.6f, if (Theme.isLight) 0x66FFFFFF else 0xAA000000.toInt())
             if (maxLines > 0) {
                 this.maxLines = maxLines
                 ellipsize = TextUtils.TruncateAt.END
@@ -224,13 +245,14 @@ internal object Lx {
         compact: Boolean = false,
         onClick: () -> Unit,
     ): LinearLayout {
+        val glossy = Theme.look == Look.AERO || Theme.look == Look.SKEUO
         val (fill, stroke, ink) =
             when (tone) {
                 Tone.PRIMARY -> Triple(ACCENT, 0, ACCENT_TEXT)
                 Tone.SECONDARY -> Triple(SURFACE_HI, 0, TEXT)
                 Tone.GHOST -> Triple(Color.TRANSPARENT, LINE, MUTED)
-                Tone.DANGER -> Triple(alpha(DANGER, 0.14f), 0, DANGER)
-                Tone.INFO -> Triple(Color.TRANSPARENT, alpha(CYAN, 0.6f), CYAN)
+                Tone.DANGER -> if (glossy) Triple(DANGER, 0, Color.WHITE) else Triple(alpha(DANGER, 0.14f), 0, DANGER)
+                Tone.INFO -> if (glossy) Triple(CYAN, 0, 0xFF04212F.toInt()) else Triple(Color.TRANSPARENT, alpha(CYAN, 0.6f), CYAN)
             }
         return hbox(context, Gravity.CENTER).apply {
             minimumHeight = dp(context, if (compact) 36f else 46f)
@@ -245,9 +267,19 @@ internal object Lx {
                     LinearLayout.LayoutParams(dp(context, 18f), dp(context, 18f)).apply { marginEnd = dp(context, 8f) },
                 )
             }
-            addView(text(context, T(label).uppercase(), if (compact) 13f else 15f, ink, CONDENSED, 1).apply { letterSpacing = 0.04f })
+            addView(
+                text(context, T(label).uppercase(), if (compact) 13f else 15f, ink, CONDENSED, 1).apply {
+                    letterSpacing = 0.04f
+                    if (glossy && tone != Tone.GHOST) {
+                        // Light text gets a dark shadow, dark text a light one: it reads as lit or engraved.
+                        val lightInk = Color.red(ink) + Color.green(ink) + Color.blue(ink) > 380
+                        setShadowLayer(3f, 0f, 2f, if (lightInk) 0x99000000.toInt() else 0x99FFFFFF.toInt())
+                    }
+                },
+            )
             setOnClickListener { onClick() }
             contentDescription = T(label)
+            if (glossy && tone != Tone.GHOST) raise(this, if (Theme.look == Look.AERO) 0f else 12f)
         }
     }
 
@@ -267,10 +299,14 @@ internal object Lx {
         onClick: () -> Unit,
     ): ImageView =
         ImageView(context).apply {
+            // In the Aero look a neutral icon button is a round glass bead, not a coloured bubble that would
+            // compete with the main button beside it.
+            val bead = Theme.look == Look.AERO && fill == SURFACE_HI
             setImageDrawable(IconDrawable(icon, tint))
             val p = dp(context, sizeDp * 0.25f)
             setPadding(p, p, p, p)
-            background = pressable(context, fill, 8f)
+            background = pressable(context, fill, if (bead) sizeDp / 2f else 8f)
+            if (bead || Theme.look == Look.SKEUO) raise(this, if (bead) 0f else 10f)
             contentDescription = T(description)
             layoutParams = LinearLayout.LayoutParams(dp(context, sizeDp), dp(context, sizeDp))
             setOnClickListener { onClick() }
@@ -884,26 +920,26 @@ internal class AspectFrame(context: Context, private val ratio: Float) : FrameLa
  * The launcher's backdrop: flat asphalt with three faint slanted stripes in the top corner - the
  * kart's speed lines, quiet enough to sit behind any page. Static, so it costs nothing.
  */
-internal class LauncherBackground(private val context: Context, private val compact: Boolean) : Drawable() {
+internal class LauncherBackground(private val context: Context, private val compact: Boolean) : Drawable(), Drawable.Callback {
+    override fun invalidateDrawable(who: Drawable) = invalidateSelf()
+
+    override fun scheduleDrawable(who: Drawable, what: Runnable, `when`: Long) = scheduleSelf(what, `when`)
+
+    override fun unscheduleDrawable(who: Drawable, what: Runnable) = unscheduleSelf(what)
+
     private val stripe = Paint(Paint.ANTI_ALIAS_FLAG)
     private val fill = Paint()
     private val picture = Paint(Paint.FILTER_BITMAP_FLAG)
     private val path = Path()
     private val placed = android.graphics.RectF()
     private var shader: LinearGradient? = null
+    private var scrim: LinearGradient? = null
+    private var scrimHeight = -1
     private var shaderKey = 0L
 
     override fun draw(canvas: Canvas) {
         val b = bounds
-        val wallpaper = Theme.wallpaper
-        if (wallpaper != null && b.width() > 0 && b.height() > 0) {
-            val art = Wallpapers.get(wallpaper, b.width(), b.height())
-            val cover = max(b.width().toFloat() / art.width, b.height().toFloat() / art.height)
-            val w = art.width * cover
-            val h = art.height * cover
-            placed.set(b.exactCenterX() - w / 2f, b.exactCenterY() - h / 2f, b.exactCenterX() + w / 2f, b.exactCenterY() + h / 2f)
-            canvas.drawBitmap(art, null, placed, picture)
-        } else if (Theme.top == Theme.bottom && Theme.presetId == "pit_lane") {
+        if (Theme.top == Theme.bottom && Theme.presetId == "pit_lane") {
             canvas.drawColor(Lx.BG)
         } else {
             val rad = Math.toRadians(Theme.angle.toDouble())
@@ -920,8 +956,22 @@ internal class LauncherBackground(private val context: Context, private val comp
             fill.shader = shader
             canvas.drawRect(b, fill)
         }
-        val image = Theme.image(context)
-        if (image != null && b.width() > 0 && b.height() > 0) {
+        val kind = BackgroundMedia.kind(context)
+        val allowed = BackgroundMedia.mayAnimate(context)
+        val animated = if (kind == BackgroundMedia.Kind.ANIM && allowed) BackgroundMedia.animation(context) else null
+        val image = if (animated == null) BackgroundMedia.still(context) else null
+        if (animated != null && b.width() > 0 && b.height() > 0) {
+            Theme.place(animated.intrinsicWidth.coerceAtLeast(1), animated.intrinsicHeight.coerceAtLeast(1), b.width().toFloat(), b.height().toFloat(), Theme.framingFor(b.width(), b.height()), placed)
+            animated.callback = this
+            animated.setBounds(placed.left.toInt(), placed.top.toInt(), placed.right.toInt(), placed.bottom.toInt())
+            canvas.save()
+            canvas.clipRect(b)
+            animated.draw(canvas)
+            canvas.clipRect(placed)
+            canvas.drawColor(Lx.alpha(0xFF000000.toInt(), Theme.dim))
+            canvas.restore()
+            if (BackgroundMedia.resumed && !animated.isRunning) animated.start()
+        } else if (image != null && b.width() > 0 && b.height() > 0) {
             Theme.place(image.width, image.height, b.width().toFloat(), b.height().toFloat(), Theme.framingFor(b.width(), b.height()), placed)
             canvas.save()
             canvas.clipRect(b)
