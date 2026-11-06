@@ -70,7 +70,7 @@ internal class ModsPage(host: ModePickerActivity) : Page(host) {
     override fun build(): View {
         val root = Lx.vbox(context)
 
-        tabs = TabStrip(context, listOf("Installed", "Browse GameBanana"), fill = compact) { showTab(it == 1) }
+        tabs = TabStrip(context, listOf(T("Installed"), T("Browse GameBanana")), fill = compact) { showTab(it == 1) }
         root.addView(tabs.view, Lx.lp(context).apply { marginStart = if (compact) 0 else gutter - dp(10f) })
         root.addView(Lx.divider(context))
 

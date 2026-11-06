@@ -58,7 +58,7 @@ internal class SettingsPage(host: ModePickerActivity) : Page(host) {
         val note =
             Lx.caption(
                 context,
-                T("Online pages use Retro WFC's and GameBanana's public APIs, the same ones the Wheel Wizard tool uses on PC. No Nintendo code or game data is included or downloaded."),
+                T("Online pages use Retro WFC's and GameBanana's public APIs, the same ones the Wheel Wizard tool uses on PC. No Nintendo code or game data is included. Mii pictures come from Nintendo's public Mii service only if you turn them on, and the mods are third-party files this project doesn't host."),
                 Lx.FAINT,
                 5,
             ).apply { setLineSpacing(0f, 1.2f) }

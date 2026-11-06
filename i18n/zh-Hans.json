@@ -880,6 +880,23 @@
   "Checkerboard": "棋盘格",
   "Let it drift": "让它缓缓移动",
   "Off, or in battery saver, the squares stand still": "关闭时或省电模式下方块保持静止",
-  "The drifting dark squares behind everything": "在一切后面缓缓移动的深色方块"
+  "The drifting dark squares behind everything": "在一切后面缓缓移动的深色方块",
+  "Keep off": "保持关闭",
+  "Miis can be drawn by Nintendo's public Mii renderer. Turning this on sends each Mii's look (face, hair and colours, not names or friend codes) to studio.mii.nintendo.com. Off, simple pictures are drawn on your phone. You can change this in Settings.": "Mii可以由Nintendo的公开Mii渲染服务绘制。开启后，每个Mii的外观（脸、头发和颜色，不含名字和好友码）会发送到studio.mii.nintendo.com。关闭时，会在你的手机上绘制简单的图片。你可以在设置中更改。",
+  "Online pages use Retro WFC's and GameBanana's public APIs, the same ones the Wheel Wizard tool uses on PC. No Nintendo code or game data is included. Mii pictures come from Nintendo's public Mii service only if you turn them on, and the mods are third-party files this project doesn't host.": "在线页面使用Retro WFC和GameBanana的公开API，与PC上的Wheel Wizard工具所用相同。不包含任天堂的代码或游戏数据。Mii图片仅在你开启后才来自Nintendo的公开Mii服务，模组则是本项目不托管的第三方文件。",
+  "Show Mii pictures?": "显示Mii图片？",
+  "Turn on": "开启",
+  "Body": "身体",
+  "Eyebrows": "眉毛",
+  "Eyes": "眼睛",
+  "Face": "脸型",
+  "Facial hair": "胡须",
+  "Glasses": "眼镜",
+  "Hair": "头发",
+  "Info": "信息",
+  "Licenses": "许可证",
+  "Miis": "Mii",
+  "Mouth": "嘴巴",
+  "Nose": "鼻子"
  }
 }

@@ -20,6 +20,7 @@ import com.driftdroid.android.mii.MiiImages
 import com.driftdroid.android.mii.MiiStudio
 import com.driftdroid.android.profile.SaveFile
 import com.driftdroid.android.ui.DriftSheet
+import com.driftdroid.android.ui.DriftUi
 import com.driftdroid.android.ui.Icon
 import com.driftdroid.android.ui.Lx
 import com.driftdroid.android.ui.TabStrip
@@ -47,7 +48,7 @@ internal class ProfilePage(host: ModePickerActivity) : Page(host) {
 
     override fun build(): View {
         val root = Lx.vbox(context)
-        tabs = TabStrip(context, listOf("Licenses", "Miis"), fill = compact) { showTab(it == 1) }
+        tabs = TabStrip(context, listOf(T("Licenses"), T("Miis")), fill = compact) { showTab(it == 1) }
         root.addView(tabs.view, Lx.lp(context).apply { marginStart = if (compact) 0 else gutter - dp(10f) })
         root.addView(Lx.divider(context))
         // The tab's own tools: which game's licenses, or what to do with Miis.
@@ -80,7 +81,27 @@ internal class ProfilePage(host: ModePickerActivity) : Page(host) {
         return root
     }
 
-    override fun onShow() = reload()
+    override fun onShow() {
+        reload()
+        askAboutOnlinePictures()
+    }
+
+    /** Once: Mii pictures come from Nintendo's online renderer, so they stay off until the player agrees. */
+    private fun askAboutOnlinePictures() {
+        if (MiiImages.asked(context)) return
+        MiiImages.markAsked(context)
+        val sheet = DriftSheet(host, T("Show Mii pictures?"))
+        sheet.note(
+            T("Miis can be drawn by Nintendo's public Mii renderer. Turning this on sends each Mii's look (face, hair and colours, not names or friend codes) to studio.mii.nintendo.com. Off, simple pictures are drawn on your phone. You can change this in Settings."),
+        )
+        sheet.button(T("Turn on"), DriftUi.Style.PRIMARY) {
+            MiiImages.setOnlineEnabled(context, true)
+            sheet.dismiss()
+            host.broadcast(Data.MIIS)
+        }
+        sheet.button(T("Keep off"), DriftUi.Style.SECONDARY) { sheet.dismiss() }
+        sheet.show()
+    }
 
     override fun onDataChanged(what: Data) {
         if (what == Data.MIIS || what == Data.SAVES) reload()

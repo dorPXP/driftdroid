@@ -880,6 +880,23 @@
   "Checkerboard": "チェッカーボード",
   "Let it drift": "ゆっくり動かす",
   "Off, or in battery saver, the squares stand still": "オフ、または省電力モードでは四角が止まります",
-  "The drifting dark squares behind everything": "すべての後ろをゆっくり流れる暗い四角"
+  "The drifting dark squares behind everything": "すべての後ろをゆっくり流れる暗い四角",
+  "Keep off": "オフのままにする",
+  "Miis can be drawn by Nintendo's public Mii renderer. Turning this on sends each Mii's look (face, hair and colours, not names or friend codes) to studio.mii.nintendo.com. Off, simple pictures are drawn on your phone. You can change this in Settings.": "MiiはNintendoの公開Miiレンダラーで描画できます。オンにすると、各Miiの見た目(顔、髪、色。名前やフレンドコードは含みません)がstudio.mii.nintendo.comに送信されます。オフの間は、簡易的な画像がスマホ上で描画されます。設定でいつでも変更できます。",
+  "Online pages use Retro WFC's and GameBanana's public APIs, the same ones the Wheel Wizard tool uses on PC. No Nintendo code or game data is included. Mii pictures come from Nintendo's public Mii service only if you turn them on, and the mods are third-party files this project doesn't host.": "オンラインのページはRetro WFCとGameBananaの公開APIを使っています(PC版Wheel Wizardと同じものです)。任天堂のコードやゲームデータは含まれていません。Miiの画像は、オンにした場合のみNintendoの公開Miiサービスから取得され、Modはこのプロジェクトがホストしていない第三者のファイルです。",
+  "Show Mii pictures?": "Miiの画像を表示しますか？",
+  "Turn on": "オンにする",
+  "Body": "体型",
+  "Eyebrows": "まゆ毛",
+  "Eyes": "目",
+  "Face": "顔",
+  "Facial hair": "ひげ",
+  "Glasses": "メガネ",
+  "Hair": "髪型",
+  "Info": "情報",
+  "Licenses": "ライセンス",
+  "Miis": "Mii",
+  "Mouth": "口",
+  "Nose": "鼻"
  }
 }

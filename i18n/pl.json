@@ -880,6 +880,23 @@
   "Checkerboard": "Szachownica",
   "Let it drift": "Pozwól mu dryfować",
   "Off, or in battery saver, the squares stand still": "Wyłączone lub w trybie oszczędzania baterii kwadraty stoją w miejscu",
-  "The drifting dark squares behind everything": "Ciemne kwadraty powoli dryfujące za wszystkim"
+  "The drifting dark squares behind everything": "Ciemne kwadraty powoli dryfujące za wszystkim",
+  "Keep off": "Zostaw wył.",
+  "Miis can be drawn by Nintendo's public Mii renderer. Turning this on sends each Mii's look (face, hair and colours, not names or friend codes) to studio.mii.nintendo.com. Off, simple pictures are drawn on your phone. You can change this in Settings.": "Mii mogą być rysowane przez publiczny renderer Mii firmy Nintendo. Włączenie tego wysyła wygląd każdego Mii (twarz, włosy i kolory, bez nazw i kodów znajomych) do studio.mii.nintendo.com. Po wyłączeniu proste obrazki rysowane są na telefonie. Możesz to zmienić w Ustawieniach.",
+  "Online pages use Retro WFC's and GameBanana's public APIs, the same ones the Wheel Wizard tool uses on PC. No Nintendo code or game data is included. Mii pictures come from Nintendo's public Mii service only if you turn them on, and the mods are third-party files this project doesn't host.": "Strony online korzystają z publicznych API Retro WFC i GameBanana, tych samych co narzędzie Wheel Wizard na PC. Nie zawierają kodu Nintendo ani danych gry. Obrazy Mii pochodzą z publicznej usługi Mii firmy Nintendo tylko po włączeniu, a mody to pliki osób trzecich, których ten projekt nie hostuje.",
+  "Show Mii pictures?": "Pokazywać obrazy Mii?",
+  "Turn on": "Włącz",
+  "Body": "Sylwetka",
+  "Eyebrows": "Brwi",
+  "Eyes": "Oczy",
+  "Face": "Twarz",
+  "Facial hair": "Zarost",
+  "Glasses": "Okulary",
+  "Hair": "Włosy",
+  "Info": "Info",
+  "Licenses": "Licencje",
+  "Miis": "Mii",
+  "Mouth": "Usta",
+  "Nose": "Nos"
  }
 }

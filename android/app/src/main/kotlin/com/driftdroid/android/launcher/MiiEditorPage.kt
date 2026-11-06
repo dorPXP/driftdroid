@@ -73,17 +73,17 @@ internal class MiiEditorPage(
 
     private val tabs: List<Pair<String, () -> Unit>> =
         listOf(
-            "Info" to ::infoTab,
-            "Body" to ::bodyTab,
-            "Face" to ::faceTab,
-            "Hair" to ::hairTab,
-            "Eyebrows" to ::browTab,
-            "Eyes" to ::eyeTab,
-            "Nose" to ::noseTab,
-            "Mouth" to ::mouthTab,
-            "Glasses" to ::glassesTab,
-            "Facial hair" to ::facialHairTab,
-            "Mole" to ::moleTab,
+            T("Info") to ::infoTab,
+            T("Body") to ::bodyTab,
+            T("Face") to ::faceTab,
+            T("Hair") to ::hairTab,
+            T("Eyebrows") to ::browTab,
+            T("Eyes") to ::eyeTab,
+            T("Nose") to ::noseTab,
+            T("Mouth") to ::mouthTab,
+            T("Glasses") to ::glassesTab,
+            T("Facial hair") to ::facialHairTab,
+            T("Mole") to ::moleTab,
         )
 
     override fun actions(): List<View> = listOf(Lx.button(context, "Save", Lx.Tone.PRIMARY, Icon.CHECK, compact = true) { save() })

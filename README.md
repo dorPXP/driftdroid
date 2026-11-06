@@ -107,8 +107,9 @@ races and wins, friends), and an editor for every part of every Mii where each s
 is picked from pictures of your own Mii wearing it. Make, duplicate and delete Miis,
 and import or export single Miis (`.rcd`) or the whole Mii file. Every change is
 checked, written with the correct checksum, and the previous file is kept next to it
-as a `.bak`. The pictures come from Nintendo's online Mii renderer; **Settings > Mii
-pictures** turns that off and draws simple offline ones instead.
+as a `.bak`. The pictures can come from Nintendo's online Mii renderer. It is off until you say yes (the
+app asks once, and **Settings > Mii pictures** changes it); off, simple pictures are drawn on
+your phone.
 
 **Picture settings.** Brightness, contrast and saturation in the Display
 settings.
@@ -435,6 +436,12 @@ position-tracked).
 
 ## Credits
 
+- **Edgar ([edgHD](https://github.com/edgHD))** - the launcher: Home, Mods, Rooms, Ranks, Profile and
+  the Mii editor, from his DriftDroid Aura fork (GPL-3.0), contributed back as a pull request.
+- **Tomas ([TomasUribe](https://github.com/TomasUribe))** - Switch work: the sideways single
+  Joy-Con support, the Wii Menu banner while the game starts, and the build patches (sqlite3,
+  abseil for Dawn, GCC 15 link fixes).
+
 - **[patchzyy/WiiCompiled](https://github.com/patchzyy/Wiicompiled)** - the static recompilation
   project this Android port is built on top of.
 - **[aurora](https://github.com/encounter/aurora)** by Luke Street and contributors - the GX
@@ -488,5 +495,8 @@ General Public License for more details.
 Any mkwii distribution making use of WiiCompiled must be licensed under GPL v3.0.
 
 Not affiliated with, endorsed by, or associated with Nintendo. Mario Kart Wii is a trademark of
-Nintendo. No Nintendo intellectual property is contained in, distributed with, or obtainable
-through this project.
+Nintendo. No Nintendo intellectual property is contained in or distributed with this project. Two
+optional features reach outside it: if you turn on online Mii pictures, the Mii images are rendered by
+Nintendo's public Mii Studio service (only a Mii's looks are sent, never names or friend codes), and
+the Mods page lists third-party files hosted by GameBanana. This project does not host or provide
+either.

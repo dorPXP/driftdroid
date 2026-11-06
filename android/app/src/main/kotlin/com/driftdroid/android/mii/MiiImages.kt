@@ -20,8 +20,20 @@ internal object MiiImages {
     private const val PREFS = "launcher"
     private const val KEY_ONLINE = "mii_pictures_online"
 
+    private const val KEY_ASKED = "mii_pictures_asked"
+
+    /** Off until the player turns it on: the pictures are drawn by Nintendo's online renderer. */
     fun onlineEnabled(context: Context): Boolean =
-        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getBoolean(KEY_ONLINE, true)
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getBoolean(KEY_ONLINE, false)
+
+    /** Whether the one-time question about online pictures has been answered. */
+    fun asked(context: Context): Boolean =
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getBoolean(KEY_ASKED, false) ||
+            context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).contains(KEY_ONLINE)
+
+    fun markAsked(context: Context) {
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putBoolean(KEY_ASKED, true).apply()
+    }
 
     fun setOnlineEnabled(context: Context, enabled: Boolean) {
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putBoolean(KEY_ONLINE, enabled).apply()

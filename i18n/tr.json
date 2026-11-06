@@ -880,6 +880,23 @@
   "Checkerboard": "Dama tahtası",
   "Let it drift": "Kaymasına izin ver",
   "Off, or in battery saver, the squares stand still": "Kapalıyken veya pil tasarrufunda kareler durur",
-  "The drifting dark squares behind everything": "Her şeyin arkasında yavaşça kayan koyu kareler"
+  "The drifting dark squares behind everything": "Her şeyin arkasında yavaşça kayan koyu kareler",
+  "Keep off": "Kapalı kalsın",
+  "Miis can be drawn by Nintendo's public Mii renderer. Turning this on sends each Mii's look (face, hair and colours, not names or friend codes) to studio.mii.nintendo.com. Off, simple pictures are drawn on your phone. You can change this in Settings.": "Mii'ler Nintendo'nun herkese açık Mii oluşturucusuyla çizilebilir. Açarsan her Mii'nin görünümü (yüz, saç ve renkler; ad veya arkadaş kodu değil) studio.mii.nintendo.com adresine gönderilir. Kapalıyken basit resimler telefonunda çizilir. Bunu Ayarlar'dan değiştirebilirsin.",
+  "Online pages use Retro WFC's and GameBanana's public APIs, the same ones the Wheel Wizard tool uses on PC. No Nintendo code or game data is included. Mii pictures come from Nintendo's public Mii service only if you turn them on, and the mods are third-party files this project doesn't host.": "Çevrimiçi sayfalar, PC'deki Wheel Wizard aracıyla aynı olan Retro WFC ve GameBanana'nın herkese açık API'lerini kullanır. Nintendo kodu veya oyun verisi dahil değildir. Mii resimleri yalnızca açarsan Nintendo'nun herkese açık Mii hizmetinden gelir ve modlar bu projenin barındırmadığı üçüncü taraf dosyalarıdır.",
+  "Show Mii pictures?": "Mii resimleri gösterilsin mi?",
+  "Turn on": "Aç",
+  "Body": "Vücut",
+  "Eyebrows": "Kaşlar",
+  "Eyes": "Gözler",
+  "Face": "Yüz",
+  "Facial hair": "Yüz tüyü",
+  "Glasses": "Gözlük",
+  "Hair": "Saç",
+  "Info": "Bilgi",
+  "Licenses": "Lisanslar",
+  "Miis": "Mii'ler",
+  "Mouth": "Ağız",
+  "Nose": "Burun"
  }
 }

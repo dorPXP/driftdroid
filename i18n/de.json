@@ -880,6 +880,23 @@
   "Checkerboard": "Schachbrett",
   "Let it drift": "Driften lassen",
   "Off, or in battery saver, the squares stand still": "Aus, oder im Energiesparmodus, stehen die Quadrate still",
-  "The drifting dark squares behind everything": "Die dunklen Quadrate, die langsam hinter allem driften"
+  "The drifting dark squares behind everything": "Die dunklen Quadrate, die langsam hinter allem driften",
+  "Keep off": "Aus lassen",
+  "Miis can be drawn by Nintendo's public Mii renderer. Turning this on sends each Mii's look (face, hair and colours, not names or friend codes) to studio.mii.nintendo.com. Off, simple pictures are drawn on your phone. You can change this in Settings.": "Miis können vom öffentlichen Mii-Renderer von Nintendo gezeichnet werden. Wenn du das einschaltest, wird das Aussehen jedes Miis (Gesicht, Haare und Farben, keine Namen oder Freundescodes) an studio.mii.nintendo.com gesendet. Ausgeschaltet werden einfache Bilder auf deinem Handy gezeichnet. Du kannst das in den Einstellungen ändern.",
+  "Online pages use Retro WFC's and GameBanana's public APIs, the same ones the Wheel Wizard tool uses on PC. No Nintendo code or game data is included. Mii pictures come from Nintendo's public Mii service only if you turn them on, and the mods are third-party files this project doesn't host.": "Die Online-Seiten nutzen die öffentlichen APIs von Retro WFC und GameBanana, dieselben wie das Wheel-Wizard-Tool am PC. Es ist kein Nintendo-Code und keine Spieldaten enthalten. Mii-Bilder kommen nur vom öffentlichen Mii-Dienst von Nintendo, wenn du sie einschaltest, und die Mods sind Dateien von Dritten, die dieses Projekt nicht hostet.",
+  "Show Mii pictures?": "Mii-Bilder anzeigen?",
+  "Turn on": "Einschalten",
+  "Body": "Körper",
+  "Eyebrows": "Augenbrauen",
+  "Eyes": "Augen",
+  "Face": "Gesicht",
+  "Facial hair": "Gesichtsbehaarung",
+  "Glasses": "Brille",
+  "Hair": "Haare",
+  "Info": "Info",
+  "Licenses": "Lizenzen",
+  "Miis": "Miis",
+  "Mouth": "Mund",
+  "Nose": "Nase"
  }
 }

@@ -880,6 +880,23 @@
   "Checkerboard": "체크무늬",
   "Let it drift": "천천히 움직이기",
   "Off, or in battery saver, the squares stand still": "끄거나 절전 모드에서는 사각형이 멈춥니다",
-  "The drifting dark squares behind everything": "모든 것 뒤에서 천천히 움직이는 어두운 사각형"
+  "The drifting dark squares behind everything": "모든 것 뒤에서 천천히 움직이는 어두운 사각형",
+  "Keep off": "끈 상태 유지",
+  "Miis can be drawn by Nintendo's public Mii renderer. Turning this on sends each Mii's look (face, hair and colours, not names or friend codes) to studio.mii.nintendo.com. Off, simple pictures are drawn on your phone. You can change this in Settings.": "Mii는 Nintendo의 공개 Mii 렌더러로 그릴 수 있습니다. 켜면 각 Mii의 모습(얼굴, 머리, 색상이며 이름이나 친구 코드는 아님)이 studio.mii.nintendo.com으로 전송됩니다. 끄면 간단한 그림이 휴대폰에서 그려집니다. 설정에서 언제든 바꿀 수 있습니다.",
+  "Online pages use Retro WFC's and GameBanana's public APIs, the same ones the Wheel Wizard tool uses on PC. No Nintendo code or game data is included. Mii pictures come from Nintendo's public Mii service only if you turn them on, and the mods are third-party files this project doesn't host.": "온라인 페이지는 PC용 Wheel Wizard 도구와 같은 Retro WFC와 GameBanana의 공개 API를 사용합니다. Nintendo의 코드나 게임 데이터는 포함되어 있지 않습니다. Mii 그림은 켠 경우에만 Nintendo의 공개 Mii 서비스에서 가져오며, 모드는 이 프로젝트가 호스팅하지 않는 제3자 파일입니다.",
+  "Show Mii pictures?": "Mii 그림을 표시할까요?",
+  "Turn on": "켜기",
+  "Body": "체형",
+  "Eyebrows": "눈썹",
+  "Eyes": "눈",
+  "Face": "얼굴",
+  "Facial hair": "수염",
+  "Glasses": "안경",
+  "Hair": "머리",
+  "Info": "정보",
+  "Licenses": "라이선스",
+  "Miis": "Mii",
+  "Mouth": "입",
+  "Nose": "코"
  }
 }
